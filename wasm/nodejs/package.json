@@ -8,6 +8,7 @@
     "dependencies": {
         "@types/node": "^20.10.3",
         "ts-node": "^10.9.1",
+        "tsc": "^2.0.4",
         "websocket": "1.0.34"
     }
 }
