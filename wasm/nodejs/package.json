@@ -1,7 +1,13 @@
 {
-    "name" : "kaspa-wasm-nodejs",
-    "version" : "1.0.0",
+    "name": "kaspa-wasm-nodejs",
+    "version": "1.0.0",
+    "scripts": {
+        "build": "tsc && cp ./kaspa/kaspa_wasm_bg.wasm ./dist/kaspa/kaspa_wasm_bg.wasm",
+        "ts-node": "ts-node"
+    },
     "dependencies": {
-        "websocket" : "1.0.34"
+        "@types/node": "^20.10.3",
+        "ts-node": "^10.9.1",
+        "websocket": "1.0.34"
     }
 }
