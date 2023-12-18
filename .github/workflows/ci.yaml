@@ -10,6 +10,9 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v3
 
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.3
+
       - name: Install Protoc
         uses: arduino/setup-protoc@v1
         with:
@@ -82,6 +85,10 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v3
 
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.3
+
+
       - name: Fix CRLF on Windows
         if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
@@ -112,6 +119,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run cargo build with devnet-prealloc feature
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
         run: cargo build --release --features devnet-prealloc --workspace --all --tests --benches
 
       - name: Run cargo test regular features
@@ -181,6 +191,9 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
+
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.3
 
       - name: Install Protoc
         uses: arduino/setup-protoc@v1
