@@ -92,6 +92,7 @@ fn get_user_approval_or_exit(message: &str, approve: bool) {
         return;
     }
     println!("{}", message);
+    println!("Some useless change but causes a rebuild");
     let mut input = String::new();
     match std::io::stdin().read_line(&mut input) {
         Ok(_) => {
