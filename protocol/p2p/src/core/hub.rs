@@ -95,17 +95,15 @@ impl Hub {
     {
         let mut weighted_peers: Vec<(_, i64)> = {
             let lock = self.peers.read();
-            let values = lock.values().cloned().clone();
+            let values = lock.values().cloned();
             let samples = rand::thread_rng().sample_iter(Standard);
             values.zip(samples).map(|(v, s): (_, u32)| if !v.is_outbound() { (v, -(s as i64)) } else { (v, s as i64) }).collect()
         };
         weighted_peers.sort_unstable_by_key(|(_, w)| *w);
         let inbound = weighted_peers.iter().take_while(|(_, weight)| weight < &0);
-        let outbound = weighted_peers.iter().rev().take_while(|(_, weight)| weight > &0);
-        let outbound_res = outbound.take((num_peers + 1) / 2).map(|(r, _)| r);
-        let inbound_res = inbound.take(num_peers).map(|(r, _)| r);
-
-        let res = outbound_res.chain(inbound_res).take(num_peers);
+        let likely_outbound = weighted_peers.iter().rev();
+        let inbound_half = inbound.take((num_peers + 1) / 2);
+        let res = inbound_half.chain(likely_outbound).take(num_peers.min(weighted_peers.len())).map(|(r, _)| r);
         stream::iter(res).for_each_concurrent(None, |r| f(r.clone())).await;
     }
 
