@@ -1,14 +1,16 @@
 use crate::{common::ProtocolError, pb::KaspadMessage, ConnectionInitializer, Peer, Router};
+use futures::{stream, StreamExt};
 use kaspa_core::{debug, info, warn};
 use parking_lot::RwLock;
+use rand::{distributions::Standard, Rng};
 use std::{
     collections::{hash_map::Entry::Occupied, HashMap},
+    future::Future,
     sync::Arc,
 };
 use tokio::sync::mpsc::Receiver as MpscReceiver;
 
 use super::peer::PeerKey;
-use rand::seq::SliceRandom;
 
 #[derive(Debug)]
 pub(crate) enum HubEvent {
@@ -85,28 +87,26 @@ impl Hub {
         }
     }
 
-    /// Selects a random subset of peers, trying to select at least half for outbound when possible
-    fn select_some_peers(&self, num_peers: usize) -> Vec<Arc<Router>> {
-        let (outbound_peers, inbound_peers): (Vec<_>, Vec<_>) =
-            self.peers.read().values().cloned().partition(|peer| peer.is_outbound());
+    /// Selects a random subset of peers, trying to select at least half for outbound when possible and apply callback `f`
+    async fn select_some_peers_applying_cb<F, Fut>(&self, num_peers: usize, f: F)
+    where
+        F: Fn(Arc<Router>) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let mut weighted_peers: Vec<(_, i64)> = {
+            let lock = self.peers.read();
+            let values = lock.values().cloned().clone();
+            let samples = rand::thread_rng().sample_iter(Standard);
+            values.zip(samples).map(|(v, s): (_, u32)| if !v.is_outbound() { (v, -(s as i64)) } else { (v, s as i64) }).collect()
+        };
+        weighted_peers.sort_unstable_by_key(|(_, w)| *w);
+        let inbound = weighted_peers.iter().take_while(|(_, weight)| weight < &0);
+        let outbound = weighted_peers.iter().rev().take_while(|(_, weight)| weight > &0);
+        let outbound_res = outbound.take((num_peers + 1) / 2).map(|(r, _)| r);
+        let inbound_res = inbound.take(num_peers).map(|(r, _)| r);
 
-        let mut outbound_count = ((num_peers + 1) / 2).min(outbound_peers.len());
-
-        // If there won't be enough inbound peers to meet the num_peers after we've selected only half for outbound,
-        // try to require more outbound peers for the difference
-        if inbound_peers.len() + outbound_count < num_peers {
-            outbound_count = (num_peers - inbound_peers.len()).min(outbound_peers.len());
-        }
-
-        let inbound_count = (num_peers - outbound_count).min(inbound_peers.len());
-
-        let thread_rng = &mut rand::thread_rng();
-
-        outbound_peers
-            .choose_multiple(thread_rng, outbound_count) // Randomly select about half from outbound
-            .chain(inbound_peers.choose_multiple(thread_rng, inbound_count)) // Then select the rest from inbound
-            .cloned()
-            .collect()
+        let res = outbound_res.chain(inbound_res).take(num_peers);
+        stream::iter(res).for_each_concurrent(None, |r| f(r.clone())).await;
     }
 
     /// Send a message to a specific peer
@@ -131,12 +131,11 @@ impl Hub {
     /// Broadcast a message to only some number of peers
     pub async fn broadcast_to_some_peers(&self, msg: KaspadMessage, num_peers: usize) {
         assert!(num_peers > 0);
-
-        let peers = self.select_some_peers(num_peers);
-
-        for router in peers {
-            let _ = router.enqueue(msg.clone()).await;
-        }
+        self.select_some_peers_applying_cb(num_peers, move |r| {
+            let msg = msg.clone();
+            async move { _ = r.enqueue(msg).await }
+        })
+        .await
     }
 
     /// Broadcast a vector of messages to all peers
