@@ -50,6 +50,7 @@ members = [
     "components/connectionmanager",
     "components/consensusmanager",
     "database",
+    "database/rocknroll",
     "crypto/txscript",
     "crypto/txscript/errors",
     "testing/integration",
@@ -95,6 +96,7 @@ kaspa-consensusmanager = { version = "1.0.1", path = "components/consensusmanage
 kaspa-core = { version = "1.0.1", path = "core" }
 kaspa-daemon = { version = "1.0.1", path = "daemon" }
 kaspa-database = { version = "1.0.1", path = "database" }
+kaspa-rocknroll = { version = "1.0.1", path = "database/rocknroll" }
 kaspa-grpc-client = { version = "1.0.1", path = "rpc/grpc/client" }
 kaspa-grpc-core = { version = "1.0.1", path = "rpc/grpc/core" }
 kaspa-grpc-server = { version = "1.0.1", path = "rpc/grpc/server" }

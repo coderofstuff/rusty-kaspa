@@ -4979,6 +4979,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rocknroll"
+version = "1.0.1"
+dependencies = [
+ "async-channel 2.3.1",
+ "clap 4.5.19",
+ "faster-hex",
+ "itertools 0.13.0",
+ "kaspa-addresses",
+ "kaspa-consensus",
+ "kaspa-consensus-core",
+ "kaspa-core",
+ "kaspa-database",
+ "kaspa-grpc-client",
+ "kaspa-rpc-core",
+ "kaspa-txscript",
+ "kaspa-utils",
+ "kaspad",
+ "log",
+ "parking_lot",
+ "rayon",
+ "secp256k1",
+ "tokio",
+]
+
+[[package]]
 name = "rocksdb"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
