@@ -89,7 +89,7 @@ impl Server {
     }
 
     pub async fn connect(&self, peer: &SocketAddr, messenger: Arc<Messenger>) -> Result<Connection> {
-        log_info!("WebSocket connected: {}", peer);
+        // log_trace!("WebSocket connected: {}", peer);
         let id = self.inner.next_connection_id.fetch_add(1, Ordering::SeqCst);
 
         let grpc_client = if let Some(grpc_proxy_address) = &self.inner.options.grpc_proxy_address {
@@ -110,8 +110,6 @@ impl Server {
             // log_trace!("Creating proxy relay...");
             Some(Arc::new(grpc_client))
         } else {
-            // Provider::RpcCore
-
             None
         };
         let connection = Connection::new(id, peer, messenger, grpc_client);
@@ -125,11 +123,11 @@ impl Server {
     }
 
     pub async fn disconnect(&self, connection: Connection) {
-        log_info!("WebSocket disconnected: {}", connection.peer());
+        // log_info!("WebSocket disconnected: {}", connection.peer());
         if let Some(rpc_core) = &self.inner.rpc_core {
             if let Some(listener_id) = connection.listener_id() {
                 rpc_core.wrpc_notifier.unregister_listener(listener_id).unwrap_or_else(|err| {
-                    format!("WebSocket {} (disconnected) error unregistering the notification listener: {err}", connection.peer());
+                    log_error!("WebSocket {} (disconnected) error unregistering the notification listener: {err}", connection.peer());
                 });
             }
         } else {

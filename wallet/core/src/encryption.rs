@@ -1,3 +1,7 @@
+//!
+//! Wallet data encryption module.
+//!
+
 use crate::imports::*;
 use crate::result::Result;
 use crate::secret::Secret;
@@ -7,13 +11,19 @@ use chacha20poly1305::{
     aead::{AeadCore, AeadInPlace, KeyInit, OsRng},
     Key, XChaCha20Poly1305,
 };
-use faster_hex::{hex_decode, hex_string};
-use serde::{de::DeserializeOwned, Serializer};
 use sha2::{Digest, Sha256};
 use std::ops::{Deref, DerefMut};
 use zeroize::Zeroize;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Encryption algorithms supported by the Wallet framework.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub enum EncryptionKind {
+    XChaCha20Poly1305,
+}
+
+/// Abstract data container that can contain either plain or encrypted data and
+/// transform the data between the two states.
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[serde(tag = "encryptable", content = "payload")]
 pub enum Encryptable<T> {
     #[serde(rename = "plain")]
@@ -36,7 +46,7 @@ where
 
 impl<T> Encryptable<T>
 where
-    T: Clone + Serialize + DeserializeOwned + Zeroize,
+    T: Clone + Zeroize + BorshDeserialize + BorshSerialize,
 {
     pub fn is_encrypted(&self) -> bool {
         !matches!(self, Self::Plain(_))
@@ -49,22 +59,24 @@ where
                 if let Some(secret) = secret {
                     Ok(v.decrypt(secret)?)
                 } else {
-                    Err("decrypted() secret is 'None' when the data is encryted!".into())
+                    Err("Decryption secret is 'None' when the data is encrypted!".into())
                 }
             }
         }
     }
 
-    pub fn encrypt(&self, secret: &Secret) -> Result<Encrypted> {
+    pub fn encrypt(&self, secret: &Secret, encryption_kind: EncryptionKind) -> Result<Encrypted> {
         match self {
-            Self::Plain(v) => Ok(Decrypted::new(v.clone()).encrypt(secret)?),
-            Self::XChaCha20Poly1305(v) => Ok(v.clone()),
+            Self::Plain(v) => Ok(Decrypted::new(v.clone()).encrypt(secret, encryption_kind)?),
+            Self::XChaCha20Poly1305(v) => match encryption_kind {
+                EncryptionKind::XChaCha20Poly1305 => Ok(v.clone()),
+            },
         }
     }
 
-    pub fn into_encrypted(&self, secret: &Secret) -> Result<Self> {
+    pub fn into_encrypted(&self, secret: &Secret, encryption_kind: EncryptionKind) -> Result<Self> {
         match self {
-            Self::Plain(v) => Ok(Self::XChaCha20Poly1305(Decrypted::new(v.clone()).encrypt(secret)?)),
+            Self::Plain(v) => Ok(Self::XChaCha20Poly1305(Decrypted::new(v.clone()).encrypt(secret, encryption_kind)?)),
             Self::XChaCha20Poly1305(v) => Ok(Self::XChaCha20Poly1305(v.clone())),
         }
     }
@@ -72,7 +84,7 @@ where
     pub fn into_decrypted(self, secret: &Secret) -> Result<Self> {
         match self {
             Self::Plain(v) => Ok(Self::Plain(v)),
-            Self::XChaCha20Poly1305(v) => Ok(Self::Plain(v.decrypt::<T>(secret)?.clone())),
+            Self::XChaCha20Poly1305(v) => Ok(Self::Plain(v.decrypt::<T>(secret)?.unwrap())),
         }
     }
 }
@@ -83,28 +95,44 @@ impl<T> From<T> for Encryptable<T> {
     }
 }
 
-pub struct Decrypted<T>(pub(crate) T);
+/// Abstract decrypted data container.
+#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct Decrypted<T>(pub(crate) T)
+where
+    T: BorshSerialize + BorshDeserialize;
 
-impl<T> AsRef<T> for Decrypted<T> {
+impl<T> AsRef<T> for Decrypted<T>
+where
+    T: BorshSerialize + BorshDeserialize,
+{
     fn as_ref(&self) -> &T {
         &self.0
     }
 }
 
-impl<T> Deref for Decrypted<T> {
+impl<T> Deref for Decrypted<T>
+where
+    T: BorshSerialize + BorshDeserialize,
+{
     type Target = T;
     fn deref(&self) -> &T {
         &self.0
     }
 }
 
-impl<T> DerefMut for Decrypted<T> {
+impl<T> DerefMut for Decrypted<T>
+where
+    T: BorshSerialize + BorshDeserialize,
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<T> AsMut<T> for Decrypted<T> {
+impl<T> AsMut<T> for Decrypted<T>
+where
+    T: BorshSerialize + BorshDeserialize,
+{
     fn as_mut(&mut self) -> &mut T {
         &mut self.0
     }
@@ -112,21 +140,29 @@ impl<T> AsMut<T> for Decrypted<T> {
 
 impl<T> Decrypted<T>
 where
-    T: Serialize,
+    T: BorshSerialize + BorshDeserialize,
 {
     pub fn new(value: T) -> Self {
         Self(value)
     }
 
-    pub fn encrypt(&self, secret: &Secret) -> Result<Encrypted> {
-        let json = serde_json::to_string(&self.0)?;
-        let encrypted = encrypt_xchacha20poly1305(json.as_bytes(), secret)?;
-        Ok(Encrypted::new(encrypted))
+    pub fn encrypt(&self, secret: &Secret, encryption_kind: EncryptionKind) -> Result<Encrypted> {
+        let bytes = self.0.try_to_vec()?;
+        let encrypted = match encryption_kind {
+            EncryptionKind::XChaCha20Poly1305 => encrypt_xchacha20poly1305(bytes.as_slice(), secret)?,
+        };
+        Ok(Encrypted::new(encryption_kind, encrypted))
+    }
+
+    pub fn unwrap(self) -> T {
+        self.0
     }
 }
 
-#[derive(Debug, Clone, Default)]
+/// Encrypted data container (wraps an encrypted payload)
+#[derive(Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Encrypted {
+    encryption_kind: EncryptionKind,
     payload: Vec<u8>,
 }
 
@@ -136,45 +172,39 @@ impl Zeroize for Encrypted {
     }
 }
 
+impl std::fmt::Debug for Encrypted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Encrypted").field("encryption_kind", &self.encryption_kind).field("payload", &self.payload.to_hex()).finish()
+    }
+}
+
 impl Encrypted {
-    pub fn new(payload: Vec<u8>) -> Self {
-        Encrypted { payload }
+    pub fn new(encryption_kind: EncryptionKind, payload: Vec<u8>) -> Self {
+        Encrypted { encryption_kind, payload }
     }
 
     pub fn replace(&mut self, from: Encrypted) {
         self.payload = from.payload;
     }
 
+    pub fn kind(&self) -> EncryptionKind {
+        self.encryption_kind
+    }
+
     pub fn decrypt<T>(&self, secret: &Secret) -> Result<Decrypted<T>>
     where
-        T: DeserializeOwned,
+        T: BorshSerialize + BorshDeserialize,
     {
-        let t: T = serde_json::from_slice(decrypt_xchacha20poly1305(&self.payload, secret)?.as_ref())?;
-        Ok(Decrypted(t))
+        match self.encryption_kind {
+            EncryptionKind::XChaCha20Poly1305 => {
+                let decrypted = decrypt_xchacha20poly1305(&self.payload, secret)?;
+                Ok(Decrypted(T::try_from_slice(decrypted.as_ref())?))
+            }
+        }
     }
 }
 
-impl Serialize for Encrypted {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&hex_string(&self.payload))
-    }
-}
-
-impl<'de> Deserialize<'de> for Encrypted {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = <std::string::String as Deserialize>::deserialize(deserializer)?;
-        let mut data = vec![0u8; s.len() / 2];
-        hex_decode(s.as_bytes(), &mut data).map_err(serde::de::Error::custom)?;
-        Ok(Self::new(data))
-    }
-}
-
+/// WASM32 binding for `SHA256` hash function.
 #[wasm_bindgen(js_name = "sha256")]
 pub fn js_sha256_hash(data: JsValue) -> Result<String> {
     let data = data.try_as_vec_u8()?;
@@ -182,6 +212,7 @@ pub fn js_sha256_hash(data: JsValue) -> Result<String> {
     Ok(hash.as_ref().to_hex())
 }
 
+/// WASM32 binding for `SHA256d` hash function.
 #[wasm_bindgen(js_name = "sha256d")]
 pub fn js_sha256d_hash(data: JsValue) -> Result<String> {
     let data = data.try_as_vec_u8()?;
@@ -189,6 +220,7 @@ pub fn js_sha256d_hash(data: JsValue) -> Result<String> {
     Ok(hash.as_ref().to_hex())
 }
 
+/// WASM32 binding for `argon2sha256iv` hash function.
 #[wasm_bindgen(js_name = "argon2sha256iv")]
 pub fn js_argon2_sha256iv_phash(data: JsValue, byte_length: usize) -> Result<String> {
     let data = data.try_as_vec_u8()?;
@@ -196,18 +228,21 @@ pub fn js_argon2_sha256iv_phash(data: JsValue, byte_length: usize) -> Result<Str
     Ok(hash.as_ref().to_hex())
 }
 
+/// Produces `SHA256` hash of the given data.
 pub fn sha256_hash(data: &[u8]) -> Secret {
-    let mut sha256 = Sha256::new();
+    let mut sha256 = Sha256::default();
     sha256.update(data);
     Secret::new(sha256.finalize().to_vec())
 }
 
+/// Produces `SHA256d` hash of the given data.
 pub fn sha256d_hash(data: &[u8]) -> Secret {
-    let mut sha256 = Sha256::new();
+    let mut sha256 = Sha256::default();
     sha256.update(data);
     sha256_hash(sha256.finalize().as_slice())
 }
 
+/// Produces `argon2sha256iv` hash of the given data.
 pub fn argon2_sha256iv_hash(data: &[u8], byte_length: usize) -> Result<Secret> {
     let salt = sha256_hash(data);
     let mut key = vec![0u8; byte_length];
@@ -215,6 +250,7 @@ pub fn argon2_sha256iv_hash(data: &[u8], byte_length: usize) -> Result<Secret> {
     Ok(key.into())
 }
 
+/// WASM32 binding for `encryptXChaCha20Poly1305` function.
 #[wasm_bindgen(js_name = "encryptXChaCha20Poly1305")]
 pub fn js_encrypt_xchacha20poly1305(text: String, password: String) -> Result<String> {
     let secret = sha256_hash(password.as_bytes());
@@ -222,6 +258,7 @@ pub fn js_encrypt_xchacha20poly1305(text: String, password: String) -> Result<St
     Ok(general_purpose::STANDARD.encode(encrypted))
 }
 
+/// Encrypts the given data using `XChaCha20Poly1305` algorithm.
 pub fn encrypt_xchacha20poly1305(data: &[u8], secret: &Secret) -> Result<Vec<u8>> {
     let private_key_bytes = argon2_sha256iv_hash(secret.as_ref(), 32)?;
     let key = Key::from_slice(private_key_bytes.as_ref());
@@ -234,14 +271,16 @@ pub fn encrypt_xchacha20poly1305(data: &[u8], secret: &Secret) -> Result<Vec<u8>
     Ok(buffer)
 }
 
+/// WASM32 binding for `decryptXChaCha20Poly1305` function.
 #[wasm_bindgen(js_name = "decryptXChaCha20Poly1305")]
 pub fn js_decrypt_xchacha20poly1305(text: String, password: String) -> Result<String> {
     let secret = sha256_hash(password.as_bytes());
-    let encrypted = decrypt_xchacha20poly1305(text.as_bytes(), &secret)?;
-    let decoded = general_purpose::STANDARD.decode(encrypted)?;
-    Ok(String::from_utf8(decoded)?)
+    let bytes = general_purpose::STANDARD.decode(text)?;
+    let encrypted = decrypt_xchacha20poly1305(bytes.as_ref(), &secret)?;
+    Ok(String::from_utf8(encrypted.as_ref().to_vec())?)
 }
 
+/// Decrypts the given data using `XChaCha20Poly1305` algorithm.
 pub fn decrypt_xchacha20poly1305(data: &[u8], secret: &Secret) -> Result<Secret> {
     let private_key_bytes = argon2_sha256iv_hash(secret.as_ref(), 32)?;
     let key = Key::from_slice(private_key_bytes.as_ref());

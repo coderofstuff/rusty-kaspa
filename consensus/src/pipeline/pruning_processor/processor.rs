@@ -18,7 +18,6 @@ use crate::{
             statuses::StatusesStoreReader,
             tips::{TipsStore, TipsStoreReader},
             utxo_diffs::UtxoDiffsStoreReader,
-            virtual_state::VirtualStateStoreReader,
         },
     },
     processes::{pruning_proof::PruningProofManager, reachability::inquirer as reachability, relations},
@@ -45,7 +44,10 @@ use rocksdb::WriteBatch;
 use std::{
     collections::VecDeque,
     ops::Deref,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -76,6 +78,9 @@ pub struct PruningProcessor {
 
     // Config
     config: Arc<Config>,
+
+    // Signals
+    is_consensus_exiting: Arc<AtomicBool>,
 }
 
 impl Deref for PruningProcessor {
@@ -94,6 +99,7 @@ impl PruningProcessor {
         services: &Arc<ConsensusServices>,
         pruning_lock: SessionLock,
         config: Arc<Config>,
+        is_consensus_exiting: Arc<AtomicBool>,
     ) -> Self {
         Self {
             receiver,
@@ -105,6 +111,7 @@ impl PruningProcessor {
             pruning_proof_manager: services.pruning_proof_manager.clone(),
             pruning_lock,
             config,
+            is_consensus_exiting,
         }
     }
 
@@ -139,7 +146,10 @@ impl PruningProcessor {
             // This indicates the node crashed during a former pruning point move and we need to recover
             if pruning_utxoset_position != pruning_point {
                 info!("Recovering pruning utxo-set from {} to the pruning point {}", pruning_utxoset_position, pruning_point);
-                self.advance_pruning_utxoset(pruning_utxoset_position, pruning_point);
+                if !self.advance_pruning_utxoset(pruning_utxoset_position, pruning_point) {
+                    info!("Interrupted while advancing the pruning point UTXO set: Process is exiting");
+                    return;
+                }
             }
         }
 
@@ -181,7 +191,11 @@ impl PruningProcessor {
             info!("Periodic pruning point movement: advancing from {} to {}", current_pruning_info.pruning_point, new_pruning_point);
 
             // Advance the pruning point utxoset to the state of the new pruning point using chain-block UTXO diffs
-            self.advance_pruning_utxoset(current_pruning_info.pruning_point, new_pruning_point);
+            if !self.advance_pruning_utxoset(current_pruning_info.pruning_point, new_pruning_point) {
+                info!("Interrupted while advancing the pruning point UTXO set: Process is exiting");
+                return;
+            }
+            info!("Updated the pruning point UTXO set");
 
             // Finally, prune data in the new pruning point past
             self.prune(new_pruning_point);
@@ -191,9 +205,12 @@ impl PruningProcessor {
         }
     }
 
-    fn advance_pruning_utxoset(&self, utxoset_position: Hash, new_pruning_point: Hash) {
+    fn advance_pruning_utxoset(&self, utxoset_position: Hash, new_pruning_point: Hash) -> bool {
         let mut pruning_utxoset_write = self.pruning_utxoset_stores.write();
         for chain_block in self.reachability_service.forward_chain_iterator(utxoset_position, new_pruning_point, true).skip(1) {
+            if self.is_consensus_exiting.load(Ordering::Relaxed) {
+                return false;
+            }
             let utxo_diff = self.utxo_diffs_store.get(chain_block).expect("chain blocks have utxo state");
             let mut batch = WriteBatch::default();
             pruning_utxoset_write.utxo_set.write_diff_batch(&mut batch, utxo_diff.as_ref()).unwrap();
@@ -203,8 +220,10 @@ impl PruningProcessor {
         drop(pruning_utxoset_write);
 
         if self.config.enable_sanity_checks {
+            info!("Performing a sanity check that the new UTXO set has the expected UTXO commitment");
             self.assert_utxo_commitment(new_pruning_point);
         }
+        true
     }
 
     fn assert_utxo_commitment(&self, pruning_point: Hash) {
@@ -336,6 +355,12 @@ impl PruningProcessor {
             // If we have the lock for more than a few milliseconds, release and recapture to allow consensus progress during pruning
             if lock_acquire_time.elapsed() > Duration::from_millis(5) {
                 drop(reachability_read);
+                // An exit signal was received. Exit from this long running process.
+                if self.is_consensus_exiting.load(Ordering::Relaxed) {
+                    drop(prune_guard);
+                    info!("Header and Block pruning interrupted: Process is exiting");
+                    return;
+                }
                 prune_guard.blocking_yield();
                 lock_acquire_time = Instant::now();
                 reachability_read = self.reachability_store.upgradable_read();
@@ -468,7 +493,7 @@ impl PruningProcessor {
 
     fn assert_data_rebuilding(&self, ref_data: Arc<PruningPointTrustedData>, new_pruning_point: Hash) {
         info!("Rebuilding pruning point trusted data (sanity test)");
-        let virtual_state = self.virtual_stores.read().state.get().unwrap();
+        let virtual_state = self.lkg_virtual_state.load();
         let built_data = self
             .pruning_proof_manager
             .calculate_pruning_point_anticone_and_trusted_data(new_pruning_point, virtual_state.parents.iter().copied());

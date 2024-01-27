@@ -1,10 +1,12 @@
 [package]
 name = "kaspa-cli"
-description = "Kaspa CLI library"
+description = "Kaspa CLI"
+keywords = ["kaspa", "wallet", "cli", "rpc"]
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 include = [
     "src/**/*.rs",
     "src/**/*.txt",
@@ -14,7 +16,6 @@ include = [
 ]
 
 [features]
-legacy-rpc = ["kaspa-wallet-core/legacy-rpc"]
 default = []
 
 [lib]
@@ -36,6 +37,7 @@ kaspa-bip32.workspace = true
 kaspa-consensus-core.workspace = true
 kaspa-core.workspace = true
 kaspa-daemon.workspace = true
+kaspa-metrics-core.workspace = true
 kaspa-rpc-core.workspace = true
 kaspa-utils.workspace = true
 kaspa-wallet-core.workspace = true

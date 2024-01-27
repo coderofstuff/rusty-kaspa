@@ -1,13 +1,12 @@
-
 [package]
 name = "kaspa-os"
 description = "Kaspa Node & Wallet Manager"
 # please keep this version detached from the workspace
-version = "0.0.2"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-repository = "https://github.com/kaspanet/rusty-kaspa"
+repository.workspace = true
 include = [
     "src/**/*.rs",
     "src/**/*.txt",
@@ -18,7 +17,6 @@ include = [
 
 [features]
 metrics = []
-legacy-rpc = ["kaspa-cli/legacy-rpc","kaspa-wallet-core/legacy-rpc"]
 default = ["metrics"]
 
 [lib]
@@ -35,6 +33,7 @@ kaspa-cli.workspace = true
 kaspa-consensus-core.workspace = true
 kaspa-core.workspace = true
 kaspa-daemon.workspace = true
+kaspa-metrics-core.workspace = true
 kaspa-rpc-core.workspace = true
 kaspa-wallet-core.workspace = true
 nw-sys.workspace = true

@@ -356,6 +356,8 @@ impl HeaderProcessor {
                     .unwrap_or_else(|| Arc::new(self.ghostdag_managers[level].ghostdag(&ctx.known_parents[level])))
             })
             .collect_vec();
+
+        self.counters.mergeset_counts.fetch_add(ghostdag_data[0].mergeset_size() as u64, Ordering::Relaxed);
         ctx.ghostdag_data = Some(ghostdag_data);
     }
 
@@ -405,6 +407,7 @@ impl HeaderProcessor {
             && reachability::is_chain_ancestor_of(&staging, pp, ctx.hash).unwrap()
         {
             // Hint reachability about the new tip.
+            // TODO: identify a disqualified hst and make sure to use sink instead
             reachability::hint_virtual_selected_parent(&mut staging, ctx.hash).unwrap();
             hst_write.set_batch(&mut batch, SortableBlock::new(ctx.hash, header.blue_work)).unwrap();
         }

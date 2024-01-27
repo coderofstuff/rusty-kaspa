@@ -1,7 +1,12 @@
+//!
+//! Address scanner implementation, responsible for
+//! aggregating UTXOs from multiple addresses and
+//! building corresponding balances.
+//!
+
 use crate::derivation::AddressManager;
 use crate::imports::*;
-use crate::result::Result;
-use crate::runtime::{AtomicBalance, Balance};
+use crate::utxo::balance::AtomicBalance;
 use crate::utxo::{UtxoContext, UtxoEntryReference, UtxoEntryReferenceExtension};
 use std::cmp::max;
 
@@ -22,7 +27,7 @@ enum Provider {
 }
 
 pub struct Scan {
-    provider: Provider, //Arc<AddressManager>,
+    provider: Provider,
     window_size: Option<usize>,
     extent: Option<ScanExtent>,
     balance: Arc<AtomicBalance>,
@@ -37,13 +42,7 @@ impl Scan {
         window_size: Option<usize>,
         extent: Option<ScanExtent>,
     ) -> Scan {
-        Scan {
-            provider: Provider::AddressManager(address_manager),
-            window_size, //: Some(DEFAULT_WINDOW_SIZE),
-            extent,      //: Some(ScanExtent::EmptyWindow),
-            balance: balance.clone(),
-            current_daa_score,
-        }
+        Scan { provider: Provider::AddressManager(address_manager), window_size, extent, balance: balance.clone(), current_daa_score }
     }
     pub fn new_with_address_set(addresses: HashSet<Address>, balance: &Arc<AtomicBalance>, current_daa_score: u64) -> Scan {
         Scan {
@@ -63,6 +62,8 @@ impl Scan {
     }
 
     pub async fn scan_with_address_manager(&self, address_manager: &Arc<AddressManager>, utxo_context: &UtxoContext) -> Result<()> {
+        let params = utxo_context.processor().network_params()?;
+
         let window_size = self.window_size.unwrap_or(DEFAULT_WINDOW_SIZE) as u32;
         let extent = self.extent.expect("address manager requires an extent");
 
@@ -91,32 +92,32 @@ impl Scan {
             }
             yield_executor().await;
 
-            let refs: Vec<UtxoEntryReference> = resp.into_iter().map(UtxoEntryReference::from).collect();
-            for utxo_ref in refs.iter() {
-                if let Some(address) = utxo_ref.utxo.address.as_ref() {
-                    if let Some(utxo_address_index) = address_manager.inner().address_to_index_map.get(address) {
-                        if last_address_index < *utxo_address_index {
-                            last_address_index = *utxo_address_index;
+            if !resp.is_empty() {
+                let refs: Vec<UtxoEntryReference> = resp.into_iter().map(UtxoEntryReference::from).collect();
+                for utxo_ref in refs.iter() {
+                    if let Some(address) = utxo_ref.utxo.address.as_ref() {
+                        if let Some(utxo_address_index) = address_manager.inner().address_to_index_map.get(address) {
+                            if last_address_index < *utxo_address_index {
+                                last_address_index = *utxo_address_index;
+                            }
+                        } else {
+                            panic!("Account::scan_address_manager() has received an unknown address: `{address}`");
                         }
-                    } else {
-                        panic!("Account::scan_address_manager() has received an unknown address: `{address}`");
                     }
                 }
-            }
-            yield_executor().await;
 
-            let balance: Balance = refs.iter().fold(Balance::default(), |mut balance, r| {
-                // let entry_balance = r.as_ref().balance(self.current_daa_score);
-                let entry_balance = r.balance(self.current_daa_score);
-                balance.mature += entry_balance.mature;
-                balance.pending += entry_balance.pending;
-                balance
-            });
-            yield_executor().await;
+                let balance: Balance = refs.iter().fold(Balance::default(), |mut balance, r| {
+                    let entry_balance = r.balance(params, self.current_daa_score);
+                    balance.mature += entry_balance.mature;
+                    balance.pending += entry_balance.pending;
+                    balance.mature_utxo_count += entry_balance.mature_utxo_count;
+                    balance.pending_utxo_count += entry_balance.pending_utxo_count;
+                    balance.stasis_utxo_count += entry_balance.stasis_utxo_count;
+                    balance
+                });
 
-            utxo_context.extend(refs, self.current_daa_score).await?;
+                utxo_context.extend_from_scan(refs, self.current_daa_score).await?;
 
-            if !balance.is_empty() {
                 self.balance.add(balance);
             } else {
                 match &extent {
@@ -142,6 +143,7 @@ impl Scan {
     }
 
     pub async fn scan_with_address_set(&self, address_set: &HashSet<Address>, utxo_context: &UtxoContext) -> Result<()> {
+        let params = utxo_context.processor().network_params()?;
         let address_vec = address_set.iter().cloned().collect::<Vec<_>>();
 
         utxo_context.register_addresses(&address_vec).await?;
@@ -149,14 +151,17 @@ impl Scan {
         let refs: Vec<UtxoEntryReference> = resp.into_iter().map(UtxoEntryReference::from).collect();
 
         let balance: Balance = refs.iter().fold(Balance::default(), |mut balance, r| {
-            let entry_balance = r.balance(self.current_daa_score);
+            let entry_balance = r.balance(params, self.current_daa_score);
             balance.mature += entry_balance.mature;
             balance.pending += entry_balance.pending;
+            balance.mature_utxo_count += entry_balance.mature_utxo_count;
+            balance.pending_utxo_count += entry_balance.pending_utxo_count;
+            balance.stasis_utxo_count += entry_balance.stasis_utxo_count;
             balance
         });
         yield_executor().await;
 
-        utxo_context.extend(refs, self.current_daa_score).await?;
+        utxo_context.extend_from_scan(refs, self.current_daa_score).await?;
 
         if !balance.is_empty() {
             self.balance.add(balance);

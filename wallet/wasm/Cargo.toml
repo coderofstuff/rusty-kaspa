@@ -6,9 +6,9 @@ edition.workspace = true
 authors.workspace = true
 include.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [features]
-legacy-rpc = ["kaspa-cli/legacy-rpc"]
 default = []
 
 [lib]

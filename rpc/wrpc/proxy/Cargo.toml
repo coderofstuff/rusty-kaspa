@@ -6,6 +6,7 @@ edition.workspace = true
 authors.workspace = true
 include.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
@@ -14,7 +15,6 @@ kaspa-consensus-core.workspace = true
 kaspa-grpc-client.workspace = true
 kaspa-rpc-core.workspace = true
 kaspa-rpc-macros.workspace = true
-kaspa-wrpc-core.workspace = true
 kaspa-wrpc-server.workspace = true
 num_cpus.workspace = true
 thiserror.workspace = true

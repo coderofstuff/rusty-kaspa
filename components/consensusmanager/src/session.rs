@@ -4,22 +4,23 @@
 
 use kaspa_consensus_core::{
     acceptance_data::AcceptanceData,
-    api::{BlockValidationFutures, ConsensusApi, DynConsensus},
+    api::{BlockCount, BlockValidationFutures, ConsensusApi, ConsensusStats, DynConsensus},
     block::Block,
-    block_count::BlockCount,
     blockstatus::BlockStatus,
     daa_score_timestamp::DaaScoreTimestamp,
     errors::consensus::ConsensusResult,
     header::Header,
     pruning::{PruningPointProof, PruningPointTrustedData, PruningPointsList},
     trusted::{ExternalGhostdagData, TrustedBlock},
-    tx::{Transaction, TransactionOutpoint, UtxoEntry},
+    tx::{MutableTransaction, Transaction, TransactionOutpoint, UtxoEntry},
     BlockHashSet, BlueWorkType, ChainPath, Hash,
 };
 use kaspa_utils::sync::rwlock::*;
 use std::{ops::Deref, sync::Arc};
 
 pub use tokio::task::spawn_blocking;
+
+use crate::BlockProcessingBatch;
 
 #[derive(Clone)]
 pub struct SessionOwnedReadGuard(Arc<RfRwLockOwnedReadGuard>);
@@ -158,25 +159,60 @@ impl ConsensusSessionOwned {
         self.consensus.validate_and_insert_block(block)
     }
 
+    pub fn validate_and_insert_block_batch(&self, mut batch: Vec<Block>) -> BlockProcessingBatch {
+        // Sort by blue work in order to ensure topological order
+        batch.sort_by(|a, b| a.header.blue_work.partial_cmp(&b.header.blue_work).unwrap());
+        let (block_tasks, virtual_state_tasks) = batch
+            .iter()
+            .map(|b| {
+                let BlockValidationFutures { block_task, virtual_state_task } = self.consensus.validate_and_insert_block(b.clone());
+                (block_task, virtual_state_task)
+            })
+            .unzip();
+        BlockProcessingBatch::new(batch, block_tasks, virtual_state_tasks)
+    }
+
     pub fn validate_and_insert_trusted_block(&self, tb: TrustedBlock) -> BlockValidationFutures {
         self.consensus.validate_and_insert_trusted_block(tb)
     }
 
-    pub fn calculate_transaction_mass(&self, transaction: &Transaction) -> u64 {
+    pub fn calculate_transaction_compute_mass(&self, transaction: &Transaction) -> u64 {
         // This method performs pure calculations so no need for an async wrapper
-        self.consensus.calculate_transaction_mass(transaction)
+        self.consensus.calculate_transaction_compute_mass(transaction)
     }
 
-    pub async fn async_get_virtual_daa_score(&self) -> u64 {
-        self.clone().spawn_blocking(|c| c.get_virtual_daa_score()).await
+    pub fn calculate_transaction_storage_mass(&self, transaction: &MutableTransaction) -> Option<u64> {
+        // This method performs pure calculations so no need for an async wrapper
+        self.consensus.calculate_transaction_storage_mass(transaction)
     }
 
-    pub async fn async_get_virtual_bits(&self) -> u32 {
-        self.clone().spawn_blocking(|c| c.get_virtual_bits()).await
+    pub fn get_virtual_daa_score(&self) -> u64 {
+        // Accessing cached virtual fields is lock-free and does not require spawn_blocking
+        self.consensus.get_virtual_daa_score()
     }
 
-    pub async fn async_get_virtual_past_median_time(&self) -> u64 {
-        self.clone().spawn_blocking(|c| c.get_virtual_past_median_time()).await
+    pub fn get_virtual_bits(&self) -> u32 {
+        // Accessing cached virtual fields is lock-free and does not require spawn_blocking
+        self.consensus.get_virtual_bits()
+    }
+
+    pub fn get_virtual_past_median_time(&self) -> u64 {
+        // Accessing cached virtual fields is lock-free and does not require spawn_blocking
+        self.consensus.get_virtual_past_median_time()
+    }
+
+    pub fn get_virtual_parents(&self) -> BlockHashSet {
+        // Accessing cached virtual fields is lock-free and does not require spawn_blocking
+        self.consensus.get_virtual_parents()
+    }
+
+    pub fn get_virtual_parents_len(&self) -> usize {
+        // Accessing cached virtual fields is lock-free and does not require spawn_blocking
+        self.consensus.get_virtual_parents_len()
+    }
+
+    pub async fn async_get_stats(&self) -> ConsensusStats {
+        self.clone().spawn_blocking(|c| c.get_stats()).await
     }
 
     pub async fn async_get_virtual_merge_depth_root(&self) -> Option<Hash> {
@@ -218,10 +254,6 @@ impl ConsensusSessionOwned {
         self.clone().spawn_blocking(move |c| c.get_virtual_chain_from_block(hash)).await
     }
 
-    pub async fn async_get_virtual_parents(&self) -> BlockHashSet {
-        self.clone().spawn_blocking(|c| c.get_virtual_parents()).await
-    }
-
     pub async fn async_get_virtual_utxos(
         &self,
         from_outpoint: Option<TransactionOutpoint>,
@@ -233,6 +265,10 @@ impl ConsensusSessionOwned {
 
     pub async fn async_get_tips(&self) -> Vec<Hash> {
         self.clone().spawn_blocking(|c| c.get_tips()).await
+    }
+
+    pub async fn async_get_tips_len(&self) -> usize {
+        self.clone().spawn_blocking(|c| c.get_tips_len()).await
     }
 
     pub async fn async_is_chain_ancestor_of(&self, low: Hash, high: Hash) -> ConsensusResult<bool> {

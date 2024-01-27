@@ -8,6 +8,7 @@ use kaspa_consensus_core::{
 use kaspa_consensus_notify::{root::ConsensusNotificationRoot, service::NotifyService};
 use kaspa_core::{core::Core, info, trace};
 use kaspa_core::{kaspad_env::version, task::tick::TickService};
+use kaspa_database::prelude::CachePolicy;
 use kaspa_grpc_server::service::GrpcService;
 use kaspa_rpc_service::service::RpcCoreService;
 use kaspa_txscript::caches::TxScriptCacheCounters;
@@ -29,9 +30,9 @@ use kaspa_mining::{
 };
 use kaspa_p2p_flows::{flow_context::FlowContext, service::P2pService};
 
-use kaspa_perf_monitor::builder::Builder as PerfMonitorBuilder;
+use kaspa_perf_monitor::{builder::Builder as PerfMonitorBuilder, counters::CountersSnapshot};
 use kaspa_utxoindex::{api::UtxoIndexProxy, UtxoIndex};
-use kaspa_wrpc_server::service::{Options as WrpcServerOptions, ServerCounters as WrpcServerCounters, WrpcEncoding, WrpcService};
+use kaspa_wrpc_server::service::{Options as WrpcServerOptions, WebSocketCounters as WrpcServerCounters, WrpcEncoding, WrpcService};
 
 /// Desired soft FD limit that needs to be configured
 /// for the kaspad process.
@@ -83,6 +84,12 @@ pub fn validate_args(args: &Args) -> ConfigResult<()> {
     }
     if args.logdir.is_some() && args.no_log_files {
         return Err(ConfigError::MixedLogDirAndNoLogFiles);
+    }
+    if args.ram_scale < 0.1 {
+        return Err(ConfigError::RamScaleTooLow);
+    }
+    if args.ram_scale > 10.0 {
+        return Err(ConfigError::RamScaleTooHigh);
     }
     Ok(())
 }
@@ -273,7 +280,7 @@ do you confirm? (answer y/n or pass --yes to the Kaspad command line to confirm 
                     .build()
                     .unwrap();
 
-                let headers_store = DbHeadersStore::new(consensus_db, 0);
+                let headers_store = DbHeadersStore::new(consensus_db, CachePolicy::Empty, CachePolicy::Empty);
 
                 if headers_store.has(config.genesis.hash).unwrap() {
                     info!("Genesis is found in active consensus DB. No action needed.");
@@ -339,9 +346,9 @@ do you confirm? (answer y/n or pass --yes to the Kaspad command line to confirm 
     let p2p_server_addr = args.listen.unwrap_or(ContextualNetAddress::unspecified()).normalize(config.default_p2p_port());
     // connect_peers means no DNS seeding and no outbound peers
     let outbound_target = if connect_peers.is_empty() { args.outbound_target } else { 0 };
-    let dns_seeders = if connect_peers.is_empty() { config.dns_seeders } else { &[] };
+    let dns_seeders = if connect_peers.is_empty() && !args.disable_dns_seeding { config.dns_seeders } else { &[] };
 
-    let grpc_server_addr = args.rpclisten.unwrap_or(ContextualNetAddress::unspecified()).normalize(config.default_rpc_port());
+    let grpc_server_addr = args.rpclisten.unwrap_or(ContextualNetAddress::loopback()).normalize(config.default_rpc_port());
 
     let core = Arc::new(Core::new());
 
@@ -377,8 +384,9 @@ do you confirm? (answer y/n or pass --yes to the Kaspad command line to confirm 
         .with_fetch_interval(Duration::from_secs(args.perf_metrics_interval_sec))
         .with_tick_service(tick_service.clone());
     let perf_monitor = if args.perf_metrics {
-        let cb = move |counters| {
-            trace!("[{}] metrics: {:?}", kaspa_perf_monitor::SERVICE_NAME, counters);
+        let cb = move |counters: CountersSnapshot| {
+            trace!("[{}] {}", kaspa_perf_monitor::SERVICE_NAME, counters.to_process_metrics_display());
+            trace!("[{}] {}", kaspa_perf_monitor::SERVICE_NAME, counters.to_io_metrics_display());
             #[cfg(feature = "heap")]
             trace!("[{}] heap stats: {:?}", kaspa_perf_monitor::SERVICE_NAME, dhat::HeapStats::get());
         };
@@ -405,11 +413,11 @@ do you confirm? (answer y/n or pass --yes to the Kaspad command line to confirm 
     let (address_manager, port_mapping_extender_svc) = AddressManager::new(config.clone(), meta_db, tick_service.clone());
 
     let mining_monitor = Arc::new(MiningMonitor::new(mining_counters.clone(), tx_script_cache_counters.clone(), tick_service.clone()));
-    let mining_manager = MiningManagerProxy::new(Arc::new(MiningManager::new_with_spam_blocking_option(
-        network.is_mainnet(),
+    let mining_manager = MiningManagerProxy::new(Arc::new(MiningManager::new_with_extended_config(
         config.target_time_per_block,
         false,
         config.max_block_mass,
+        config.ram_scale,
         config.block_template_cache_lifetime,
         mining_counters,
     )));
@@ -441,7 +449,7 @@ do you confirm? (answer y/n or pass --yes to the Kaspad command line to confirm 
         mining_manager,
         flow_context,
         index_service.as_ref().map(|x| x.utxoindex().unwrap()),
-        config,
+        config.clone(),
         core.clone(),
         processing_counters,
         wrpc_borsh_counters.clone(),
@@ -450,8 +458,6 @@ do you confirm? (answer y/n or pass --yes to the Kaspad command line to confirm 
         p2p_tower_counters.clone(),
         grpc_tower_counters.clone(),
     ));
-    let grpc_service =
-        Arc::new(GrpcService::new(grpc_server_addr, rpc_core_service.clone(), args.rpc_max_clients, grpc_tower_counters));
 
     // Create an async runtime and register the top-level async services
     let async_runtime = Arc::new(AsyncRuntime::new(args.async_threads));
@@ -464,7 +470,11 @@ do you confirm? (answer y/n or pass --yes to the Kaspad command line to confirm 
         async_runtime.register(Arc::new(port_mapping_extender_svc))
     };
     async_runtime.register(rpc_core_service.clone());
-    async_runtime.register(grpc_service);
+    if !args.disable_grpc {
+        let grpc_service =
+            Arc::new(GrpcService::new(grpc_server_addr, config, rpc_core_service.clone(), args.rpc_max_clients, grpc_tower_counters));
+        async_runtime.register(grpc_service);
+    }
     async_runtime.register(p2p_service);
     async_runtime.register(consensus_monitor);
     async_runtime.register(mining_monitor);

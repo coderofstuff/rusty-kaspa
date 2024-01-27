@@ -1,6 +1,7 @@
 [package]
 name = "kaspad"
 description = "Kaspa full node daemon"
+keywords = ["kaspa", "blockdag"]
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -13,6 +14,8 @@ name = "kaspad_lib"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
+kaspa-alloc.workspace = true # This changes the global allocator for all of the next dependencies so should be kept first
+
 kaspa-addresses.workspace = true
 kaspa-addressmanager.workspace = true
 kaspa-consensus-core.workspace = true
@@ -50,5 +53,5 @@ tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
 workflow-log.workspace = true
 
 [features]
-heap = ["dhat"]
+heap = ["dhat", "kaspa-alloc/heap"]
 devnet-prealloc = ["kaspa-consensus/devnet-prealloc"]

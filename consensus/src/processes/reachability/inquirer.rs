@@ -144,9 +144,9 @@ fn insert_to_future_covering_set(store: &mut (impl ReachabilityStore + ?Sized), 
 }
 
 /// Hint to the reachability algorithm that `hint` is a candidate to become
-/// the `virtual selected parent` (`VSP`). This might affect internal reachability heuristics such
+/// the `virtual selected parent` (`sink`). This might affect internal reachability heuristics such
 /// as moving the reindex point. The consensus runtime is expected to call this function
-/// for a new header selected tip which is `header only` / `pending UTXO verification`, or for a completely resolved `VSP`.
+/// for a new header selected tip which is `header only` / `pending UTXO verification`, or for a completely resolved `sink`.
 pub fn hint_virtual_selected_parent(store: &mut (impl ReachabilityStore + ?Sized), hint: Hash) -> Result<()> {
     try_advancing_reindex_root(
         store,
@@ -267,8 +267,8 @@ mod tests {
     };
     use itertools::Itertools;
     use kaspa_consensus_core::blockhash::ORIGIN;
-    use kaspa_database::create_temp_db;
     use kaspa_database::prelude::ConnBuilder;
+    use kaspa_database::{create_temp_db, prelude::CachePolicy};
     use parking_lot::RwLock;
     use rand::seq::IteratorRandom;
     use rocksdb::WriteBatch;
@@ -387,9 +387,9 @@ mod tests {
     /// Note: runtime is quadratic in the number of blocks so should be used with mildly small DAGs (~50)
     fn run_dag_test_case_with_staging(test: &DagTestCase) {
         let (_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-        let cache_size = test.blocks.len() as u64 / 3;
-        let reachability = RwLock::new(DbReachabilityStore::new(db.clone(), cache_size));
-        let mut relations = DbRelationsStore::with_prefix(db.clone(), &[], 0);
+        let cache_policy = CachePolicy::Count(test.blocks.len() / 3);
+        let reachability = RwLock::new(DbReachabilityStore::new(db.clone(), cache_policy, cache_policy));
+        let mut relations = DbRelationsStore::with_prefix(db.clone(), &[], CachePolicy::Empty, CachePolicy::Empty);
 
         // Add blocks via a staging store
         {
@@ -521,9 +521,9 @@ mod tests {
 
             // Run with direct DB stores
             let (_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(10));
-            let cache_size = test.blocks.len() as u64 / 3;
-            let mut reachability = DbReachabilityStore::new(db.clone(), cache_size);
-            let mut relations = DbRelationsStore::new(db, 0, cache_size);
+            let cache_policy = CachePolicy::Count(test.blocks.len() / 3);
+            let mut reachability = DbReachabilityStore::new(db.clone(), cache_policy, cache_policy);
+            let mut relations = DbRelationsStore::new(db, 0, cache_policy, cache_policy);
             run_dag_test_case(&mut relations, &mut reachability, &test);
 
             // Run with a staging process

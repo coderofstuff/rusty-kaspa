@@ -1,3 +1,8 @@
+//!
+//! Error types used by the wallet framework.
+//!
+
+use crate::imports::{AccountId, AccountKind, AssocPrvKeyDataIds, PrvKeyDataId};
 use base64::DecodeError;
 use downcast::DowncastError;
 use kaspa_bip32::Error as BIP32Error;
@@ -5,6 +10,7 @@ use kaspa_consensus_core::sign::Error as CoreSignError;
 use kaspa_rpc_core::RpcError as KaspaRpcError;
 use kaspa_wrpc_client::error::Error as KaspaWorkflowRpcError;
 use std::sync::PoisonError;
+use thiserror::Error;
 use wasm_bindgen::JsValue;
 use workflow_core::abortable::Aborted;
 use workflow_core::sendable::*;
@@ -12,8 +18,7 @@ use workflow_rpc::client::error::Error as RpcError;
 use workflow_wasm::jserror::*;
 use workflow_wasm::printable::*;
 
-use thiserror::Error;
-
+/// [`Error`](enum@Error) variants emitted by the wallet framework.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
@@ -30,6 +35,9 @@ pub enum Error {
 
     #[error("Wallet wRPC -> {0}")]
     KaspaWorkflowRpcError(#[from] KaspaWorkflowRpcError),
+
+    #[error("The wallet RPC client is not wRPC")]
+    NotWrpcClient,
 
     #[error("Bip32 -> {0}")]
     BIP32Error(#[from] BIP32Error),
@@ -67,6 +75,9 @@ pub enum Error {
     #[error("No network selected. Please use `network (mainnet|testnet-10|testnet-11)` to select a network.")]
     MissingNetworkId,
 
+    #[error("RPC client version mismatch, please upgrade you client (needs: v{0}, connected to: v{1})")]
+    RpcApiVersion(String, String),
+
     #[error("Invalid or unsupported network id: {0}")]
     InvalidNetworkId(String),
 
@@ -97,7 +108,7 @@ pub enum Error {
     #[error("Invalid filename: {0}")]
     InvalidFilename(String),
 
-    #[error("(I/O) {0}")]
+    #[error("{0}")]
     Io(#[from] std::io::Error),
 
     #[error("{0}")]
@@ -143,10 +154,13 @@ pub enum Error {
     VarError(#[from] std::env::VarError),
 
     #[error("private key {0} not found")]
-    PrivateKeyNotFound(String),
+    PrivateKeyNotFound(PrvKeyDataId),
 
     #[error("private key {0} already exists")]
-    PrivateKeyAlreadyExists(String),
+    PrivateKeyAlreadyExists(PrvKeyDataId),
+
+    #[error("account {0} already exists")]
+    AccountAlreadyExists(AccountId),
 
     #[error("xprv key is not supported for this key type")]
     XPrvSupport,
@@ -163,11 +177,20 @@ pub enum Error {
     #[error("{0}")]
     TryFromEnum(#[from] workflow_core::enums::TryFromError),
 
+    #[error("Account factory found for type: {0}")]
+    AccountFactoryNotFound(AccountKind),
+
+    #[error("Account not found: {0}")]
+    AccountNotFound(AccountId),
+
+    #[error("Account not active: {0}")]
+    AccountNotActive(AccountId),
+
     #[error("Invalid account type (must be one of: bip32|multisig|legacy")]
     InvalidAccountKind,
 
     #[error("Insufficient funds")]
-    InsufficientFunds,
+    InsufficientFunds { additional_needed: u64, origin: &'static str },
 
     #[error(transparent)]
     Utf8Error(#[from] std::str::Utf8Error),
@@ -186,6 +209,9 @@ pub enum Error {
 
     #[error("The feature is not supported")]
     NotImplemented,
+
+    #[error("Not allowed on a resident wallet")]
+    ResidentWallet,
 
     #[error("Not allowed on a resident account")]
     ResidentAccount,
@@ -211,17 +237,50 @@ pub enum Error {
     #[error("Payment output address does not match supplied network type")]
     GeneratorPaymentOutputNetworkTypeMismatch,
 
+    #[error("Invalid transaction amount")]
+    GeneratorPaymentOutputZeroAmount,
+
     #[error("Priority fees can not be included into transactions with multiple outputs")]
     GeneratorIncludeFeesRequiresOneOutput,
 
-    #[error("Requested transaction is too heavy")]
+    #[error("Transaction outputs exceed the maximum allowed mass")]
+    GeneratorTransactionOutputsAreTooHeavy { mass: u64, kind: &'static str },
+
+    #[error("Transaction exceeds the maximum allowed mass")]
     GeneratorTransactionIsTooHeavy,
+
+    #[error("Storage mass exceeds maximum")]
+    StorageMassExceedsMaximumTransactionMass { storage_mass: u64 },
+
+    #[error("Invalid range {0}..{1}")]
+    InvalidRange(u64, u64),
 
     #[error(transparent)]
     MultisigCreateError(#[from] kaspa_txscript::MultisigCreateError),
 
     #[error(transparent)]
     TxScriptError(#[from] kaspa_txscript_errors::TxScriptError),
+
+    #[error("Legacy account is not initialized")]
+    LegacyAccountNotInitialized,
+
+    #[error("AssocPrvKeyDataIds required {0} but got {1:?}")]
+    AssocPrvKeyDataIds(String, AssocPrvKeyDataIds),
+
+    #[error("AssocPrvKeyDataIds are empty")]
+    AssocPrvKeyDataIdsEmpty,
+
+    #[error("Invalid extended public key '{0}': {1}")]
+    InvalidExtendedPublicKey(String, BIP32Error),
+
+    #[error("Missing DAA score while processing '{0}' (this may be a node connection issue)")]
+    MissingDaaScore(&'static str),
+
+    #[error("Missing RPC listener id (this may be a node connection issue)")]
+    ListenerId,
+
+    #[error("Mass calculation error")]
+    MassCalculationError,
 }
 
 impl From<Aborted> for Error {
@@ -299,14 +358,14 @@ impl From<argon2::password_hash::Error> for Error {
     }
 }
 
-// impl From<workflow_wasm::serde::Error> for Error {
-//     fn from(err: workflow_wasm::serde::Error) -> Self {
-//         Self::ToValue(err.to_string())
-//     }
-// }
-
 impl<T> From<DowncastError<T>> for Error {
     fn from(e: DowncastError<T>) -> Self {
         Error::DowncastError(e.to_string())
+    }
+}
+
+impl<T> From<workflow_core::channel::SendError<T>> for Error {
+    fn from(e: workflow_core::channel::SendError<T>) -> Self {
+        Error::Custom(e.to_string())
     }
 }

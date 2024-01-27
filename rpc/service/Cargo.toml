@@ -6,12 +6,12 @@ edition.workspace = true
 authors.workspace = true
 include.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 kaspa-addresses.workspace = true
 kaspa-consensus-core.workspace = true
 kaspa-consensus-notify.workspace = true
-kaspa-consensus.workspace = true
 kaspa-consensusmanager.workspace = true
 kaspa-core.workspace = true
 kaspa-hashes.workspace = true
@@ -27,8 +27,8 @@ kaspa-txscript.workspace = true
 kaspa-utils.workspace = true
 kaspa-utils-tower.workspace = true
 kaspa-utxoindex.workspace = true
-kaspa-wrpc-core.workspace = true
 
 async-trait.workspace = true
 log.workspace = true
 tokio.workspace = true
+workflow-rpc.workspace = true

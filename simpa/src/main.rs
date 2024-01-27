@@ -2,6 +2,7 @@ use async_channel::unbounded;
 use clap::Parser;
 use futures::{future::try_join_all, Future};
 use itertools::Itertools;
+use kaspa_alloc::init_allocator_with_default_settings;
 use kaspa_consensus::{
     config::ConfigBuilder,
     consensus::Consensus,
@@ -23,7 +24,7 @@ use kaspa_core::{info, task::service::AsyncService, task::tick::TickService, tim
 use kaspa_database::prelude::ConnBuilder;
 use kaspa_database::{create_temp_db, load_existing_db};
 use kaspa_hashes::Hash;
-use kaspa_perf_monitor::builder::Builder;
+use kaspa_perf_monitor::{builder::Builder, counters::CountersSnapshot};
 use kaspa_utils::fd_budget;
 use simulator::network::KaspaNetworkSimulator;
 use std::{collections::VecDeque, sync::Arc, time::Duration};
@@ -67,6 +68,14 @@ struct Args {
     /// Defaults to the number of logical CPU cores.
     #[arg(short, long)]
     virtual_threads: Option<usize>,
+
+    /// If on, validates headers first before starting to validate block bodies
+    #[arg(short = 'f', long, default_value_t = false)]
+    headers_first: bool,
+
+    /// Applies a scale factor to memory allocation bounds
+    #[arg(long, default_value_t = 1.0)]
+    ram_scale: f64,
 
     /// Logging level for all subsystems {off, error, warn, info, debug, trace}
     ///  -- You may also specify <subsystem>=<level>,<subsystem2>=<level>,... to set the log level for individual subsystems
@@ -118,6 +127,8 @@ fn main() {
     #[cfg(feature = "heap")]
     let _profiler = dhat::Profiler::builder().file_name("simpa-heap.json").build();
 
+    init_allocator_with_default_settings();
+
     // Get CLI arguments
     let args = Args::parse();
 
@@ -138,8 +149,10 @@ fn main_impl(mut args: Args) {
 
     let stop_perf_monitor = args.perf_metrics.then(|| {
         let ts = Arc::new(TickService::new());
-        let cb = move |counters| {
-            trace!("metrics: {:?}", counters);
+
+        let cb = move |counters: CountersSnapshot| {
+            trace!("[{}] {}", kaspa_perf_monitor::SERVICE_NAME, counters.to_process_metrics_display());
+            trace!("[{}] {}", kaspa_perf_monitor::SERVICE_NAME, counters.to_io_metrics_display());
             #[cfg(feature = "heap")]
             trace!("heap stats: {:?}", dhat::HeapStats::get());
         };
@@ -163,11 +176,14 @@ fn main_impl(mut args: Args) {
         );
     }
     args.bps = if args.testnet11 { Testnet11Bps::bps() as f64 } else { args.bps };
-    let params = if args.testnet11 { TESTNET11_PARAMS } else { DEVNET_PARAMS };
+    let mut params = if args.testnet11 { TESTNET11_PARAMS } else { DEVNET_PARAMS };
+    params.storage_mass_activation_daa_score = 400;
+    params.storage_mass_parameter = 10_000;
     let mut builder = ConfigBuilder::new(params)
         .apply_args(|config| apply_args_to_consensus_params(&args, &mut config.params))
         .apply_args(|config| apply_args_to_perf_params(&args, &mut config.perf))
         .adjust_perf_params_to_consensus_params()
+        .apply_args(|config| config.ram_scale = args.ram_scale)
         .skip_proof_of_work()
         .enable_sanity_checks();
     if !args.test_pruning {
@@ -242,7 +258,10 @@ fn main_impl(mut args: Args) {
         unix_now(),
     ));
     let handles2 = consensus2.run_processors();
-    rt.block_on(validate(&consensus, &consensus2, &config, args.delay, args.bps));
+    if args.headers_first {
+        rt.block_on(validate(&consensus, &consensus2, &config, args.delay, args.bps, true));
+    }
+    rt.block_on(validate(&consensus, &consensus2, &config, args.delay, args.bps, false));
     consensus2.shutdown(handles2);
     if let Some(stop_perf_monitor) = stop_perf_monitor {
         _ = rt.block_on(stop_perf_monitor);
@@ -311,34 +330,48 @@ fn apply_args_to_perf_params(args: &Args, perf_params: &mut PerfParams) {
     }
 }
 
-async fn validate(src_consensus: &Consensus, dst_consensus: &Consensus, params: &Params, delay: f64, bps: f64) {
+async fn validate(src_consensus: &Consensus, dst_consensus: &Consensus, params: &Params, delay: f64, bps: f64, header_only: bool) {
     let hashes = topologically_ordered_hashes(src_consensus, params.genesis.hash);
     let num_blocks = hashes.len();
     let num_txs = print_stats(src_consensus, &hashes, delay, bps, params.ghostdag_k);
-    info!("Validating {num_blocks} blocks with {num_txs} transactions overall...");
+    if header_only {
+        info!("Validating {num_blocks} headers...");
+    } else {
+        info!("Validating {num_blocks} blocks with {num_txs} transactions overall...");
+    }
+
     let start = std::time::Instant::now();
     let chunks = hashes.into_iter().chunks(1000);
     let mut iter = chunks.into_iter();
     let mut chunk = iter.next().unwrap();
-    let mut prev_joins = submit_chunk(src_consensus, dst_consensus, &mut chunk);
+    let mut prev_joins = submit_chunk(src_consensus, dst_consensus, &mut chunk, header_only);
 
     for (i, mut chunk) in iter.enumerate() {
-        let current_joins = submit_chunk(src_consensus, dst_consensus, &mut chunk);
+        let current_joins = submit_chunk(src_consensus, dst_consensus, &mut chunk, header_only);
         let statuses = try_join_all(prev_joins).await.unwrap();
         trace!("Validated chunk {}", i);
-        assert!(statuses.iter().all(|s| s.is_utxo_valid_or_pending()));
+        if header_only {
+            assert!(statuses.iter().all(|s| s.is_header_only()));
+        } else {
+            assert!(statuses.iter().all(|s| s.is_utxo_valid_or_pending()));
+        }
         prev_joins = current_joins;
     }
 
     let statuses = try_join_all(prev_joins).await.unwrap();
-    assert!(statuses.iter().all(|s| s.is_utxo_valid_or_pending()));
+    if header_only {
+        assert!(statuses.iter().all(|s| s.is_header_only()));
+    } else {
+        assert!(statuses.iter().all(|s| s.is_utxo_valid_or_pending()));
+    }
 
     // Assert that at least one body tip was resolved with valid UTXO
     assert!(dst_consensus.body_tips().iter().copied().any(|h| dst_consensus.block_status(h) == BlockStatus::StatusUTXOValid));
     let elapsed = start.elapsed();
     info!(
-        "Total validation time: {:?}, block processing rate: {:.2} (b/s), transaction processing rate: {:.2} (t/s)",
+        "Total validation time: {:?}, {} processing rate: {:.2} (b/s), transaction processing rate: {:.2} (t/s)",
         elapsed,
+        if header_only { "header" } else { "block" },
         num_blocks as f64 / elapsed.as_secs_f64(),
         num_txs as f64 / elapsed.as_secs_f64(),
     );
@@ -348,12 +381,13 @@ fn submit_chunk(
     src_consensus: &Consensus,
     dst_consensus: &Consensus,
     chunk: &mut impl Iterator<Item = Hash>,
+    header_only: bool,
 ) -> Vec<impl Future<Output = BlockProcessResult<BlockStatus>>> {
     let mut futures = Vec::new();
     for hash in chunk {
         let block = Block::from_arcs(
             src_consensus.headers_store.get_header(hash).unwrap(),
-            src_consensus.block_transactions_store.get(hash).unwrap(),
+            if header_only { Default::default() } else { src_consensus.block_transactions_store.get(hash).unwrap() },
         );
         let f = dst_consensus.validate_and_insert_block(block).virtual_state_task;
         futures.push(f);

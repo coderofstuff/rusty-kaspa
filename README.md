@@ -11,10 +11,10 @@ Your feedback, contributions, and issue reports will be integral to evolving thi
   <details>
   <summary>Building on Linux</summary>
   
-  1. Install  general prerequisites
+  1. Install general prerequisites
 
       ```bash
-      sudo apt install build-essential libssl-dev pkg-config 
+      sudo apt install curl git build-essential libssl-dev pkg-config 
       ```
 
   2. Install Protobuf (required for gRPC)
@@ -29,7 +29,7 @@ Your feedback, contributions, and issue reports will be integral to evolving thi
       clang-tools clang clangd libc++-dev \
       libc++1 libc++abi-dev libc++abi1 \
       libclang-dev libclang1 liblldb-dev \
-      libllvm-ocaml-dev libomp-dev libomp5 \ 
+      libllvm-ocaml-dev libomp-dev libomp5 \
       lld lldb llvm-dev llvm-runtime \
       llvm python3-clang
       ```
@@ -169,20 +169,6 @@ To build WASM on MacOS you need to install `llvm` from homebrew (at the time of 
   ./build-node
   cd nodejs
   npm install
-  ```
-
-  </details>
-
-  <details>
-
-  <summary>
-  React Native
-  </summary>
-
-  ```bash
-  cd rusty-kaspa
-  cd wasm
-  ./build-react-native
   ```
 
   </details>

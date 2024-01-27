@@ -1,23 +1,35 @@
 use crate::imports::*;
 use crate::result::Result;
-use crate::runtime;
 use crate::tx::{generator as native, Fees, PaymentDestination, PaymentOutputs};
 use crate::utxo::{TryIntoUtxoEntryReferences, UtxoEntryReference};
 use crate::wasm::tx::generator::*;
 use crate::wasm::wallet::Account;
 use crate::wasm::UtxoContext;
 
+#[wasm_bindgen(typescript_custom_section)]
+const IGeneratorSettingsObject: &'static str = r#"
+interface IGeneratorSettingsObject {
+    outputs: PaymentOutputs | Array<Array<number | string>>;
+    changeAddress: Address | string;
+    priorityFee: bigint;
+    utxoEntries: Array<UtxoEntryReference>;
+    sigOpCount: Uint8Array;
+    minimumSignatures: Uint16Array;
+    payload: Uint8Array | string;
+}
+"#;
+
 #[wasm_bindgen]
 extern "C" {
     /// Supports the following properties (all values must be supplied in SOMPI):
-    /// - `outputs`: instance of [`PaymentOutputs`] or `[ [amount, address], [amount, address], ... ]`
+    /// - `outputs`: instance of [`PaymentOutputs`] or `[ [address, amount], [address, amount], ... ]`
     /// - `changeAddress`: [`Address`] or String representation of an address
-    /// - `priorityFee`: BigInt or [`Fees`]
+    /// - `priorityFee`: BigInt
     /// - `utxoEntries`: Array of [`UtxoEntryReference`]
-    /// - `sigOpCount`: [`u8`]
-    /// - `minimumSignatures`: [`u16`]
+    /// - `sigOpCount`: `u8`
+    /// - `minimumSignatures`: `u16`
     /// - `payload`: [`Uint8Array`] or hex String representation of a payload
-    #[wasm_bindgen(extends = Object, is_type_of = Array::is_array, typescript_type = "PrivateKey[]")]
+    #[wasm_bindgen(extends = Object, typescript_type = "IGeneratorSettingsObject")]
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub type GeneratorSettingsObject;
 }
@@ -29,7 +41,7 @@ extern "C" {
 /// transaction mass, at which point it will produce a compound transaction by forwarding
 /// all selected UTXO entries to the supplied change address and prepare to start generating
 /// a new transaction.  Such sequence of daisy-chained transactions is known as a "batch".
-/// Each compount transaction results in a new UTXO, which is immediately reused in the
+/// Each compound transaction results in a new UTXO, which is immediately reused in the
 /// subsequent transaction.
 ///
 /// ```javascript
@@ -63,6 +75,7 @@ impl Generator {
         let settings = GeneratorSettings::try_from(args)?;
 
         let GeneratorSettings {
+            network_id,
             source,
             multiplexer,
             final_transaction_destination,
@@ -78,7 +91,11 @@ impl Generator {
                 let change_address = change_address
                     .ok_or_else(|| Error::custom("changeAddress is required for Generator constructor with UTXO entries"))?;
 
+                let network_id =
+                    network_id.ok_or_else(|| Error::custom("networkId is required for Generator constructor with UTXO entries"))?;
+
                 native::GeneratorSettings::try_new_with_iterator(
+                    network_id,
                     Box::new(utxo_entries.into_iter()),
                     change_address,
                     sig_op_count,
@@ -105,7 +122,7 @@ impl Generator {
                 )?
             }
             GeneratorSource::Account(account) => {
-                let account: Arc<dyn runtime::Account> = account.into();
+                let account: Arc<dyn crate::account::Account> = account.into();
                 native::GeneratorSettings::try_new_with_account(account, final_transaction_destination, final_priority_fee, None)?
             }
         };
@@ -155,6 +172,7 @@ enum GeneratorSource {
 
 /// Converts [`GeneratorSettingsObject`] to a series of properties intended for use by the [`Generator`].
 struct GeneratorSettings {
+    pub network_id: Option<NetworkId>,
     pub source: GeneratorSource,
     pub multiplexer: Option<Multiplexer<Box<Events>>>,
     pub final_transaction_destination: PaymentDestination,
@@ -168,8 +186,9 @@ struct GeneratorSettings {
 impl TryFrom<GeneratorSettingsObject> for GeneratorSettings {
     type Error = Error;
     fn try_from(args: GeneratorSettingsObject) -> std::result::Result<Self, Self::Error> {
-        // lack of outputs results in a sweep transaction compounding utxos into the change address
+        let network_id = args.try_get::<NetworkId>("networkId")?;
 
+        // lack of outputs results in a sweep transaction compounding utxos into the change address
         let outputs = args.get_value("outputs")?;
         let final_transaction_destination: PaymentDestination =
             if outputs.is_undefined() { PaymentDestination::Change } else { PaymentOutputs::try_from(outputs)?.into() };
@@ -202,6 +221,7 @@ impl TryFrom<GeneratorSettingsObject> for GeneratorSettings {
         let payload = args.get_vec_u8("payload").ok();
 
         let settings = GeneratorSettings {
+            network_id,
             source: generator_source,
             multiplexer: None,
             final_transaction_destination,

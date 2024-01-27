@@ -6,8 +6,10 @@ edition.workspace = true
 authors.workspace = true
 include.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
+arc-swap.workspace = true
 async-channel.workspace = true
 bincode.workspace = true
 crossbeam-channel.workspace = true
