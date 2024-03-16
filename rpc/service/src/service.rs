@@ -620,6 +620,10 @@ NOTE: This error usually indicates an RPC conversion error between the node and 
         Ok(GetDaaScoreTimestampEstimateResponse::new(timestamps))
     }
 
+    async fn get_utxo_return_addresses_call(&self, request: GetUtxoReturnAddressesRequest) -> RpcResult<GetUtxoReturnAddressesResponse> {
+        Ok(GetUtxoReturnAddressesResponse { return_address: None })
+    }
+
     async fn ping_call(&self, _: PingRequest) -> RpcResult<PingResponse> {
         Ok(PingResponse {})
     }

@@ -155,6 +155,10 @@ pub trait ConsensusApi: Send + Sync {
         unimplemented!()
     }
 
+    fn get_chain_block_with_daa_score(&self, txid: Hash, daa_score: u64) -> Option<Block> {
+        unimplemented!()
+    }
+
     fn get_virtual_parents(&self) -> BlockHashSet {
         unimplemented!()
     }

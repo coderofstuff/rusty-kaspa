@@ -1,7 +1,9 @@
 use crate::model::*;
 use borsh::{BorshDeserialize, BorshSchema, BorshSerialize};
+use kaspa_addresses::Address;
 use kaspa_consensus_core::api::stats::BlockCount;
 use kaspa_core::debug;
+use kaspa_hashes::Hash;
 use kaspa_notify::subscription::{single::UtxosChangedSubscription, Command};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -820,6 +822,31 @@ pub struct GetDaaScoreTimestampEstimateResponse {
 impl GetDaaScoreTimestampEstimateResponse {
     pub fn new(timestamps: Vec<u64>) -> Self {
         Self { timestamps }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, BorshSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GetUtxoReturnAddressesRequest {
+    pub txid: Hash,
+    pub accepting_block_daa_score: u64,
+}
+
+impl GetUtxoReturnAddressesRequest {
+    pub fn new(txid: Hash, accepting_block_daa_score: u64) -> Self {
+        Self { txid, accepting_block_daa_score }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, BorshSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GetUtxoReturnAddressesResponse {
+    pub return_address: Option<Address>,
+}
+
+impl GetUtxoReturnAddressesResponse {
+    pub fn new(return_address: Option<Address>) -> Self {
+        Self { return_address }
     }
 }
 

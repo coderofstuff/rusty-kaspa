@@ -7,6 +7,8 @@
 use crate::{model::*, notify::connection::ChannelConnection, RpcResult};
 use async_trait::async_trait;
 use downcast::{downcast_sync, AnySync};
+use kaspa_addresses::Address;
+use kaspa_hashes::Hash;
 use kaspa_notify::{listener::ListenerId, scope::Scope, subscription::Command};
 use std::sync::Arc;
 
@@ -303,6 +305,14 @@ pub trait RpcApi: Sync + Send + AnySync {
         &self,
         request: GetDaaScoreTimestampEstimateRequest,
     ) -> RpcResult<GetDaaScoreTimestampEstimateResponse>;
+
+    async fn get_utxo_return_addresses(&self, txid: Hash, accepting_block_daa_score: u64) -> RpcResult<Option<Address>> {
+        Ok(self.get_utxo_return_addresses_call(GetUtxoReturnAddressesRequest { txid, accepting_block_daa_score }).await?.return_address)
+    }
+    async fn get_utxo_return_addresses_call(
+        &self,
+        request: GetUtxoReturnAddressesRequest,
+    ) -> RpcResult<GetUtxoReturnAddressesResponse>;
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // Notification API
