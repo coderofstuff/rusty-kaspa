@@ -414,6 +414,7 @@ impl RpcApi for KaspaRpcClient {
             GetCoinSupply,
             GetConnectedPeerInfo,
             GetDaaScoreTimestampEstimate,
+            GetUtxoReturnAddresses,
             GetServerInfo,
             GetCurrentNetwork,
             GetHeaders,

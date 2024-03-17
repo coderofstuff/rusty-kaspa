@@ -620,7 +620,13 @@ NOTE: This error usually indicates an RPC conversion error between the node and 
         Ok(GetDaaScoreTimestampEstimateResponse::new(timestamps))
     }
 
-    async fn get_utxo_return_addresses_call(&self, request: GetUtxoReturnAddressesRequest) -> RpcResult<GetUtxoReturnAddressesResponse> {
+    async fn get_utxo_return_addresses_call(
+        &self,
+        request: GetUtxoReturnAddressesRequest,
+    ) -> RpcResult<GetUtxoReturnAddressesResponse> {
+        // let session = self.consensus_manager.consensus().session().await;
+        println!("{} {}", request.txid, request.accepting_block_daa_score);
+        // let mut maybe_spk = session.async_get_utxo_return_addresses(request.txid, request.accepting_block_daa_score).await;
         Ok(GetUtxoReturnAddressesResponse { return_address: None })
     }
 

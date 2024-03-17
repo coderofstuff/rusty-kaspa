@@ -18,7 +18,7 @@ use crate::{
     header::Header,
     pruning::{PruningPointProof, PruningPointTrustedData, PruningPointsList},
     trusted::{ExternalGhostdagData, TrustedBlock},
-    tx::{MutableTransaction, Transaction, TransactionOutpoint, UtxoEntry},
+    tx::{MutableTransaction, ScriptPublicKey, Transaction, TransactionOutpoint, UtxoEntry},
     BlockHashSet, BlueWorkType, ChainPath,
 };
 use kaspa_hashes::Hash;
@@ -155,7 +155,7 @@ pub trait ConsensusApi: Send + Sync {
         unimplemented!()
     }
 
-    fn get_chain_block_with_daa_score(&self, txid: Hash, daa_score: u64) -> Option<Block> {
+    fn get_utxo_return_addresses(&self, txid: Hash, daa_score: u64) -> Option<ScriptPublicKey> {
         unimplemented!()
     }
 

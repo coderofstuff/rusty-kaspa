@@ -234,6 +234,13 @@ impl RpcApi for RpcCoreMock {
         Err(RpcError::NotImplemented)
     }
 
+    async fn get_utxo_return_addresses_call(
+        &self,
+        _request: GetUtxoReturnAddressesRequest,
+    ) -> RpcResult<GetUtxoReturnAddressesResponse> {
+        Err(RpcError::NotImplemented)
+    }
+
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // Notification API
 

@@ -75,6 +75,7 @@ impl Factory {
                 GetServerInfo,
                 GetSyncStatus,
                 GetDaaScoreTimestampEstimate,
+                GetUtxoReturnAddresses,
                 NotifyBlockAdded,
                 NotifyNewBlockTemplate,
                 NotifyFinalityConflict,

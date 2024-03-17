@@ -544,6 +544,12 @@ async fn sanity_test() {
                 })
             }
 
+            KaspadPayloadOps::GetUtxoReturnAddresses => {
+                // get_utxo_return_addresses_call
+                // get_utxo_return_addresses_call
+                unimplemented!()
+            }
+
             KaspadPayloadOps::NotifyBlockAdded => {
                 let rpc_client = client.clone();
                 let id = listener_id;

@@ -49,15 +49,16 @@ use kaspa_consensus_core::{
     errors::{
         coinbase::CoinbaseResult,
         consensus::{ConsensusError, ConsensusResult},
+        difficulty::DifficultyError,
+        pruning::PruningImportError,
         tx::TxResult,
     },
-    errors::{difficulty::DifficultyError, pruning::PruningImportError},
     header::Header,
     muhash::MuHashExtensions,
     network::NetworkType,
     pruning::{PruningPointProof, PruningPointTrustedData, PruningPointsList},
     trusted::{ExternalGhostdagData, TrustedBlock},
-    tx::{MutableTransaction, Transaction, TransactionOutpoint, UtxoEntry},
+    tx::{MutableTransaction, ScriptPublicKey, Transaction, TransactionOutpoint, UtxoEntry},
     BlockHashSet, BlueWorkType, ChainPath,
 };
 use kaspa_consensus_notify::root::ConsensusNotificationRoot;
@@ -610,7 +611,7 @@ impl ConsensusApi for Consensus {
         sample_headers
     }
 
-    fn get_chain_block_with_daa_score(&self, txid: Hash, daa_score: u64) -> Option<Block> {
+    fn get_utxo_return_addresses(&self, txid: Hash, daa_score: u64) -> Option<ScriptPublicKey> {
         // We need consistency between the past pruning points, selected chain and header store reads
         let _guard = self.pruning_lock.blocking_read();
 
@@ -640,21 +641,25 @@ impl ConsensusApi for Consensus {
                         high_index = mid - 1;
                     }
                 } else {
-                    return None;
+                    println!("Did not find a compact header with hash {}", hash);
+                    break;
                 }
             } else {
-                return None;
+                println!("Did not find a hash at index {}", mid);
+                break;
             }
         }
 
         if matching_chain_block_hash.is_none() {
+            println!("No matching chain block hash found");
             return None;
         }
 
         if let Ok(acceptance_data) = self.acceptance_data_store.get(matching_chain_block_hash.unwrap()) {
-            let containing_acceptance = acceptance_data.iter().find(|&mbad| {
-                mbad.accepted_transactions.iter().find(|&tx| tx.transaction_id == txid).is_some()
-            }).cloned();
+            let containing_acceptance = acceptance_data
+                .iter()
+                .find(|&mbad| mbad.accepted_transactions.iter().find(|&tx| tx.transaction_id == txid).is_some())
+                .cloned();
 
             if let Some(containing_acceptance) = containing_acceptance {
                 // I found the merged block containing the TXID
@@ -663,9 +668,9 @@ impl ConsensusApi for Consensus {
                 return None;
             }
 
-            return None
+            return None;
         } else {
-            return None
+            return None;
         };
     }
 
