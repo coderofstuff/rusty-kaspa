@@ -81,7 +81,7 @@ pub enum KaspadPayloadOps {
     GetServerInfo,
     GetSyncStatus,
     GetDaaScoreTimestampEstimate,
-    GetUtxoReturnAddresses,
+    GetUtxoReturnAddress,
 
     // Subscription commands for starting/stopping notifications
     NotifyBlockAdded,

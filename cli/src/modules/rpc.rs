@@ -229,7 +229,7 @@ impl Rpc {
                     }
                 }
             }
-            RpcApiOps::GetUtxoReturnAddresses => {
+            RpcApiOps::GetUtxoReturnAddress => {
                 if argv.is_empty() || argv.len() != 2 {
                     return Err(Error::custom("Please specify a txid and a accepting_block_daa_score"));
                 }
@@ -246,7 +246,7 @@ impl Rpc {
                 tprintln!(ctx, "Params passed: '{txid}' '{accepting_block_daa_score}'\r\n");
 
                 let rpc_result =
-                    rpc.get_utxo_return_addresses_call(GetUtxoReturnAddressesRequest { txid, accepting_block_daa_score }).await;
+                    rpc.get_utxo_return_address_call(GetUtxoReturnAddressRequest { txid, accepting_block_daa_score }).await;
 
                 match rpc_result {
                     Ok(result) => self.println(&ctx, result),

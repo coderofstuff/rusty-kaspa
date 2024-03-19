@@ -59,7 +59,7 @@ message KaspadRequest {
     GetServerInfoRequestMessage getServerInfoRequest = 1092;
     GetSyncStatusRequestMessage getSyncStatusRequest = 1094;
     GetDaaScoreTimestampEstimateRequestMessage getDaaScoreTimestampEstimateRequest = 1096;
-    GetUtxoReturnAddressesRequestMessage getUtxoReturnAddressesRequest = 1098;
+    GetUtxoReturnAddressRequestMessage GetUtxoReturnAddressRequest = 1098;
   }
 }
 
@@ -118,8 +118,8 @@ message KaspadResponse {
     GetMetricsResponseMessage getMetricsResponse= 1091;
     GetServerInfoResponseMessage getServerInfoResponse = 1093;
     GetSyncStatusResponseMessage getSyncStatusResponse = 1095;
-    GetDaaScoreTimestampEstimateResponseMessage GetDaaScoreTimestampEstimateResponse = 1097;
-    GetUtxoReturnAddressesResponseMessage GetUtxoReturnAddressesResponse = 1099;
+    GetDaaScoreTimestampEstimateResponseMessage getDaaScoreTimestampEstimateResponse = 1097;
+    GetUtxoReturnAddressResponseMessage GetUtxoReturnAddressResponse = 1099;
   }
 }
 

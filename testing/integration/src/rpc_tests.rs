@@ -544,10 +544,19 @@ async fn sanity_test() {
                 })
             }
 
-            KaspadPayloadOps::GetUtxoReturnAddresses => {
-                // get_utxo_return_addresses_call
-                // get_utxo_return_addresses_call
-                unimplemented!()
+            KaspadPayloadOps::GetUtxoReturnAddress => {
+                let rpc_client = client.clone();
+                tst!(op, {
+                    let results = rpc_client
+                        .get_utxo_return_address_call(GetUtxoReturnAddressRequest {
+                            accepting_block_daa_score: 1000,
+                            txid: RpcHash::from_bytes([0; 32]),
+                        })
+                        .await
+                        .unwrap();
+
+                    info!("Results: {:?}", results);
+                })
             }
 
             KaspadPayloadOps::NotifyBlockAdded => {

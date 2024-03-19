@@ -611,7 +611,7 @@ impl ConsensusApi for Consensus {
         sample_headers
     }
 
-    fn get_utxo_return_addresses(&self, txid: Hash, daa_score: u64) -> Option<ScriptPublicKey> {
+    fn get_utxo_return_address(&self, txid: Hash, daa_score: u64) -> Option<ScriptPublicKey> {
         // We need consistency between the past pruning points, selected chain and header store reads
         let _guard = self.pruning_lock.blocking_read();
 

@@ -306,16 +306,10 @@ pub trait RpcApi: Sync + Send + AnySync {
         request: GetDaaScoreTimestampEstimateRequest,
     ) -> RpcResult<GetDaaScoreTimestampEstimateResponse>;
 
-    async fn get_utxo_return_addresses(&self, txid: Hash, accepting_block_daa_score: u64) -> RpcResult<Option<Address>> {
-        Ok(self
-            .get_utxo_return_addresses_call(GetUtxoReturnAddressesRequest { txid, accepting_block_daa_score })
-            .await?
-            .return_address)
+    async fn get_utxo_return_address(&self, txid: Hash, accepting_block_daa_score: u64) -> RpcResult<Option<Address>> {
+        Ok(self.get_utxo_return_address_call(GetUtxoReturnAddressRequest { txid, accepting_block_daa_score }).await?.return_address)
     }
-    async fn get_utxo_return_addresses_call(
-        &self,
-        request: GetUtxoReturnAddressesRequest,
-    ) -> RpcResult<GetUtxoReturnAddressesResponse>;
+    async fn get_utxo_return_address_call(&self, request: GetUtxoReturnAddressRequest) -> RpcResult<GetUtxoReturnAddressResponse>;
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // Notification API

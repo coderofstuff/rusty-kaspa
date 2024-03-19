@@ -87,7 +87,7 @@ pub enum RpcApiOps {
     /// Get DAA Score timestamp estimate
     GetDaaScoreTimestampEstimate,
     /// Get UTXO Return Addresses
-    GetUtxoReturnAddresses,
+    GetUtxoReturnAddress,
 
     // Subscription commands for starting/stopping notifications
     NotifyBlockAdded,

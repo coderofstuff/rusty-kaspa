@@ -291,8 +291,8 @@ impl ConsensusSessionOwned {
         self.clone().spawn_blocking(|c| c.get_chain_block_samples()).await
     }
 
-    pub async fn async_get_utxo_return_addresses(&self, txid: Hash, accepting_block_daa_score: u64) -> Option<ScriptPublicKey> {
-        self.clone().spawn_blocking(move |c| c.get_utxo_return_addresses(txid, accepting_block_daa_score)).await
+    pub async fn async_get_utxo_return_address(&self, txid: Hash, accepting_block_daa_score: u64) -> Option<ScriptPublicKey> {
+        self.clone().spawn_blocking(move |c| c.get_utxo_return_address(txid, accepting_block_daa_score)).await
     }
 
     /// Returns the antipast of block `hash` from the POV of `context`, i.e. `antipast(hash) ∩ past(context)`.

@@ -394,13 +394,13 @@ from!(item: RpcResult<&kaspa_rpc_core::GetDaaScoreTimestampEstimateResponse>, pr
     Self { timestamps: item.timestamps.clone(), error: None }
 });
 
-from!(item: &kaspa_rpc_core::GetUtxoReturnAddressesRequest, protowire::GetUtxoReturnAddressesRequestMessage, {
+from!(item: &kaspa_rpc_core::GetUtxoReturnAddressRequest, protowire::GetUtxoReturnAddressRequestMessage, {
     Self {
         txid: item.txid.to_string(),
         accepting_block_daa_score: item.accepting_block_daa_score
     }
 });
-from!(item: RpcResult<&kaspa_rpc_core::GetUtxoReturnAddressesResponse>, protowire::GetUtxoReturnAddressesResponseMessage, {
+from!(item: RpcResult<&kaspa_rpc_core::GetUtxoReturnAddressResponse>, protowire::GetUtxoReturnAddressResponseMessage, {
     if let Some(return_address) = &item.return_address {
         Self { return_address: return_address.into(), error: None }
     } else {
@@ -806,13 +806,13 @@ try_from!(item: &protowire::GetDaaScoreTimestampEstimateResponseMessage, RpcResu
     Self { timestamps: item.timestamps.clone() }
 });
 
-try_from!(item: &protowire::GetUtxoReturnAddressesRequestMessage, kaspa_rpc_core::GetUtxoReturnAddressesRequest , {
+try_from!(item: &protowire::GetUtxoReturnAddressRequestMessage, kaspa_rpc_core::GetUtxoReturnAddressRequest , {
     Self {
         txid: if let Ok(txid) = Hash::from_str(&item.txid) { txid } else { Hash::default() },
         accepting_block_daa_score: item.accepting_block_daa_score
     }
 });
-try_from!(item: &protowire::GetUtxoReturnAddressesResponseMessage, RpcResult<kaspa_rpc_core::GetUtxoReturnAddressesResponse>, {
+try_from!(item: &protowire::GetUtxoReturnAddressResponseMessage, RpcResult<kaspa_rpc_core::GetUtxoReturnAddressResponse>, {
     // Self { return_address: Some(Address::from(item.return_address)) }
     // TODO: import Address
     Self { return_address: None }

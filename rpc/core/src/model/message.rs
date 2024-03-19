@@ -827,24 +827,24 @@ impl GetDaaScoreTimestampEstimateResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, BorshSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct GetUtxoReturnAddressesRequest {
-    pub txid: Hash,
+pub struct GetUtxoReturnAddressRequest {
+    pub txid: RpcHash,
     pub accepting_block_daa_score: u64,
 }
 
-impl GetUtxoReturnAddressesRequest {
-    pub fn new(txid: Hash, accepting_block_daa_score: u64) -> Self {
+impl GetUtxoReturnAddressRequest {
+    pub fn new(txid: RpcHash, accepting_block_daa_score: u64) -> Self {
         Self { txid, accepting_block_daa_score }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, BorshSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct GetUtxoReturnAddressesResponse {
+pub struct GetUtxoReturnAddressResponse {
     pub return_address: Option<Address>,
 }
 
-impl GetUtxoReturnAddressesResponse {
+impl GetUtxoReturnAddressResponse {
     pub fn new(return_address: Option<Address>) -> Self {
         Self { return_address }
     }
