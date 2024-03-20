@@ -1,9 +1,7 @@
 use crate::model::*;
 use borsh::{BorshDeserialize, BorshSchema, BorshSerialize};
-use kaspa_addresses::Address;
 use kaspa_consensus_core::api::stats::BlockCount;
 use kaspa_core::debug;
-use kaspa_hashes::Hash;
 use kaspa_notify::subscription::{single::UtxosChangedSubscription, Command};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -841,11 +839,11 @@ impl GetUtxoReturnAddressRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, BorshSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GetUtxoReturnAddressResponse {
-    pub return_address: Option<Address>,
+    pub return_address: Option<RpcAddress>,
 }
 
 impl GetUtxoReturnAddressResponse {
-    pub fn new(return_address: Option<Address>) -> Self {
+    pub fn new(return_address: Option<RpcAddress>) -> Self {
         Self { return_address }
     }
 }
