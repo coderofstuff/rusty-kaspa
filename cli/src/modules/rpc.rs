@@ -234,26 +234,14 @@ impl Rpc {
                     return Err(Error::custom("Please specify a txid and a accepting_block_daa_score"));
                 }
 
-                let result =
-                    rpc.get_daa_score_timestamp_estimate_call(GetDaaScoreTimestampEstimateRequest { daa_scores: vec![10000] }).await?;
-                self.println(&ctx, result);
-
                 let txid = argv.remove(0);
                 let txid = RpcHash::from_hex(txid.as_str())?;
 
                 let accepting_block_daa_score = argv.remove(0).parse::<u64>()?;
 
-                tprintln!(ctx, "Params passed: '{txid}' '{accepting_block_daa_score}'\r\n");
+                let result = rpc.get_utxo_return_address_call(GetUtxoReturnAddressRequest { txid, accepting_block_daa_score }).await?;
 
-                let rpc_result =
-                    rpc.get_utxo_return_address_call(GetUtxoReturnAddressRequest { txid, accepting_block_daa_score }).await;
-
-                match rpc_result {
-                    Ok(result) => self.println(&ctx, result),
-                    Err(e) => {
-                        tprintln!(ctx, "my error: {e}")
-                    }
-                }
+                self.println(&ctx, result);
             }
             _ => {
                 tprintln!(ctx, "rpc method exists but is not supported by the cli: '{op_str}'\r\n");
