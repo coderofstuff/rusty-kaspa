@@ -629,7 +629,7 @@ impl ConsensusApi for Consensus {
         // let mut locator = Vec::with_capacity((high_index - low_index).ceiling_log_base_2() as usize);
         // let mut current_index = high_index;
         let mut matching_chain_block_hash: Option<Hash> = None;
-        while low_index < high_index {
+        while low_index <= high_index {
             let mid = low_index + (high_index - low_index) / 2;
 
             if let Ok(hash) = sc_read.get_by_index(mid) {
