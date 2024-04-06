@@ -23,9 +23,9 @@ use std::{collections::HashMap, error::Error, fs, path::PathBuf, sync::Arc};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ConsensusEntry {
-    key: u64,
-    directory_name: String,
-    creation_timestamp: u64,
+    pub key: u64,
+    pub directory_name: String,
+    pub creation_timestamp: u64,
 }
 
 impl MemSizeEstimator for ConsensusEntry {}
@@ -187,7 +187,7 @@ impl MultiConsensusManagementStore {
         })
     }
 
-    fn iterate_inactive_entries(&self) -> impl Iterator<Item = Result<ConsensusEntry, Box<dyn Error>>> + '_ {
+    pub fn iterate_inactive_entries(&self) -> impl Iterator<Item = Result<ConsensusEntry, Box<dyn Error>>> + '_ {
         let current_consensus_key = self.metadata.read().unwrap().current_consensus_key;
         self.iterator().filter(move |entry_result| {
             if let Ok(entry) = entry_result {
@@ -198,7 +198,7 @@ impl MultiConsensusManagementStore {
         })
     }
 
-    fn delete_entry(&mut self, entry: ConsensusEntry) -> StoreResult<()> {
+    pub fn delete_entry(&mut self, entry: ConsensusEntry) -> StoreResult<()> {
         self.entries.delete(DirectDbWriter::new(&self.db), entry.key.into())
     }
 

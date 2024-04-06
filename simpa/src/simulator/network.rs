@@ -5,15 +5,16 @@ use kaspa_consensus::consensus::factory::MultiConsensusManagementStore;
 use kaspa_consensus::model::stores::DB;
 use kaspa_consensus_notify::root::ConsensusNotificationRoot;
 use kaspa_consensusmanager::{ConsensusFactory, ConsensusInstance, ConsensusManager, DynConsensusCtl, SessionLock};
-use kaspa_core::info;
 use kaspa_core::task::service::AsyncService;
 use kaspa_core::task::tick::TickService;
 use kaspa_core::time::unix_now;
+use kaspa_core::{info, warn};
 use kaspa_mining::manager::{MiningManager, MiningManagerProxy};
 use kaspa_mining::MiningCounters;
 use kaspa_p2p_flows::flow_context::FlowContext;
 use kaspa_p2p_flows::service::P2pService;
 use parking_lot::RwLock;
+use std::fs;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use tokio::runtime::Runtime;
@@ -29,6 +30,8 @@ use kaspa_database::utils::DbLifetime;
 use kaspa_database::{create_permanent_db, create_temp_db};
 use kaspa_utils::fd_budget;
 use kaspa_utils::sim::Simulation;
+
+use itertools::Itertools;
 
 type ConsensusWrapper = (Arc<Consensus>, Vec<JoinHandle<()>>, DbLifetime);
 
@@ -61,9 +64,11 @@ impl SimulatorConsensusFactory {
 
 impl ConsensusFactory for SimulatorConsensusFactory {
     fn new_staging_consensus(&self) -> (kaspa_consensusmanager::ConsensusInstance, kaspa_consensusmanager::DynConsensusCtl) {
-        let dir = self.db.path().to_path_buf().join("tmp");
+        let entry = self.management_store.write().new_staging_consensus_entry().unwrap();
+        let dir = self.db.path().to_path_buf().join(entry.directory_name);
         let db = kaspa_database::prelude::ConnBuilder::default()
             .with_db_path(dir)
+            .with_parallelism(num_cpus::get())
             .with_files_limit(10) // active and staging consensuses should have equal budgets
             .build()
             .unwrap();
@@ -76,17 +81,81 @@ impl ConsensusFactory for SimulatorConsensusFactory {
             self.consensus.notification_root().clone(),
             Default::default(),
             Default::default(),
-            unix_now(),
+            entry.creation_timestamp,
         ));
+        // let dir = self.db.path().to_path_buf().join("tmp");
+        // let db = kaspa_database::prelude::ConnBuilder::default()
+        //     .with_db_path(dir)
+        //     .with_files_limit(10) // active and staging consensuses should have equal budgets
+        //     .build()
+        //     .unwrap();
+
+        // let session_lock = SessionLock::new();
+        // let consensus = Arc::new(Consensus::new(
+        //     db.clone(),
+        //     Arc::new(self.config.to_builder().skip_adding_genesis().build()),
+        //     session_lock.clone(),
+        //     self.consensus.notification_root().clone(),
+        //     Default::default(),
+        //     Default::default(),
+        //     unix_now(),
+        // ));
 
         (ConsensusInstance::new(session_lock, consensus.clone()), Arc::new(Ctl::new(self.management_store.clone(), db, consensus)))
     }
 
-    fn close(&self) {}
+    fn close(&self) {
+        self.consensus.notification_root().close();
+    }
 
-    fn delete_inactive_consensus_entries(&self) {}
+    fn delete_inactive_consensus_entries(&self) {
+        // Staging entry is deleted also by archival nodes since it represents non-final data
+        self.delete_staging_entry();
 
-    fn delete_staging_entry(&self) {}
+        if self.config.is_archival {
+            return;
+        }
+
+        let mut write_guard = self.management_store.write();
+        let entries_to_delete = write_guard
+            .iterate_inactive_entries()
+            .filter_map(|entry_result| {
+                let entry = entry_result.unwrap();
+                let dir = self.db.path().to_path_buf().join(entry.directory_name.clone());
+                if dir.exists() {
+                    match fs::remove_dir_all(dir) {
+                        Ok(_) => Some(entry),
+                        Err(e) => {
+                            warn!("Error deleting consensus entry {}: {}", entry.key, e);
+                            None
+                        }
+                    }
+                } else {
+                    Some(entry)
+                }
+            })
+            .collect_vec();
+
+        for entry in entries_to_delete {
+            write_guard.delete_entry(entry).unwrap();
+        }
+    }
+
+    fn delete_staging_entry(&self) {
+        let mut write_guard = self.management_store.write();
+        if let Some(entry) = write_guard.staging_consensus_entry() {
+            let dir = self.db.path().to_path_buf().join(entry.directory_name.clone());
+            match fs::remove_dir_all(dir) {
+                Ok(_) => {
+                    write_guard.delete_entry(entry).unwrap();
+                }
+                Err(e) => {
+                    warn!("Error deleting staging consensus entry {}: {}", entry.key, e);
+                }
+            };
+            write_guard.cancel_staging_consensus().unwrap();
+        }
+    }
 
     fn new_active_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
         let session_lock = SessionLock::new();
