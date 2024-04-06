@@ -310,6 +310,8 @@ impl KaspaNetworkSimulator {
                 &self.config,
                 target_txs_per_block,
                 self.target_blocks,
+                self.runtime.clone(),
+                flow_context.hub().clone(),
             ));
             self.simulation.register(i, miner_process);
             self.consensuses.push((consensus, handles, lifetime));

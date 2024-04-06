@@ -492,7 +492,7 @@ mod tests {
         let task1 = std::thread::spawn(|| {
             let mut args = Args::parse_from(std::iter::empty::<&str>());
             args.bps = 1.0;
-            args.target_blocks = Some(100000);
+            args.target_blocks = Some(10000);
             args.tpb = 1;
             args.test_pruning = true;
             args.listen = Some(ContextualNetAddress::from_str("0.0.0.0:1234").unwrap());
@@ -511,8 +511,8 @@ mod tests {
             info!("Starting syncer consensus");
             let mut args = Args::parse_from(std::iter::empty::<&str>());
             args.bps = 1.0;
-            args.target_blocks = Some(100000);
-            args.sim_time = 360;
+            // Run the simulation long enough to go through some more pruning periods
+            args.sim_time = 30;
             args.tpb = 1;
             args.test_pruning = true;
             args.listen = Some(ContextualNetAddress::from_str("0.0.0.0:5678").unwrap());

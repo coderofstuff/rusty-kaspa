@@ -5072,6 +5072,7 @@ dependencies = [
  "kaspa-hashes",
  "kaspa-mining",
  "kaspa-p2p-flows",
+ "kaspa-p2p-lib",
  "kaspa-perf-monitor",
  "kaspa-utils",
  "log",

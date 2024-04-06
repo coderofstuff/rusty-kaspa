@@ -14,6 +14,9 @@ use kaspa_consensus_core::tx::{
 };
 use kaspa_consensus_core::utxo::utxo_view::UtxoView;
 use kaspa_core::trace;
+use kaspa_p2p_lib::pb::kaspad_message::Payload;
+use kaspa_p2p_lib::pb::InvRelayBlockMessage;
+use kaspa_p2p_lib::{make_message, Hub};
 use kaspa_utils::sim::{Environment, Process, Resumption, Suspension};
 use rand::rngs::ThreadRng;
 use rand::Rng;
@@ -24,6 +27,7 @@ use std::iter::once;
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
+use tokio::runtime::Runtime;
 
 struct OnetimeTxSelector {
     txs: Option<Vec<Transaction>>,
@@ -79,6 +83,10 @@ pub struct Miner {
 
     // Mass calculator
     mass_calculator: MassCalculator,
+
+    // hub
+    rt: Arc<Runtime>,
+    hub: Hub,
 }
 
 impl Miner {
@@ -92,6 +100,8 @@ impl Miner {
         params: &Params,
         target_txs_per_block: u64,
         target_blocks: Option<u64>,
+        rt: Arc<Runtime>,
+        hub: Hub,
     ) -> Self {
         let (schnorr_public_key, _) = pk.x_only_public_key();
         let script_pub_key_script = once(0x20).chain(schnorr_public_key.serialize()).chain(once(0xac)).collect_vec(); // TODO: Use script builder when available to create p2pk properly
@@ -116,6 +126,8 @@ impl Miner {
                 params.mass_per_sig_op,
                 params.storage_mass_parameter,
             ),
+            rt,
+            hub,
         }
     }
 
@@ -229,9 +241,15 @@ impl Miner {
             Suspension::Halt
         } else {
             let session = self.consensus.acquire_session();
-            let status = futures::executor::block_on(self.consensus.validate_and_insert_block(block).virtual_state_task).unwrap();
+            let status =
+                futures::executor::block_on(self.consensus.validate_and_insert_block(block.clone()).virtual_state_task).unwrap();
             assert!(status.is_utxo_valid_or_pending());
+
             drop(session);
+
+            self.rt.block_on(
+                self.hub.broadcast(make_message!(Payload::InvRelayBlock, InvRelayBlockMessage { hash: Some(block.hash().into()) })),
+            );
             Suspension::Idle
         }
     }
