@@ -289,7 +289,7 @@ fn apply_args_to_consensus_params(args: &Args, params: &mut Params) {
     // We have no actual PoW in the simulation, so the true max is most reflective,
     // however we avoid the actual max since it is reserved for the DB prefix scheme
     params.max_block_level = BlockLevel::MAX - 1;
-    params.genesis.timestamp = 0;
+    // params.genesis.timestamp = 0;
     if args.testnet11 {
         info!(
             "Using kaspa-testnet-11 configuration (GHOSTDAG K={}, DAA window size={}, Median time window size={})",
@@ -484,7 +484,7 @@ mod tests {
 
         let task2 = std::thread::spawn(|| {
             // Wait a bit before joining
-            sleep(Duration::from_secs(45));
+            sleep(Duration::from_secs(30));
             let mut args = Args::parse_from(std::iter::empty::<&str>());
             args.bps = 1.0;
             args.target_blocks = Some(100000);
