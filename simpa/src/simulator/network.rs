@@ -1,9 +1,24 @@
 use async_channel::unbounded;
+use kaspa_addressmanager::{AddressManager, NetAddress};
+use kaspa_consensus::consensus::ctl::Ctl;
+use kaspa_consensus::consensus::factory::MultiConsensusManagementStore;
+use kaspa_consensus::model::stores::DB;
 use kaspa_consensus_notify::root::ConsensusNotificationRoot;
+use kaspa_consensusmanager::{ConsensusFactory, ConsensusInstance, ConsensusManager, DynConsensusCtl, SessionLock};
+use kaspa_core::info;
+use kaspa_core::task::service::AsyncService;
+use kaspa_core::task::tick::TickService;
 use kaspa_core::time::unix_now;
+use kaspa_mining::manager::{MiningManager, MiningManagerProxy};
+use kaspa_mining::MiningCounters;
+use kaspa_p2p_flows::flow_context::FlowContext;
+use kaspa_p2p_flows::service::P2pService;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use tokio::runtime::Runtime;
 
+use super::idler::Idler;
 use super::miner::Miner;
 
 use kaspa_consensus::config::Config;
@@ -17,6 +32,72 @@ use kaspa_utils::sim::Simulation;
 
 type ConsensusWrapper = (Arc<Consensus>, Vec<JoinHandle<()>>, DbLifetime);
 
+struct SimulatorConsensusFactory {
+    consensus: Arc<Consensus>,
+    config: Arc<Config>,
+    management_store: Arc<RwLock<MultiConsensusManagementStore>>,
+    db: Arc<DB>,
+}
+
+impl SimulatorConsensusFactory {
+    fn new(notification_root: Arc<ConsensusNotificationRoot>, management_store: Arc<DB>, db: Arc<DB>, config: Arc<Config>) -> Self {
+        let consensus = Arc::new(Consensus::new(
+            db.clone(),
+            config.clone(),
+            Default::default(),
+            notification_root,
+            Default::default(),
+            Default::default(),
+            unix_now(),
+        ));
+
+        Self { consensus, config, db, management_store: Arc::new(RwLock::new(MultiConsensusManagementStore::new(management_store))) }
+    }
+
+    fn get_consensus(&self) -> Arc<Consensus> {
+        self.consensus.clone()
+    }
+}
+
+impl ConsensusFactory for SimulatorConsensusFactory {
+    fn new_staging_consensus(&self) -> (kaspa_consensusmanager::ConsensusInstance, kaspa_consensusmanager::DynConsensusCtl) {
+        let dir = self.db.path().to_path_buf().join("tmp");
+        let db = kaspa_database::prelude::ConnBuilder::default()
+            .with_db_path(dir)
+            .with_files_limit(10) // active and staging consensuses should have equal budgets
+            .build()
+            .unwrap();
+
+        let session_lock = SessionLock::new();
+        let consensus = Arc::new(Consensus::new(
+            db.clone(),
+            Arc::new(self.config.to_builder().skip_adding_genesis().build()),
+            session_lock.clone(),
+            self.consensus.notification_root().clone(),
+            Default::default(),
+            Default::default(),
+            unix_now(),
+        ));
+
+        (ConsensusInstance::new(session_lock, consensus.clone()), Arc::new(Ctl::new(self.management_store.clone(), db, consensus)))
+    }
+
+    fn close(&self) {}
+
+    fn delete_inactive_consensus_entries(&self) {}
+
+    fn delete_staging_entry(&self) {}
+
+    fn new_active_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
+        let session_lock = SessionLock::new();
+
+        (
+            ConsensusInstance::new(session_lock, self.consensus.clone()),
+            Arc::new(Ctl::new(self.management_store.clone(), self.db.clone(), self.consensus.clone())),
+        )
+    }
+}
+
 pub struct KaspaNetworkSimulator {
     // Internal simulation env
     pub(super) simulation: Simulation<Block>,
@@ -28,10 +109,20 @@ pub struct KaspaNetworkSimulator {
     bps: f64,                   // Blocks per second
     target_blocks: Option<u64>, // Target simulation blocks
     output_dir: Option<String>, // Possible permanent output directory
+    add_peers: Vec<NetAddress>,
+    runtime: Arc<Runtime>,
 }
 
 impl KaspaNetworkSimulator {
-    pub fn new(delay: f64, bps: f64, target_blocks: Option<u64>, config: Arc<Config>, output_dir: Option<String>) -> Self {
+    pub fn new(
+        delay: f64,
+        bps: f64,
+        target_blocks: Option<u64>,
+        config: Arc<Config>,
+        output_dir: Option<String>,
+        add_peers: Vec<NetAddress>,
+        runtime: Arc<Runtime>,
+    ) -> Self {
         Self {
             simulation: Simulation::with_start_time((delay * 1000.0) as u64, config.genesis.timestamp),
             consensuses: Vec::new(),
@@ -39,6 +130,8 @@ impl KaspaNetworkSimulator {
             config,
             target_blocks,
             output_dir,
+            add_peers,
+            runtime,
         }
     }
 
@@ -75,17 +168,67 @@ impl KaspaNetworkSimulator {
                 (_, _, false, _) => create_temp_db!(builder),
             };
 
+            // <P2P Setup>
+            let meta_db = kaspa_database::prelude::ConnBuilder::default()
+                .with_db_path(db.path().to_path_buf().join("meta"))
+                .with_files_limit(5)
+                .build()
+                .unwrap();
+
+            let tick_service = Arc::new(TickService::new());
+            let mining_counters = Arc::new(MiningCounters::default());
+            let mining_manager = MiningManagerProxy::new(Arc::new(MiningManager::new_with_extended_config(
+                self.config.target_time_per_block,
+                false,
+                self.config.max_block_mass,
+                self.config.ram_scale,
+                self.config.block_template_cache_lifetime,
+                mining_counters,
+            )));
+            let (address_manager, _) = AddressManager::new(self.config.clone(), meta_db.clone(), tick_service.clone());
             let (dummy_notification_sender, _) = unbounded();
             let notification_root = Arc::new(ConsensusNotificationRoot::new(dummy_notification_sender));
-            let consensus = Arc::new(Consensus::new(
-                db,
+
+            let consensus_factory =
+                Arc::new(SimulatorConsensusFactory::new(notification_root.clone(), meta_db, db.clone(), self.config.clone()));
+            let consensus_manager = Arc::new(ConsensusManager::new(consensus_factory.clone()));
+
+            let flow_context = Arc::new(FlowContext::new(
+                consensus_manager.clone(),
+                address_manager,
                 self.config.clone(),
-                Default::default(),
-                notification_root,
-                Default::default(),
-                Default::default(),
-                unix_now(),
+                mining_manager.clone(),
+                tick_service.clone(),
+                notification_root.clone(),
             ));
+            info!("Add Peers: {:#?}", self.add_peers);
+            let p2p_service: Arc<dyn AsyncService> = Arc::new(P2pService::new(
+                flow_context.clone(),
+                vec![],
+                self.add_peers.clone(),
+                self.config.p2p_listen_address.normalize(1234).into(),
+                1,
+                1,
+                Default::default(),
+                self.config.default_p2p_port(),
+                Default::default(),
+            ));
+
+            self.runtime.spawn(async { tick_service.start().await });
+            self.runtime.spawn(async { p2p_service.start().await });
+            // </P2P Setup>
+
+            // let consensus = Arc::new(Consensus::new(
+            //     db,
+            //     self.config.clone(),
+            //     Default::default(),
+            //     notification_root,
+            //     Default::default(),
+            //     Default::default(),
+            //     unix_now(),
+            // ));
+            let consensus = consensus_factory.get_consensus();
+
             let handles = consensus.run_processors();
             let (sk, pk) = secp.generate_keypair(&mut rng);
             let miner_process = Box::new(Miner::new(
@@ -101,6 +244,86 @@ impl KaspaNetworkSimulator {
             ));
             self.simulation.register(i, miner_process);
             self.consensuses.push((consensus, handles, lifetime));
+        }
+
+        if num_miners == 0 {
+            let mut builder = ConnBuilder::default().with_files_limit(fd_budget::limit() / 4 as i32);
+            if let Some(rocksdb_files_limit) = rocksdb_files_limit {
+                builder = builder.with_files_limit(rocksdb_files_limit);
+            }
+            if let Some(rocksdb_mem_budget) = rocksdb_mem_budget {
+                builder = builder.with_mem_budget(rocksdb_mem_budget);
+            }
+            let (lifetime, db) = match (true, &self.output_dir, rocksdb_stats, rocksdb_stats_period_sec) {
+                (true, Some(dir), true, Some(rocksdb_stats_period_sec)) => {
+                    create_permanent_db!(dir, builder.enable_stats().with_stats_period(rocksdb_stats_period_sec))
+                }
+                (true, Some(dir), true, None) => create_permanent_db!(dir, builder.enable_stats()),
+                (true, Some(dir), false, _) => create_permanent_db!(dir, builder),
+
+                (_, _, true, Some(rocksdb_stats_period_sec)) => {
+                    create_temp_db!(builder.enable_stats().with_stats_period(rocksdb_stats_period_sec))
+                }
+                (_, _, true, None) => create_temp_db!(builder.enable_stats()),
+                (_, _, false, _) => create_temp_db!(builder),
+            };
+
+            // <P2P Setup>
+            let meta_db = kaspa_database::prelude::ConnBuilder::default()
+                .with_db_path(db.path().to_path_buf().join("meta"))
+                .with_files_limit(5)
+                .build()
+                .unwrap();
+
+            let tick_service = Arc::new(TickService::new());
+            let mining_counters = Arc::new(MiningCounters::default());
+            let mining_manager = MiningManagerProxy::new(Arc::new(MiningManager::new_with_extended_config(
+                self.config.target_time_per_block,
+                false,
+                self.config.max_block_mass,
+                self.config.ram_scale,
+                self.config.block_template_cache_lifetime,
+                mining_counters,
+            )));
+            let (address_manager, _) = AddressManager::new(self.config.clone(), meta_db.clone(), tick_service.clone());
+            let (dummy_notification_sender, _) = unbounded();
+            let notification_root = Arc::new(ConsensusNotificationRoot::new(dummy_notification_sender));
+
+            let consensus_factory =
+                Arc::new(SimulatorConsensusFactory::new(notification_root.clone(), meta_db, db.clone(), self.config.clone()));
+            let consensus_manager = Arc::new(ConsensusManager::new(consensus_factory.clone()));
+
+            let flow_context = Arc::new(FlowContext::new(
+                consensus_manager.clone(),
+                address_manager,
+                self.config.clone(),
+                mining_manager.clone(),
+                tick_service.clone(),
+                notification_root.clone(),
+            ));
+            info!("Add Peers: {:#?}", self.add_peers);
+            let p2p_service: Arc<dyn AsyncService> = Arc::new(P2pService::new(
+                flow_context.clone(),
+                vec![],
+                self.add_peers.clone(),
+                self.config.p2p_listen_address.normalize(5678).into(),
+                1,
+                1,
+                Default::default(),
+                self.config.default_p2p_port(),
+                Default::default(),
+            ));
+
+            self.runtime.spawn(async { tick_service.start().await });
+            self.runtime.spawn(async { p2p_service.start().await });
+            // </P2P Setup>
+
+            let consensus = consensus_factory.get_consensus();
+
+            let handles = consensus.run_processors();
+            self.consensuses.push((consensus, handles, lifetime));
+
+            self.simulation.register(0, Box::new(Idler::new()));
         }
         self
     }

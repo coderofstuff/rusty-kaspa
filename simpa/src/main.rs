@@ -2,6 +2,7 @@ use async_channel::unbounded;
 use clap::Parser;
 use futures::{future::try_join_all, Future};
 use itertools::Itertools;
+use kaspa_addressmanager::NetAddress;
 use kaspa_alloc::init_allocator_with_default_settings;
 use kaspa_consensus::{
     config::ConfigBuilder,
@@ -25,7 +26,7 @@ use kaspa_database::prelude::ConnBuilder;
 use kaspa_database::{create_temp_db, load_existing_db};
 use kaspa_hashes::Hash;
 use kaspa_perf_monitor::{builder::Builder, counters::CountersSnapshot};
-use kaspa_utils::fd_budget;
+use kaspa_utils::{fd_budget, networking::ContextualNetAddress};
 use simulator::network::KaspaNetworkSimulator;
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
@@ -117,6 +118,10 @@ struct Args {
     rocksdb_files_limit: Option<i32>,
     #[arg(long)]
     rocksdb_mem_budget: Option<usize>,
+
+    /// Listen address
+    listen: Option<ContextualNetAddress>,
+    add_peers: Vec<NetAddress>,
 }
 
 #[cfg(feature = "heap")]
@@ -145,7 +150,7 @@ fn main() {
 }
 
 fn main_impl(mut args: Args) {
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
 
     let stop_perf_monitor = args.perf_metrics.then(|| {
         let ts = Arc::new(TickService::new());
@@ -183,7 +188,10 @@ fn main_impl(mut args: Args) {
         .apply_args(|config| apply_args_to_consensus_params(&args, &mut config.params))
         .apply_args(|config| apply_args_to_perf_params(&args, &mut config.perf))
         .adjust_perf_params_to_consensus_params()
-        .apply_args(|config| config.ram_scale = args.ram_scale)
+        .apply_args(|config| {
+            config.ram_scale = args.ram_scale;
+            config.disable_upnp = true;
+        })
         .skip_proof_of_work()
         .enable_sanity_checks();
     if !args.test_pruning {
@@ -224,7 +232,15 @@ fn main_impl(mut args: Args) {
         (consensus, lifetime)
     } else {
         let until = if args.target_blocks.is_none() { config.genesis.timestamp + args.sim_time * 1000 } else { u64::MAX }; // milliseconds
-        let mut sim = KaspaNetworkSimulator::new(args.delay, args.bps, args.target_blocks, config.clone(), args.output_dir);
+        let mut sim = KaspaNetworkSimulator::new(
+            args.delay,
+            args.bps,
+            args.target_blocks,
+            config.clone(),
+            args.output_dir,
+            args.add_peers,
+            rt.clone(),
+        );
         let (consensus, handles, lifetime) = sim
             .init(
                 args.miners,
@@ -432,6 +448,7 @@ fn print_stats(src_consensus: &Consensus, hashes: &[Hash], delay: f64, bps: f64,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{str::FromStr, thread::sleep};
 
     #[test]
     fn test_pruning_via_simpa() {
@@ -440,9 +457,49 @@ mod tests {
         args.target_blocks = Some(5000);
         args.tpb = 1;
         args.test_pruning = true;
+        args.miners = 1;
 
         kaspa_core::panic::configure_panic();
         kaspa_core::log::try_init_logger(&args.log_level);
         main_impl(args);
+    }
+
+    #[test]
+    fn test_multi_consensus() {
+        let task1 = std::thread::spawn(|| {
+            let mut args = Args::parse_from(std::iter::empty::<&str>());
+            args.bps = 1.0;
+            args.target_blocks = Some(100000);
+            args.tpb = 1;
+            args.test_pruning = true;
+            args.listen = Some(ContextualNetAddress::from_str("0.0.0.0:1234").unwrap());
+            args.ram_scale = 4.0;
+
+            kaspa_core::panic::configure_panic();
+            // kaspa_core::log::try_init_logger(&args.log_level);
+            kaspa_core::log::try_init_logger("info");
+
+            main_impl(args);
+        });
+
+        let task2 = std::thread::spawn(|| {
+            // Wait a bit before joining
+            sleep(Duration::from_secs(45));
+            let mut args = Args::parse_from(std::iter::empty::<&str>());
+            args.bps = 1.0;
+            args.target_blocks = Some(100000);
+            args.sim_time = 360;
+            args.tpb = 1;
+            args.test_pruning = true;
+            args.listen = Some(ContextualNetAddress::from_str("0.0.0.0:5678").unwrap());
+            args.ram_scale = 4.0;
+            args.miners = 0;
+            args.add_peers = vec![ContextualNetAddress::from_str("127.0.0.1:1234").unwrap().normalize(1234)];
+
+            main_impl(args);
+        });
+
+        let _ = task1.join().expect("Task1 failed");
+        let _ = task2.join().expect("Task2 failed");
     }
 }
