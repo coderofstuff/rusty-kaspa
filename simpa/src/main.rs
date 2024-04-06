@@ -122,6 +122,7 @@ struct Args {
     /// Listen address
     listen: Option<ContextualNetAddress>,
     add_peers: Vec<NetAddress>,
+    // halt_mining_after_blocks: Option<u64>,
 }
 
 #[cfg(feature = "heap")]
@@ -328,12 +329,34 @@ fn apply_args_to_consensus_params(args: &Args, params: &mut Params) {
         params.legacy_difficulty_window_size = 64;
         params.legacy_timestamp_deviation_tolerance = 16;
         params.new_timestamp_deviation_tolerance = 16;
-        params.sampled_difficulty_window_size = params.sampled_difficulty_window_size.min(32);
+        // params.sampled_difficulty_window_size = params.sampled_difficulty_window_size.min(32);
         params.finality_depth = 128;
         params.merge_depth = 128;
         params.mergeset_size_limit = 32;
         params.pruning_depth = params.anticone_finalization_depth();
         info!("Setting pruning depth to {}", params.pruning_depth);
+        //// x2
+        // params.pruning_proof_m = 32;
+        // params.legacy_difficulty_window_size = 128;
+        // params.legacy_timestamp_deviation_tolerance = 16;
+        // params.new_timestamp_deviation_tolerance = 16;
+        // // params.sampled_difficulty_window_size = params.sampled_difficulty_window_size.min(32);
+        // params.finality_depth = 256;
+        // params.merge_depth = 256;
+        // params.mergeset_size_limit = 64;
+        // params.pruning_depth = params.anticone_finalization_depth();
+        // info!("Setting pruning depth to {}", params.pruning_depth);
+        //// x4
+        // params.pruning_proof_m = 64;
+        // params.legacy_difficulty_window_size = 256;
+        // params.legacy_timestamp_deviation_tolerance = 16;
+        // params.new_timestamp_deviation_tolerance = 16;
+        // // params.sampled_difficulty_window_size = params.sampled_difficulty_window_size.min(32);
+        // params.finality_depth = 512;
+        // params.merge_depth = 512;
+        // params.mergeset_size_limit = 128;
+        // params.pruning_depth = params.anticone_finalization_depth();
+        // info!("Setting pruning depth to {}", params.pruning_depth);
     }
 }
 
@@ -485,6 +508,7 @@ mod tests {
         let task2 = std::thread::spawn(|| {
             // Wait a bit before joining
             sleep(Duration::from_secs(30));
+            info!("Starting syncer consensus");
             let mut args = Args::parse_from(std::iter::empty::<&str>());
             args.bps = 1.0;
             args.target_blocks = Some(100000);

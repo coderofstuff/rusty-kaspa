@@ -22,6 +22,8 @@ use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::cmp::max;
 use std::iter::once;
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 
 struct OnetimeTxSelector {
     txs: Option<Vec<Transaction>>,
@@ -256,7 +258,13 @@ impl Process<Block> for Miner {
     fn resume(&mut self, resumption: Resumption<Block>, env: &mut Environment<Block>) -> Suspension {
         match resumption {
             Resumption::Initial => self.sample_mining_interval(),
-            Resumption::Scheduled => self.mine(env),
+            Resumption::Scheduled => {
+                if self.num_blocks > 4000 {
+                    // FIXME: Some hacky slowdown after a threshold
+                    sleep(Duration::from_millis(100));
+                }
+                self.mine(env)
+            }
             Resumption::Message(block) => self.process_block(block, env),
         }
     }
