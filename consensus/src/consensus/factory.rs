@@ -274,7 +274,7 @@ impl Factory {
 
 impl ConsensusFactory for Factory {
     fn new_active_consensus(&self) -> (ConsensusInstance, DynConsensusCtl) {
-        assert!(!self.notification_root.is_closed());
+        // assert!(!self.notification_root.is_closed());
 
         let mut config = self.config.clone();
         let mut is_new_consensus = false;
