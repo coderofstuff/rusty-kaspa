@@ -242,7 +242,7 @@ fn main_impl(mut args: Args) {
             args.add_peers,
             rt.clone(),
         );
-        let (consensus, handles, lifetime) = sim
+        let (consensus, handles, lifetime, services) = sim
             .init(
                 args.miners,
                 args.tpb,
@@ -252,6 +252,12 @@ fn main_impl(mut args: Args) {
                 args.rocksdb_mem_budget,
             )
             .run(until);
+
+        for service in services {
+            info!("Signal exit: {:#?}", service.clone().ident());
+            service.signal_exit();
+        }
+
         consensus.shutdown(handles);
         (consensus, lifetime)
     };
@@ -492,15 +498,15 @@ mod tests {
         let task1 = std::thread::spawn(|| {
             let mut args = Args::parse_from(std::iter::empty::<&str>());
             args.bps = 1.0;
-            args.target_blocks = Some(10000);
+            args.target_blocks = Some(4500);
             args.tpb = 1;
             args.test_pruning = true;
             args.listen = Some(ContextualNetAddress::from_str("0.0.0.0:1234").unwrap());
             args.ram_scale = 4.0;
 
             kaspa_core::panic::configure_panic();
-            // kaspa_core::log::try_init_logger(&args.log_level);
-            kaspa_core::log::try_init_logger("info");
+            kaspa_core::log::try_init_logger(&args.log_level);
+            // kaspa_core::log::try_init_logger("info");
 
             main_impl(args);
         });

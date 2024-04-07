@@ -33,7 +33,7 @@ use kaspa_utils::sim::Simulation;
 
 use itertools::Itertools;
 
-type ConsensusWrapper = (Arc<Consensus>, Vec<JoinHandle<()>>, DbLifetime);
+type ConsensusWrapper = (Arc<Consensus>, Vec<JoinHandle<()>>, DbLifetime, Vec<Arc<dyn AsyncService>>);
 
 struct SimulatorConsensusFactory {
     consensus: Arc<Consensus>,
@@ -270,7 +270,7 @@ impl KaspaNetworkSimulator {
                 tick_service.clone(),
                 notification_root.clone(),
             ));
-            info!("Add Peers: {:#?}", self.add_peers);
+
             let p2p_service: Arc<dyn AsyncService> = Arc::new(P2pService::new(
                 flow_context.clone(),
                 vec![],
@@ -283,19 +283,14 @@ impl KaspaNetworkSimulator {
                 Default::default(),
             ));
 
+            let mut services: Vec<Arc<dyn AsyncService>> = vec![];
+            services.push(tick_service.clone());
+            services.push(p2p_service.clone());
+
             self.runtime.spawn(async { tick_service.start().await });
             self.runtime.spawn(async { p2p_service.start().await });
             // </P2P Setup>
 
-            // let consensus = Arc::new(Consensus::new(
-            //     db,
-            //     self.config.clone(),
-            //     Default::default(),
-            //     notification_root,
-            //     Default::default(),
-            //     Default::default(),
-            //     unix_now(),
-            // ));
             let consensus = consensus_factory.get_consensus();
 
             let handles = consensus.run_processors();
@@ -314,7 +309,7 @@ impl KaspaNetworkSimulator {
                 flow_context.hub().clone(),
             ));
             self.simulation.register(i, miner_process);
-            self.consensuses.push((consensus, handles, lifetime));
+            self.consensuses.push((consensus, handles, lifetime, services));
         }
 
         if num_miners == 0 {
@@ -372,7 +367,7 @@ impl KaspaNetworkSimulator {
                 tick_service.clone(),
                 notification_root.clone(),
             ));
-            info!("Add Peers: {:#?}", self.add_peers);
+
             let p2p_service: Arc<dyn AsyncService> = Arc::new(P2pService::new(
                 flow_context.clone(),
                 vec![],
@@ -385,6 +380,10 @@ impl KaspaNetworkSimulator {
                 Default::default(),
             ));
 
+            let mut services: Vec<Arc<dyn AsyncService>> = vec![];
+            services.push(tick_service.clone());
+            services.push(p2p_service.clone());
+
             self.runtime.spawn(async { tick_service.start().await });
             self.runtime.spawn(async { p2p_service.start().await });
             // </P2P Setup>
@@ -392,7 +391,7 @@ impl KaspaNetworkSimulator {
             let consensus = consensus_factory.get_consensus();
 
             let handles = consensus.run_processors();
-            self.consensuses.push((consensus, handles, lifetime));
+            self.consensuses.push((consensus, handles, lifetime, services));
 
             self.simulation.register(0, Box::new(Idler::new()));
         }
@@ -401,7 +400,12 @@ impl KaspaNetworkSimulator {
 
     pub fn run(&mut self, until: u64) -> ConsensusWrapper {
         self.simulation.run(until);
-        for (consensus, handles, _) in self.consensuses.drain(1..) {
+        for (consensus, handles, _, services) in self.consensuses.drain(1..) {
+            for service in services {
+                info!("Signal exit: {:#?}", service.clone().ident());
+                service.signal_exit();
+            }
+
             consensus.shutdown(handles);
         }
         self.consensuses.pop().unwrap()
