@@ -212,11 +212,12 @@ impl KaspaNetworkSimulator {
         rocksdb_stats_period_sec: Option<u32>,
         rocksdb_files_limit: Option<i32>,
         rocksdb_mem_budget: Option<usize>,
+        wait_time: u64,
     ) -> &mut Self {
         let secp = secp256k1::Secp256k1::new();
         let mut rng = rand::thread_rng();
         for i in 0..num_miners {
-            let mut builder = ConnBuilder::default().with_files_limit(fd_budget::limit() / 2 / num_miners as i32);
+            let mut builder = ConnBuilder::default().with_files_limit(fd_budget::limit() / 4 / num_miners as i32);
             if let Some(rocksdb_files_limit) = rocksdb_files_limit {
                 builder = builder.with_files_limit(rocksdb_files_limit);
             }
@@ -275,9 +276,9 @@ impl KaspaNetworkSimulator {
                 flow_context.clone(),
                 vec![],
                 self.add_peers.clone(),
-                self.config.p2p_listen_address.normalize(1234).into(),
-                1,
-                1,
+                self.config.p2p_listen_address.normalize(self.config.default_p2p_port()).into(),
+                8,
+                8,
                 Default::default(),
                 self.config.default_p2p_port(),
                 Default::default(),
@@ -307,6 +308,7 @@ impl KaspaNetworkSimulator {
                 self.target_blocks,
                 self.runtime.clone(),
                 flow_context.hub().clone(),
+                wait_time,
             ));
             self.simulation.register(i, miner_process);
             self.consensuses.push((consensus, handles, lifetime, services));
@@ -372,9 +374,9 @@ impl KaspaNetworkSimulator {
                 flow_context.clone(),
                 vec![],
                 self.add_peers.clone(),
-                self.config.p2p_listen_address.normalize(5678).into(),
-                1,
-                1,
+                self.config.p2p_listen_address.normalize(self.config.default_p2p_port()).into(),
+                8,
+                8,
                 Default::default(),
                 self.config.default_p2p_port(),
                 Default::default(),

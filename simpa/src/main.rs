@@ -121,6 +121,7 @@ struct Args {
 
     /// Listen address
     listen: Option<ContextualNetAddress>,
+    wait_time: Option<u64>,
     add_peers: Vec<NetAddress>,
     // halt_mining_after_blocks: Option<u64>,
 }
@@ -192,6 +193,9 @@ fn main_impl(mut args: Args) {
         .apply_args(|config| {
             config.ram_scale = args.ram_scale;
             config.disable_upnp = true;
+            if let Some(listen_address) = args.listen {
+                config.p2p_listen_address = listen_address;
+            }
         })
         .skip_proof_of_work()
         .enable_sanity_checks();
@@ -250,6 +254,7 @@ fn main_impl(mut args: Args) {
                 args.rocksdb_stats_period_sec,
                 args.rocksdb_files_limit,
                 args.rocksdb_mem_budget,
+                args.wait_time.unwrap_or(0),
             )
             .run(until);
 
@@ -341,28 +346,6 @@ fn apply_args_to_consensus_params(args: &Args, params: &mut Params) {
         params.mergeset_size_limit = 32;
         params.pruning_depth = params.anticone_finalization_depth();
         info!("Setting pruning depth to {}", params.pruning_depth);
-        //// x2
-        // params.pruning_proof_m = 32;
-        // params.legacy_difficulty_window_size = 128;
-        // params.legacy_timestamp_deviation_tolerance = 16;
-        // params.new_timestamp_deviation_tolerance = 16;
-        // // params.sampled_difficulty_window_size = params.sampled_difficulty_window_size.min(32);
-        // params.finality_depth = 256;
-        // params.merge_depth = 256;
-        // params.mergeset_size_limit = 64;
-        // params.pruning_depth = params.anticone_finalization_depth();
-        // info!("Setting pruning depth to {}", params.pruning_depth);
-        //// x4
-        // params.pruning_proof_m = 64;
-        // params.legacy_difficulty_window_size = 256;
-        // params.legacy_timestamp_deviation_tolerance = 16;
-        // params.new_timestamp_deviation_tolerance = 16;
-        // // params.sampled_difficulty_window_size = params.sampled_difficulty_window_size.min(32);
-        // params.finality_depth = 512;
-        // params.merge_depth = 512;
-        // params.mergeset_size_limit = 128;
-        // params.pruning_depth = params.anticone_finalization_depth();
-        // info!("Setting pruning depth to {}", params.pruning_depth);
     }
 }
 
@@ -498,7 +481,7 @@ mod tests {
         let task1 = std::thread::spawn(|| {
             let mut args = Args::parse_from(std::iter::empty::<&str>());
             args.bps = 1.0;
-            args.target_blocks = Some(4500);
+            args.target_blocks = Some(4120);
             args.tpb = 1;
             args.test_pruning = true;
             args.listen = Some(ContextualNetAddress::from_str("0.0.0.0:1234").unwrap());
@@ -518,7 +501,7 @@ mod tests {
             let mut args = Args::parse_from(std::iter::empty::<&str>());
             args.bps = 1.0;
             // Run the simulation long enough to go through some more pruning periods
-            args.sim_time = 30;
+            args.sim_time = 60;
             args.tpb = 1;
             args.test_pruning = true;
             args.listen = Some(ContextualNetAddress::from_str("0.0.0.0:5678").unwrap());
@@ -529,7 +512,28 @@ mod tests {
             main_impl(args);
         });
 
+        // FIXME: This third task currently joins the network and IBDs, but for some reason
+        // only generates the one block. Maybe the first block's parents aren't properly set or something
+        // idk yet.
+        let task3 = std::thread::spawn(|| {
+            sleep(Duration::from_secs(50));
+            let mut args = Args::parse_from(std::iter::empty::<&str>());
+            args.bps = 1.0;
+            args.target_blocks = Some(3000);
+            args.tpb = 1;
+            args.test_pruning = true;
+            args.listen = Some(ContextualNetAddress::from_str("0.0.0.0:9876").unwrap());
+            args.ram_scale = 4.0;
+            args.add_peers = vec![ContextualNetAddress::from_str("127.0.0.1:5678").unwrap().normalize(5678)];
+            args.wait_time = Some(15);
+
+            kaspa_core::log::try_init_logger(&args.log_level);
+
+            main_impl(args);
+        });
+
         let _ = task1.join().expect("Task1 failed");
         let _ = task2.join().expect("Task2 failed");
+        let _ = task3.join().expect("Task3 failed");
     }
 }

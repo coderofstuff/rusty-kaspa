@@ -13,7 +13,7 @@ use kaspa_consensus_core::tx::{
     MutableTransaction, ScriptPublicKey, ScriptVec, Transaction, TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry,
 };
 use kaspa_consensus_core::utxo::utxo_view::UtxoView;
-use kaspa_core::trace;
+use kaspa_core::{info, trace, warn};
 use kaspa_p2p_lib::pb::kaspad_message::Payload;
 use kaspa_p2p_lib::pb::InvRelayBlockMessage;
 use kaspa_p2p_lib::{make_message, Hub};
@@ -87,6 +87,7 @@ pub struct Miner {
     // hub
     rt: Arc<Runtime>,
     hub: Hub,
+    wait_time: u64,
 }
 
 impl Miner {
@@ -102,6 +103,7 @@ impl Miner {
         target_blocks: Option<u64>,
         rt: Arc<Runtime>,
         hub: Hub,
+        wait_time: u64,
     ) -> Self {
         let (schnorr_public_key, _) = pk.x_only_public_key();
         let script_pub_key_script = once(0x20).chain(schnorr_public_key.serialize()).chain(once(0xac)).collect_vec(); // TODO: Use script builder when available to create p2pk properly
@@ -128,6 +130,7 @@ impl Miner {
             ),
             rt,
             hub,
+            wait_time,
         }
     }
 
@@ -217,6 +220,7 @@ impl Miner {
     }
 
     pub fn mine(&mut self, env: &mut Environment<Block>) -> Suspension {
+        info!("Mining");
         let block = self.build_new_block(env.now());
         env.broadcast(self.id, block);
         self.sample_mining_interval()
@@ -277,7 +281,13 @@ impl Process<Block> for Miner {
         match resumption {
             Resumption::Initial => self.sample_mining_interval(),
             Resumption::Scheduled => {
-                if self.num_blocks > 4000 {
+                if self.wait_time > 0 {
+                    // FIXME: This is some hacky way to wait for the IBD to complete
+                    warn!("wait time: {}", self.wait_time);
+                    self.wait_time -= 1;
+                    sleep(Duration::from_millis(1000));
+                    return Suspension::Timeout(1000);
+                } else if self.num_blocks > 4000 {
                     // FIXME: Some hacky slowdown after a threshold
                     sleep(Duration::from_millis(100));
                 }
