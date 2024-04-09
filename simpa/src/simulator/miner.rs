@@ -220,7 +220,6 @@ impl Miner {
     }
 
     pub fn mine(&mut self, env: &mut Environment<Block>) -> Suspension {
-        info!("Mining");
         let block = self.build_new_block(env.now());
         env.broadcast(self.id, block);
         self.sample_mining_interval()
