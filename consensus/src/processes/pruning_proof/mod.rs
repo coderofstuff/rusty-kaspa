@@ -1342,14 +1342,14 @@ impl PruningProofManager {
 
     pub fn get_pruning_point_proof(&self) -> Arc<PruningPointProof> {
         let pp = self.pruning_point_store.read().pruning_point().unwrap();
-        let mut cache_lock = self.cached_proof.lock();
-        if let Some(cache) = cache_lock.clone() {
-            if cache.pruning_point == pp {
-                return cache.data;
-            }
-        }
+        // let mut cache_lock = self.cached_proof.lock();
+        // if let Some(cache) = cache_lock.clone() {
+        //     if cache.pruning_point == pp {
+        //         return cache.data;
+        //     }
+        // }
         let proof = Arc::new(self.build_pruning_point_proof(pp));
-        cache_lock.replace(CachedPruningPointData { pruning_point: pp, data: proof.clone() });
+        // cache_lock.replace(CachedPruningPointData { pruning_point: pp, data: proof.clone() });
         proof
     }
 

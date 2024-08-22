@@ -354,6 +354,16 @@ impl IbdFlow {
             staging.validate_and_insert_trusted_block(tb).virtual_state_task.await?;
         }
         info!("Done processing trusted blocks");
+
+        staging
+            .clone()
+            .spawn_blocking(move |c| {
+                info!("Retry building proof after getting trusted set");
+                let _ = c.get_pruning_point_proof();
+
+                Result::<_, ProtocolError>::Ok(())
+            })
+            .await?;
         Ok(proof_pruning_point)
     }
 
