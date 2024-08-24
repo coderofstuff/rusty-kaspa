@@ -1,12 +1,11 @@
 use crate::constants::{MAX_SOMPI, SEQUENCE_LOCK_TIME_DISABLED, SEQUENCE_LOCK_TIME_MASK};
-use kaspa_consensus_core::hashing::sighash::{SigHashReusedValues, SigHashReusedValuesSync};
-use kaspa_consensus_core::{hashing::sighash::SigHashReusedValuesUnsync, tx::VerifiableTransaction};
+use kaspa_consensus_core::{
+    hashing::sighash::{SigHashReusedValues, SigHashReusedValuesUnsync},
+    tx::{TransactionInput, VerifiableTransaction},
+};
 use kaspa_core::warn;
-use kaspa_txscript::caches::Cache;
-use kaspa_txscript::{get_sig_op_count, SigCacheKey, TxScriptEngine};
-use rayon::iter::IntoParallelIterator;
-use rayon::ThreadPool;
-use std::sync::Arc;
+use kaspa_txscript::{get_sig_op_count, TxScriptEngine};
+use kaspa_txscript_errors::TxScriptError;
 
 use super::{
     errors::{TxResult, TxRuleError},
@@ -32,10 +31,12 @@ impl TransactionValidator {
         tx: &(impl VerifiableTransaction + std::marker::Sync),
         pov_daa_score: u64,
         flags: TxValidationFlags,
+        mass_and_feerate_threshold: Option<(u64, f64)>,
     ) -> TxResult<u64> {
         self.check_transaction_coinbase_maturity(tx, pov_daa_score)?;
         let total_in = self.check_transaction_input_amounts(tx)?;
         let total_out = Self::check_transaction_output_values(tx, total_in)?;
+        let fee = total_in - total_out;
         if flags != TxValidationFlags::SkipMassCheck && pov_daa_score > self.storage_mass_activation_daa_score {
             // Storage mass hardfork was activated
             self.check_mass_commitment(tx)?;
@@ -45,6 +46,11 @@ impl TransactionValidator {
             }
         }
         Self::check_sequence_lock(tx, pov_daa_score)?;
+
+        // The following call is not a consensus check (it could not be one in the first place since it uses floating number)
+        // but rather a mempool Replace by Fee validation rule. It was placed here purposely for avoiding unneeded script checks.
+        Self::check_feerate_threshold(fee, mass_and_feerate_threshold)?;
+
         match flags {
             TxValidationFlags::Full | TxValidationFlags::SkipMassCheck => {
                 Self::check_sig_op_counts::<_, SigHashReusedValuesUnsync>(tx)?;
@@ -52,7 +58,19 @@ impl TransactionValidator {
             }
             TxValidationFlags::SkipScriptChecks => {}
         }
-        Ok(total_in - total_out)
+        Ok(fee)
+    }
+
+    fn check_feerate_threshold(fee: u64, mass_and_feerate_threshold: Option<(u64, f64)>) -> TxResult<()> {
+        // An actual check can only occur if some mass and threshold are provided,
+        // otherwise, the check does not verify anything and exits successfully.
+        if let Some((contextual_mass, feerate_threshold)) = mass_and_feerate_threshold {
+            assert!(contextual_mass > 0);
+            if fee as f64 / contextual_mass as f64 <= feerate_threshold {
+                return Err(TxRuleError::FeerateTooLow);
+            }
+        }
+        Ok(())
     }
 
     fn check_transaction_coinbase_maturity(&self, tx: &impl VerifiableTransaction, pov_daa_score: u64) -> TxResult<()> {
@@ -149,64 +167,24 @@ impl TransactionValidator {
         Ok(())
     }
 
-    pub fn check_scripts(&self, tx: &(impl VerifiableTransaction + std::marker::Sync)) -> TxResult<()> {
-        check_scripts(&self.sig_cache, tx)
+    pub fn check_scripts(&self, tx: &impl VerifiableTransaction) -> TxResult<()> {
+        let mut reused_values = SigHashReusedValuesUnsync::new();
+        for (i, (input, entry)) in tx.populated_inputs().enumerate() {
+            let mut engine = TxScriptEngine::from_transaction_input(tx, input, i, entry, &mut reused_values, &self.sig_cache)
+                .map_err(|err| map_script_err(err, input))?;
+            engine.execute().map_err(|err| map_script_err(err, input))?;
+        }
+
+        Ok(())
     }
 }
 
-pub fn check_scripts(sig_cache: &Cache<SigCacheKey, bool>, tx: &(impl VerifiableTransaction + Sync)) -> TxResult<()> {
-    if tx.inputs().len() > 1 {
-        check_scripts_par_iter(sig_cache, tx)
+fn map_script_err(script_err: TxScriptError, input: &TransactionInput) -> TxRuleError {
+    if input.signature_script.is_empty() {
+        TxRuleError::SignatureEmpty(script_err)
     } else {
-        check_scripts_single_threaded(sig_cache, tx)
+        TxRuleError::SignatureInvalid(script_err)
     }
-}
-
-pub fn check_scripts_single_threaded(sig_cache: &Cache<SigCacheKey, bool>, tx: &impl VerifiableTransaction) -> TxResult<()> {
-    let reused_values = SigHashReusedValuesUnsync::new();
-    for (i, (input, entry)) in tx.populated_inputs().enumerate() {
-        let mut engine = TxScriptEngine::from_transaction_input(tx, input, i, entry, &reused_values, sig_cache)
-            .map_err(TxRuleError::SignatureInvalid)?;
-        engine.execute().map_err(TxRuleError::SignatureInvalid)?;
-    }
-    Ok(())
-}
-
-pub fn check_scripts_par_iter(
-    sig_cache: &Cache<SigCacheKey, bool>,
-    tx: &(impl VerifiableTransaction + std::marker::Sync),
-) -> TxResult<()> {
-    use rayon::iter::ParallelIterator;
-    let reused_values = std::sync::Arc::new(SigHashReusedValuesSync::new());
-    (0..tx.inputs().len())
-        .into_par_iter()
-        .try_for_each(|idx| {
-            let reused_values = reused_values.clone(); // Clone the Arc to share ownership
-            let (input, utxo) = tx.populated_input(idx);
-            let mut engine = TxScriptEngine::from_transaction_input(tx, input, idx, utxo, &reused_values, sig_cache)?;
-            engine.execute()
-        })
-        .map_err(TxRuleError::SignatureInvalid)
-}
-
-pub fn check_scripts_par_iter_thread(
-    sig_cache: &Cache<SigCacheKey, bool>,
-    tx: &(impl VerifiableTransaction + std::marker::Sync),
-    pool: &ThreadPool,
-) -> TxResult<()> {
-    use rayon::iter::ParallelIterator;
-    pool.install(|| {
-        let reused_values = Arc::new(SigHashReusedValuesSync::new());
-        (0..tx.inputs().len())
-            .into_par_iter()
-            .try_for_each(|idx| {
-                let reused_values = reused_values.clone(); // Clone the Arc to share ownership
-                let (input, utxo) = tx.populated_input(idx);
-                let mut engine = TxScriptEngine::from_transaction_input(tx, input, idx, utxo, &reused_values, sig_cache)?;
-                engine.execute()
-            })
-            .map_err(TxRuleError::SignatureInvalid)
-    })
 }
 
 #[cfg(test)]

@@ -230,6 +230,23 @@ impl Transaction {
     }
 }
 
+impl MemSizeEstimator for Transaction {
+    fn estimate_mem_bytes(&self) -> usize {
+        // Calculates mem bytes of the transaction (for cache tracking purposes)
+        size_of::<Self>()
+            + self.payload.len()
+            + self
+                .inputs
+                .iter()
+                .map(|i| i.signature_script.len() + size_of::<TransactionInput>())
+                .chain(self.outputs.iter().map(|o| {
+                    // size_of::<TransactionOutput>() already counts SCRIPT_VECTOR_SIZE bytes within, so we only add the delta
+                    o.script_public_key.script().len().saturating_sub(SCRIPT_VECTOR_SIZE) + size_of::<TransactionOutput>()
+                }))
+                .sum::<usize>()
+    }
+}
+
 /// Represents any kind of transaction which has populated UTXO entry data and can be verified/signed etc
 pub trait VerifiableTransaction {
     fn tx(&self) -> &Transaction;
@@ -404,6 +421,19 @@ impl<T: AsRef<Transaction>> MutableTransaction<T> {
     pub fn clear_entries(&mut self) {
         for entry in self.entries.iter_mut() {
             *entry = None;
+        }
+    }
+
+    /// Returns the calculated feerate. The feerate is calculated as the amount of fee
+    /// this transactions pays per gram of the full contextual (compute & storage) mass. The
+    /// function returns a value when calculated fee exists and the contextual mass is greater
+    /// than zero, otherwise `None` is returned.
+    pub fn calculated_feerate(&self) -> Option<f64> {
+        let contextual_mass = self.tx.as_ref().mass();
+        if contextual_mass > 0 {
+            self.calculated_fee.map(|fee| fee as f64 / contextual_mass as f64)
+        } else {
+            None
         }
     }
 }

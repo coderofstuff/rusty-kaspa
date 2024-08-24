@@ -166,7 +166,13 @@ impl Runtime {
         let log_dir = get_log_dir(args);
 
         // Initialize the logger
-        kaspa_core::log::init_logger(log_dir.as_deref(), &args.log_level);
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "semaphore-trace")] {
+                kaspa_core::log::init_logger(log_dir.as_deref(), &format!("{},{}=debug", args.log_level, kaspa_utils::sync::semaphore_module_path()));
+            } else {
+                kaspa_core::log::init_logger(log_dir.as_deref(), &args.log_level);
+            }
+        };
 
         // Configure the panic behavior
         // As we log the panic, we want to set it up after the logger
@@ -205,7 +211,7 @@ pub fn create_core(args: Args, fd_total_budget: i32) -> (Arc<Core>, Arc<RpcCoreS
 ///
 pub fn create_core_with_runtime(runtime: &Runtime, args: &Args, fd_total_budget: i32) -> (Arc<Core>, Arc<RpcCoreService>) {
     let network = args.network();
-    assert_ne!(network.network_type(), NetworkType::Mainnet, "Experimental version; Mainnet is disallowed");
+    // assert_ne!(network.network_type(), NetworkType::Mainnet, "Experimental version; Mainnet is disallowed");
     let mut fd_remaining = fd_total_budget;
     let utxo_files_limit = if args.utxoindex {
         let utxo_files_limit = fd_remaining * 10 / 100;
@@ -518,16 +524,17 @@ do you confirm? (answer y/n or pass --yes to the Kaspad command line to confirm 
 
     let (address_manager, port_mapping_extender_svc) = AddressManager::new(config.clone(), meta_db, tick_service.clone());
 
-    let mining_monitor = Arc::new(MiningMonitor::new(mining_counters.clone(), tx_script_cache_counters.clone(), tick_service.clone()));
     let mining_manager = MiningManagerProxy::new(Arc::new(MiningManager::new_with_extended_config(
         config.target_time_per_block,
         false,
         config.max_block_mass,
         config.ram_scale,
         config.block_template_cache_lifetime,
-        mining_counters,
+        mining_counters.clone(),
         config.storage_mass_activation_daa_score,
     )));
+    let mining_monitor =
+        Arc::new(MiningMonitor::new(mining_manager.clone(), mining_counters, tx_script_cache_counters.clone(), tick_service.clone()));
 
     let flow_context = Arc::new(FlowContext::new(
         consensus_manager.clone(),

@@ -40,7 +40,11 @@ use crate::{
 };
 use kaspa_consensus_core::{
     acceptance_data::AcceptanceData,
-    api::{stats::BlockCount, BlockValidationFutures, ConsensusApi, ConsensusStats},
+    api::{
+        args::{TransactionValidationArgs, TransactionValidationBatchArgs},
+        stats::BlockCount,
+        BlockValidationFutures, ConsensusApi, ConsensusStats,
+    },
     block::{Block, BlockTemplate, TemplateBuildMode, TemplateTransactionSelector, VirtualStateApproxId},
     blockhash::BlockHashExtensions,
     blockstatus::BlockStatus,
@@ -49,10 +53,12 @@ use kaspa_consensus_core::{
     errors::{
         coinbase::CoinbaseResult,
         consensus::{ConsensusError, ConsensusResult},
+        difficulty::DifficultyError,
+        pruning::PruningImportError,
         tx::TxResult,
     },
-    errors::{difficulty::DifficultyError, pruning::PruningImportError},
     header::Header,
+    merkle::calc_hash_merkle_root,
     muhash::MuHashExtensions,
     network::NetworkType,
     pruning::{PruningPointProof, PruningPointTrustedData, PruningPointsList},
@@ -418,13 +424,17 @@ impl ConsensusApi for Consensus {
         BlockValidationFutures { block_task: Box::pin(block_task), virtual_state_task: Box::pin(virtual_state_task) }
     }
 
-    fn validate_mempool_transaction(&self, transaction: &mut MutableTransaction) -> TxResult<()> {
-        self.virtual_processor.validate_mempool_transaction(transaction)?;
+    fn validate_mempool_transaction(&self, transaction: &mut MutableTransaction, args: &TransactionValidationArgs) -> TxResult<()> {
+        self.virtual_processor.validate_mempool_transaction(transaction, args)?;
         Ok(())
     }
 
-    fn validate_mempool_transactions_in_parallel(&self, transactions: &mut [MutableTransaction]) -> Vec<TxResult<()>> {
-        self.virtual_processor.validate_mempool_transactions_in_parallel(transactions)
+    fn validate_mempool_transactions_in_parallel(
+        &self,
+        transactions: &mut [MutableTransaction],
+        args: &TransactionValidationBatchArgs,
+    ) -> Vec<TxResult<()>> {
+        self.virtual_processor.validate_mempool_transactions_in_parallel(transactions, args)
     }
 
     fn populate_mempool_transaction(&self, transaction: &mut MutableTransaction) -> TxResult<()> {
@@ -664,6 +674,11 @@ impl ConsensusApi for Consensus {
 
     fn modify_coinbase_payload(&self, payload: Vec<u8>, miner_data: &MinerData) -> CoinbaseResult<Vec<u8>> {
         self.services.coinbase_manager.modify_coinbase_payload(payload, miner_data)
+    }
+
+    fn calc_transaction_hash_merkle_root(&self, txs: &[Transaction], pov_daa_score: u64) -> Hash {
+        let storage_mass_activated = pov_daa_score > self.config.storage_mass_activation_daa_score;
+        calc_hash_merkle_root(txs.iter(), storage_mass_activated)
     }
 
     fn validate_pruning_proof(&self, proof: &PruningPointProof) -> Result<(), PruningImportError> {

@@ -3049,6 +3049,7 @@ dependencies = [
  "secp256k1",
  "serde",
  "smallvec",
+ "sweep-bptree",
  "thiserror",
  "tokio",
 ]
@@ -3408,6 +3409,7 @@ dependencies = [
 name = "kaspa-utils"
 version = "0.14.2"
 dependencies = [
+ "arc-swap",
  "async-channel 2.2.1",
  "async-trait",
  "bincode",
@@ -3420,6 +3422,7 @@ dependencies = [
  "ipnet",
  "itertools 0.11.0",
  "log",
+ "once_cell",
  "parking_lot",
  "rand 0.8.5",
  "rlimit",
@@ -3803,6 +3806,7 @@ name = "kaspad"
 version = "0.14.2"
 dependencies = [
  "async-channel 2.2.1",
+ "cfg-if 1.0.0",
  "clap 4.5.4",
  "dhat",
  "dirs",
@@ -3899,9 +3903,9 @@ checksum = "4ec2a862134d2a7d32d7983ddcdd1c4923530833c9f2ea1a44fc5fa473989058"
 
 [[package]]
 name = "libmimalloc-sys"
-version = "0.1.37"
+version = "0.1.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81eb4061c0582dedea1cbc7aff2240300dd6982e0239d1c99e65c1dbf4a30ba7"
+checksum = "23aa6811d3bd4deb8a84dde645f943476d13b248d818edcf8ce0b2f37f036b44"
 dependencies = [
  "cc",
  "libc",
@@ -4174,9 +4178,9 @@ checksum = "6c8640c5d730cb13ebd907d8d04b52f55ac9a2eec55b440c8892f40d56c76c1d"
 
 [[package]]
 name = "mimalloc"
-version = "0.1.41"
+version = "0.1.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f41a2280ded0da56c8cf898babb86e8f10651a34adcfff190ae9a1159c6908d"
+checksum = "68914350ae34959d83f732418d51e2427a794055d0b9529f48259ac07af65633"
 dependencies = [
  "libmimalloc-sys",
 ]
@@ -5639,6 +5643,7 @@ name = "simpa"
 version = "0.14.2"
 dependencies = [
  "async-channel 2.2.1",
+ "cfg-if 1.0.0",
  "clap 4.5.4",
  "dhat",
  "futures",
@@ -5782,6 +5787,12 @@ name = "subtle"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81cdd64d312baedb58e21336b31bc043b77e01cc99033ce76ef539f78e965ebc"
+
+[[package]]
+name = "sweep-bptree"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bea7b1b7c5eaabc40bab84ec98b2f12523d97e91c9bfc430fe5d2a1ea15c9960"
 
 [[package]]
 name = "syn"
