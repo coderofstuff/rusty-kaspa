@@ -33,6 +33,7 @@ kaspa-txscript.workspace = true
 kaspa-txscript-errors.workspace = true
 kaspa-utils.workspace = true
 log.workspace = true
+num_cpus.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true

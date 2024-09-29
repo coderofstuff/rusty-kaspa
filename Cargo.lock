@@ -2528,6 +2528,7 @@ dependencies = [
  "kaspa-txscript-errors",
  "kaspa-utils",
  "log",
+ "num_cpus",
  "once_cell",
  "parking_lot",
  "rand 0.8.5",

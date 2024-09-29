@@ -5,6 +5,8 @@ pub mod services;
 pub mod storage;
 pub mod test_consensus;
 
+use rayon::prelude::*;
+
 #[cfg(feature = "devnet-prealloc")]
 mod utxo_set_override;
 
@@ -771,8 +773,23 @@ impl ConsensusApi for Consensus {
     fn append_imported_pruning_point_utxos(&self, utxoset_chunk: &[(TransactionOutpoint, UtxoEntry)], current_multiset: &mut MuHash) {
         let mut pruning_utxoset_write = self.pruning_utxoset_stores.write();
         pruning_utxoset_write.utxo_set.write_many(utxoset_chunk).unwrap();
-        for (outpoint, entry) in utxoset_chunk {
-            current_multiset.add_utxo(outpoint, entry);
+
+        // TODO: Get this from config instead
+        let num_threads = num_cpus::get();
+        // Parallelize processing
+        let inner_multisets: Vec<MuHash> = utxoset_chunk
+            .par_chunks(utxoset_chunk.len() / num_threads)
+            .map(|chunk| {
+                let mut inner_multiset = MuHash::new();
+                for (outpoint, entry) in chunk {
+                    inner_multiset.add_utxo(outpoint, entry);
+                }
+                inner_multiset
+            })
+            .collect();
+
+        for inner_multiset in inner_multisets {
+            current_multiset.combine(&inner_multiset);
         }
     }
 
