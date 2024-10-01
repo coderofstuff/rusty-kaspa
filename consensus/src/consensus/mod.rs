@@ -777,7 +777,7 @@ impl ConsensusApi for Consensus {
         // TODO: Get this from config instead
         let num_threads = num_cpus::get();
         // Parallelize processing
-        let inner_multisets: Vec<MuHash> = utxoset_chunk
+        let inner_multiset = utxoset_chunk
             .par_chunks(utxoset_chunk.len() / num_threads)
             .map(|chunk| {
                 let mut inner_multiset = MuHash::new();
@@ -786,11 +786,15 @@ impl ConsensusApi for Consensus {
                 }
                 inner_multiset
             })
-            .collect();
+            .reduce(
+                || MuHash::new(),
+                |mut a, b| {
+                    a.combine(&b);
+                    a
+                },
+            );
 
-        for inner_multiset in inner_multisets {
-            current_multiset.combine(&inner_multiset);
-        }
+        current_multiset.combine(&inner_multiset);
     }
 
     fn import_pruning_point_utxo_set(&self, new_pruning_point: Hash, imported_utxo_multiset: MuHash) -> PruningImportResult<()> {
