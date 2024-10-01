@@ -224,6 +224,7 @@ impl VirtualStateProcessor {
         self.thread_pool.install(|| {
             // We can do this in parallel without complications since block body validation already ensured
             // that all txs within each block are independent
+            // FIXME: do actual chunk sizing
             txs.par_chunks((txs.len() / 16).max(1))
                 .enumerate()
                 .map(|(chunk_idx, chunk)| {
