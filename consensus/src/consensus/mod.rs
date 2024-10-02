@@ -774,16 +774,12 @@ impl ConsensusApi for Consensus {
         let mut pruning_utxoset_write = self.pruning_utxoset_stores.write();
         pruning_utxoset_write.utxo_set.write_many(utxoset_chunk).unwrap();
 
-        // TODO: Get this from config instead
-        let num_threads = num_cpus::get();
         // Parallelize processing
         let inner_multiset = utxoset_chunk
-            .par_chunks(utxoset_chunk.len() / num_threads)
-            .map(|chunk| {
+            .par_iter()
+            .map(|(outpoint, entry)| {
                 let mut inner_multiset = MuHash::new();
-                for (outpoint, entry) in chunk {
-                    inner_multiset.add_utxo(outpoint, entry);
-                }
+                inner_multiset.add_utxo(outpoint, entry);
                 inner_multiset
             })
             .reduce(

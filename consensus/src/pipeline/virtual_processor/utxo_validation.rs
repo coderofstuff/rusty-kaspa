@@ -222,31 +222,17 @@ impl VirtualStateProcessor {
         flags: TxValidationFlags,
     ) -> (Vec<(ValidatedTransaction<'a>, u32)>, MuHash) {
         self.thread_pool.install(|| {
-            // We can do this in parallel without complications since block body validation already ensured
-            // that all txs within each block are independent
-            // FIXME: do actual chunk sizing
-            txs.par_chunks((txs.len() / 16).max(1))
+            txs
+                .par_iter() // We can do this in parallel without complications since block body validation already ensured
+                            // that all txs within each block are independent
                 .enumerate()
-                .map(|(chunk_idx, chunk)| {
-                    // Skip the coinbase tx, which is only on the first chunk
-                    let skip_amount = if chunk_idx == 0 { 1 } else { 0 };
-
-                    let mut inner_multiset = MuHash::new();
-
-                    let txs_vec: Vec<_> = chunk
-                        .iter()
-                        .skip(skip_amount)
-                        .enumerate()
-                        .filter_map(|(i, tx)| {
-                            self.validate_transaction_in_utxo_context(tx, &utxo_view, pov_daa_score, flags).ok().map(|vtx| {
-                                inner_multiset.add_transaction(&vtx, pov_daa_score);
-                                (vtx, i as u32)
-                            })
-                        })
-                        .collect();
-
-                    (txs_vec, inner_multiset)
-                })
+                .skip(1) // Skip the coinbase tx.
+                .filter_map(|(i, tx)| self.validate_transaction_in_utxo_context(tx, &utxo_view, pov_daa_score, flags).ok().map(|vtx| {
+                    let mut mh = MuHash::new();
+                    mh.add_transaction(&vtx, pov_daa_score);
+                    (vec![(vtx, i as u32)], mh)
+                }
+                ))
                 .reduce(
                     || (vec![], MuHash::new()),
                     |mut a, b| {
