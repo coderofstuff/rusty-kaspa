@@ -48,17 +48,15 @@ use crate::{
 };
 use kaspa_consensus_core::{
     acceptance_data::AcceptanceData,
-    api::{
-        args::{TransactionValidationArgs, TransactionValidationBatchArgs},
-        ReturnAddress,
-    },
+    api::args::{TransactionValidationArgs, TransactionValidationBatchArgs},
     block::{BlockTemplate, MutableBlock, TemplateBuildMode, TemplateTransactionSelector},
     blockstatus::BlockStatus::{StatusDisqualifiedFromChain, StatusUTXOValid},
     coinbase::MinerData,
-    config::{self, genesis::GenesisBlock, Config},
+    config::{genesis::GenesisBlock, Config},
     header::Header,
     merkle::calc_hash_merkle_root,
     pruning::PruningPointsList,
+    return_address::ReturnAddress,
     tx::{MutableTransaction, Transaction},
     utxo::{
         utxo_diff::{ImmutableUtxoDiff, UtxoDiff},
