@@ -46,7 +46,7 @@ use kaspa_consensus_core::{
     api::{
         args::{TransactionValidationArgs, TransactionValidationBatchArgs},
         stats::BlockCount,
-        BlockValidationFutures, ConsensusApi, ConsensusStats,
+        BlockValidationFutures, ConsensusApi, ConsensusStats, ReturnAddress,
     },
     block::{Block, BlockTemplate, TemplateBuildMode, TemplateTransactionSelector, VirtualStateApproxId},
     blockhash::BlockHashExtensions,
@@ -77,10 +77,11 @@ use crossbeam_channel::{
 use itertools::Itertools;
 use kaspa_consensusmanager::{SessionLock, SessionReadGuard};
 
+use kaspa_core::{trace, warn};
 use kaspa_database::prelude::StoreResultExtensions;
 use kaspa_hashes::Hash;
 use kaspa_muhash::MuHash;
-use kaspa_txscript::caches::TxScriptCacheCounters;
+use kaspa_txscript::caches::{caches::TxScriptCacheCounters, extract_script_pub_key_address};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use std::{
@@ -102,6 +103,9 @@ use self::{services::ConsensusServices, storage::ConsensusStorage};
 use crate::model::stores::selected_chain::SelectedChainStoreReader;
 
 use std::cmp;
+
+use crate::model::stores::utxo_diffs::UtxoDiffsStoreReader;
+use kaspa_consensus_core::utxo::utxo_diff::ImmutableUtxoDiff;
 
 pub struct Consensus {
     // DB
@@ -695,6 +699,10 @@ impl ConsensusApi for Consensus {
         }
 
         sample_headers
+    }
+
+    fn get_utxo_return_address(&self, txid: Hash, target_daa_score: u64) -> ReturnAddress {
+        self.virtual_processor.get_utxo_return_address(txid, target_daa_score, self.get_source(), &self.config)
     }
 
     fn get_virtual_parents(&self) -> BlockHashSet {
