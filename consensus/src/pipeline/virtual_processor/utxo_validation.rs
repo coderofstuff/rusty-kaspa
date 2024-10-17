@@ -276,6 +276,37 @@ impl VirtualStateProcessor {
         })
     }
 
+    /// Same as validate_transactions_in_parallel except during the iteration this will also
+    /// calculate the muhash in parallel for valid transactions
+    pub(crate) fn validate_transactions_with_muhash_in_parallel<'a, V: UtxoView + Sync>(
+        &self,
+        txs: &'a Vec<Transaction>,
+        utxo_view: &V,
+        pov_daa_score: u64,
+        flags: TxValidationFlags,
+    ) -> (SmallVec<[(ValidatedTransaction<'a>, u32); 2]>, MuHash) {
+        self.thread_pool.install(|| {
+            txs
+                .par_iter() // We can do this in parallel without complications since block body validation already ensured
+                            // that all txs within each block are independent
+                .enumerate()
+                .skip(1) // Skip the coinbase tx.
+                .filter_map(|(i, tx)| self.validate_transaction_in_utxo_context(tx, &utxo_view, pov_daa_score, flags).ok().map(|vtx| {
+                    let mh = MuHash::from_transaction(&vtx, pov_daa_score);
+                    (smallvec![(vtx, i as u32)], mh)
+                }
+                ))
+                .reduce(
+                    || (smallvec![], MuHash::new()),
+                    |mut a, mut b| {
+                        a.0.append(&mut b.0);
+                        a.1.combine(&b.1);
+                        a
+                    },
+                )
+        })
+    }
+
     /// Attempts to populate the transaction with UTXO entries and performs all utxo-related tx validations
     pub(super) fn validate_transaction_in_utxo_context<'a>(
         &self,
@@ -368,6 +399,8 @@ impl VirtualStateProcessor {
 
 #[cfg(test)]
 mod tests {
+    use itertools::Itertools;
+
     use super::*;
 
     #[test]
@@ -390,9 +423,9 @@ mod tests {
 
         println!("collected len: {}", collected.len());
 
-        collected.iter().enumerate().skip(1).for_each(|(idx, curr_data)| {
+        collected.iter().tuple_windows().for_each(|(prev, curr)| {
             // Data was originally sorted, so we check if they remain sorted after filtering
-            assert!(collected[idx - 1] < *curr_data);
+            assert!(prev < curr, "expected {} < {} if original sort was preserved", prev, curr);
         });
 
         let reduced: SmallVec<[u16; 2]> = data
@@ -414,9 +447,9 @@ mod tests {
 
         println!("reduced len: {}", reduced.len());
 
-        reduced.iter().enumerate().skip(1).for_each(|(idx, curr_data)| {
+        reduced.iter().tuple_windows().for_each(|(prev, curr)| {
             // Data was originally sorted, so we check if they remain sorted after filtering
-            assert!(reduced[idx - 1] < *curr_data);
+            assert!(prev < curr, "expected {} < {} if original sort was preserved", prev, curr);
         });
     }
 }
