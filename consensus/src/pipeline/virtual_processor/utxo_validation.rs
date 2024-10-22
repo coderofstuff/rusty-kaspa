@@ -260,38 +260,6 @@ impl VirtualStateProcessor {
                 .enumerate()
                 .skip(1) // Skip the coinbase tx.
                 .filter_map(|(i, tx)| self.validate_transaction_in_utxo_context(tx, &utxo_view, pov_daa_score, flags).ok().map(|vtx| {
-                    let mut mh = MuHash::new();
-                    mh.add_transaction(&vtx, pov_daa_score);
-                    (smallvec![(vtx, i as u32)], mh)
-                }
-                ))
-                .reduce(
-                    || (smallvec![], MuHash::new()),
-                    |mut a, mut b| {
-                        a.0.append(&mut b.0);
-                        a.1.combine(&b.1);
-                        a
-                    },
-                )
-        })
-    }
-
-    /// Same as validate_transactions_in_parallel except during the iteration this will also
-    /// calculate the muhash in parallel for valid transactions
-    pub(crate) fn validate_transactions_with_muhash_in_parallel<'a, V: UtxoView + Sync>(
-        &self,
-        txs: &'a Vec<Transaction>,
-        utxo_view: &V,
-        pov_daa_score: u64,
-        flags: TxValidationFlags,
-    ) -> (SmallVec<[(ValidatedTransaction<'a>, u32); 2]>, MuHash) {
-        self.thread_pool.install(|| {
-            txs
-                .par_iter() // We can do this in parallel without complications since block body validation already ensured
-                            // that all txs within each block are independent
-                .enumerate()
-                .skip(1) // Skip the coinbase tx.
-                .filter_map(|(i, tx)| self.validate_transaction_in_utxo_context(tx, &utxo_view, pov_daa_score, flags).ok().map(|vtx| {
                     let mh = MuHash::from_transaction(&vtx, pov_daa_score);
                     (smallvec![(vtx, i as u32)], mh)
                 }
