@@ -4,15 +4,46 @@ use super::BlockBodyProcessor;
 use crate::errors::{BlockProcessResult, RuleError};
 use kaspa_consensus_core::{block::Block, merkle::calc_hash_merkle_root, tx::TransactionOutpoint};
 
+pub const MAX_ALLOWED_BYTE_MASS: u64 = 125_000; // 125k bytes = 500_000 max block size / 4
+
+struct TrackedMasses {
+    compute_mass: u64,
+    storage_mass: u64,
+    temp_storage_mass: u64,
+}
+
+impl TrackedMasses {
+    fn new() -> Self {
+        Self { compute_mass: 0, storage_mass: 0, temp_storage_mass: 0 }
+    }
+
+    fn is_any_above_threshold(&self, threshold: u64) -> bool {
+        return self.compute_mass > threshold || self.storage_mass > threshold || self.temp_storage_mass > threshold;
+    }
+
+    fn add_compute_mass(&mut self, mass: u64) {
+        self.compute_mass = self.compute_mass.saturating_add(mass);
+    }
+
+    fn add_storage_mass(&mut self, mass: u64) {
+        self.storage_mass = self.storage_mass.saturating_add(mass);
+    }
+
+    fn add_temp_storage_mass(&mut self, mass: u64) {
+        self.temp_storage_mass = self.temp_storage_mass.saturating_add(mass);
+    }
+}
+
 impl BlockBodyProcessor {
     pub fn validate_body_in_isolation(self: &Arc<Self>, block: &Block) -> BlockProcessResult<u64> {
         let storage_mass_activated = self.storage_mass_activation.is_active(block.header.daa_score);
+        let temp_storage_activated = self.temp_storage_activation.is_active(block.header.daa_score);
 
         Self::check_has_transactions(block)?;
         Self::check_hash_merkle_root(block, storage_mass_activated)?;
         Self::check_only_one_coinbase(block)?;
         self.check_transactions_in_isolation(block)?;
-        let mass = self.check_block_mass(block, storage_mass_activated)?;
+        let mass = self.check_block_mass(block, storage_mass_activated, temp_storage_activated)?;
         self.check_duplicate_transactions(block)?;
         self.check_block_double_spends(block)?;
         self.check_no_chained_transactions(block)?;
@@ -57,22 +88,47 @@ impl BlockBodyProcessor {
         Ok(())
     }
 
-    fn check_block_mass(self: &Arc<Self>, block: &Block, storage_mass_activated: bool) -> BlockProcessResult<u64> {
+    fn check_block_mass(
+        self: &Arc<Self>,
+        block: &Block,
+        storage_mass_activated: bool,
+        temp_storage_activated: bool,
+    ) -> BlockProcessResult<u64> {
         let mut total_mass: u64 = 0;
         if storage_mass_activated {
-            for tx in block.transactions.iter() {
-                // This is only the compute part of the mass, the storage part cannot be computed here
-                let calculated_tx_compute_mass = self.mass_calculator.calc_tx_compute_mass(tx);
-                let committed_contextual_mass = tx.mass();
-                // We only check the lower-bound here, a precise check of the mass commitment
-                // is done when validating the tx in context
-                if committed_contextual_mass < calculated_tx_compute_mass {
-                    return Err(RuleError::MassFieldTooLow(tx.id(), committed_contextual_mass, calculated_tx_compute_mass));
+            if temp_storage_activated {
+                let mut tracked_masses = TrackedMasses::new();
+
+                for tx in block.transactions.iter() {
+                    // This is only the compute part of the mass, the storage part cannot be computed here
+                    let calculated_tx_compute_mass = self.mass_calculator.calc_tx_compute_mass(tx);
+                    let temp_storage_mass = calculated_tx_compute_mass * (self.max_block_mass / MAX_ALLOWED_BYTE_MASS);
+                    let committed_contextual_mass = tx.mass();
+
+                    // Sum over the committed masses
+                    tracked_masses.add_compute_mass(calculated_tx_compute_mass);
+                    tracked_masses.add_storage_mass(committed_contextual_mass);
+                    tracked_masses.add_temp_storage_mass(temp_storage_mass);
+
+                    if tracked_masses.is_any_above_threshold(self.max_block_mass) {
+                        return Err(RuleError::ExceedsMassLimit(self.max_block_mass));
+                    }
                 }
-                // Sum over the committed masses
-                total_mass = total_mass.saturating_add(committed_contextual_mass);
-                if total_mass > self.max_block_mass {
-                    return Err(RuleError::ExceedsMassLimit(self.max_block_mass));
+            } else {
+                for tx in block.transactions.iter() {
+                    // This is only the compute part of the mass, the storage part cannot be computed here
+                    let calculated_tx_compute_mass = self.mass_calculator.calc_tx_compute_mass(tx);
+                    let committed_contextual_mass = tx.mass();
+                    // We only check the lower-bound here, a precise check of the mass commitment
+                    // is done when validating the tx in context
+                    if committed_contextual_mass < calculated_tx_compute_mass {
+                        return Err(RuleError::MassFieldTooLow(tx.id(), committed_contextual_mass, calculated_tx_compute_mass));
+                    }
+                    // Sum over the committed masses
+                    total_mass = total_mass.saturating_add(committed_contextual_mass);
+                    if total_mass > self.max_block_mass {
+                        return Err(RuleError::ExceedsMassLimit(self.max_block_mass));
+                    }
                 }
             }
         } else {

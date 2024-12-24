@@ -120,8 +120,19 @@ impl MassCalculator {
     }
 
     /// Calculates the overall mass of this transaction, combining both compute and storage masses.
-    pub fn calc_tx_overall_mass(&self, tx: &impl VerifiableTransaction, cached_compute_mass: Option<u64>) -> Option<u64> {
-        self.calc_tx_storage_mass(tx).map(|mass| mass.max(cached_compute_mass.unwrap_or_else(|| self.calc_tx_compute_mass(tx.tx()))))
+    pub fn calc_tx_overall_mass(
+        &self,
+        tx: &impl VerifiableTransaction,
+        cached_compute_mass: Option<u64>,
+        is_temp_storage_activated: bool,
+    ) -> Option<u64> {
+        self.calc_tx_storage_mass(tx).map(|mass| {
+            if is_temp_storage_activated {
+                mass
+            } else {
+                mass.max(cached_compute_mass.unwrap_or_else(|| self.calc_tx_compute_mass(tx.tx())))
+            }
+        })
     }
 }
 

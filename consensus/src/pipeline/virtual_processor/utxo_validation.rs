@@ -329,7 +329,11 @@ impl VirtualStateProcessor {
         let contextual_mass = self
             .transaction_validator
             .mass_calculator
-            .calc_tx_overall_mass(&mutable_tx.as_verifiable(), mutable_tx.calculated_compute_mass)
+            .calc_tx_overall_mass(
+                &mutable_tx.as_verifiable(),
+                mutable_tx.calculated_compute_mass,
+                self.temp_storage_activation.is_active(pov_daa_score),
+            )
             .ok_or(TxRuleError::MassIncomputable)?;
 
         // Set the inner mass field
