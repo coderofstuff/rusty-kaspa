@@ -45,7 +45,7 @@ impl TransactionValidator {
         let fee = total_in - total_out;
         if flags != TxValidationFlags::SkipMassCheck && self.storage_mass_activation.is_active(pov_daa_score) {
             // Storage mass hardfork was activated
-            self.check_mass_commitment(tx)?;
+            self.check_mass_commitment(tx, pov_daa_score)?;
 
             if self.storage_mass_activation.is_within_range_from_activation(pov_daa_score, 10) {
                 warn!("--------- Storage mass hardfork was activated successfully!!! --------- (DAA score: {})", pov_daa_score);
@@ -124,8 +124,11 @@ impl TransactionValidator {
         Ok(total_out)
     }
 
-    fn check_mass_commitment(&self, tx: &impl VerifiableTransaction) -> TxResult<()> {
-        let calculated_contextual_mass = self.mass_calculator.calc_tx_overall_mass(tx, None).ok_or(TxRuleError::MassIncomputable)?;
+    fn check_mass_commitment(&self, tx: &impl VerifiableTransaction, pov_daa_score: u64) -> TxResult<()> {
+        let calculated_contextual_mass = self
+            .mass_calculator
+            .calc_tx_overall_mass(tx, None, self.temp_storage_activation.is_active(pov_daa_score))
+            .ok_or(TxRuleError::MassIncomputable)?;
         let committed_contextual_mass = tx.tx().mass();
         if committed_contextual_mass != calculated_contextual_mass {
             return Err(TxRuleError::WrongMass(calculated_contextual_mass, committed_contextual_mass));

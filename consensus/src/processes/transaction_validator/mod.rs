@@ -31,6 +31,8 @@ pub struct TransactionValidator {
     /// KIP-10 hardfork DAA score
     kip10_activation: ForkActivation,
     payload_activation: ForkActivation,
+    /// Temporary storage activation
+    temp_storage_activation: ForkActivation,
 }
 
 impl TransactionValidator {
@@ -48,6 +50,7 @@ impl TransactionValidator {
         storage_mass_activation: ForkActivation,
         kip10_activation: ForkActivation,
         payload_activation: ForkActivation,
+        temp_storage_activation: ForkActivation,
     ) -> Self {
         Self {
             max_tx_inputs,
@@ -62,6 +65,7 @@ impl TransactionValidator {
             storage_mass_activation,
             kip10_activation,
             payload_activation,
+            temp_storage_activation,
         }
     }
 
@@ -88,6 +92,7 @@ impl TransactionValidator {
             storage_mass_activation: ForkActivation::never(),
             kip10_activation: ForkActivation::never(),
             payload_activation: ForkActivation::never(),
+            temp_storage_activation: ForkActivation::never(),
         }
     }
 }
