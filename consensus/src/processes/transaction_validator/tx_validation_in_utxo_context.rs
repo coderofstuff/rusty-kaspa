@@ -127,7 +127,7 @@ impl TransactionValidator {
     fn check_mass_commitment(&self, tx: &impl VerifiableTransaction, pov_daa_score: u64) -> TxResult<()> {
         let calculated_contextual_mass = self
             .mass_calculator
-            .calc_tx_overall_mass(tx, None, self.temp_storage_activation.is_active(pov_daa_score))
+            .calc_tx_overall_mass(tx, None, self.transient_storage_activation.is_active(pov_daa_score))
             .ok_or(TxRuleError::MassIncomputable)?;
         let committed_contextual_mass = tx.tx().mass();
         if committed_contextual_mass != calculated_contextual_mass {

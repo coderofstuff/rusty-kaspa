@@ -122,7 +122,7 @@ pub struct Params {
     ///    - OpTxOutputSpk (0xc3): Get output script public key
     pub kip10_activation: ForkActivation,
 
-    pub temp_storage_activation: ForkActivation,
+    pub transient_storage_activation: ForkActivation,
 
     /// DAA score after which the pre-deflationary period switches to the deflationary period
     pub deflationary_phase_daa_score: u64,
@@ -398,7 +398,7 @@ pub const MAINNET_PARAMS: Params = Params {
     storage_mass_parameter: STORAGE_MASS_PARAMETER,
     storage_mass_activation: ForkActivation::never(),
     kip10_activation: ForkActivation::never(),
-    temp_storage_activation: ForkActivation::never(),
+    transient_storage_activation: ForkActivation::never(),
 
     // deflationary_phase_daa_score is the DAA score after which the pre-deflationary period
     // switches to the deflationary period. This number is calculated as follows:
@@ -465,7 +465,7 @@ pub const TESTNET_PARAMS: Params = Params {
     storage_mass_parameter: STORAGE_MASS_PARAMETER,
     storage_mass_activation: ForkActivation::never(),
     kip10_activation: ForkActivation::never(),
-    temp_storage_activation: ForkActivation::never(),
+    transient_storage_activation: ForkActivation::never(),
 
     // deflationary_phase_daa_score is the DAA score after which the pre-deflationary period
     // switches to the deflationary period. This number is calculated as follows:
@@ -542,7 +542,7 @@ pub const TESTNET11_PARAMS: Params = Params {
     kip10_activation: ForkActivation::new(287238000),
     payload_activation: ForkActivation::new(287238000),
     // Activation TBD
-    temp_storage_activation: ForkActivation::never(),
+    transient_storage_activation: ForkActivation::never(),
 
     skip_proof_of_work: false,
     max_block_level: 250,
@@ -597,7 +597,7 @@ pub const SIMNET_PARAMS: Params = Params {
     storage_mass_parameter: STORAGE_MASS_PARAMETER,
     storage_mass_activation: ForkActivation::always(),
     kip10_activation: ForkActivation::never(),
-    temp_storage_activation: ForkActivation::always(),
+    transient_storage_activation: ForkActivation::always(),
 
     skip_proof_of_work: true, // For simnet only, PoW can be simulated by default
     max_block_level: 250,
@@ -647,7 +647,7 @@ pub const DEVNET_PARAMS: Params = Params {
     storage_mass_parameter: STORAGE_MASS_PARAMETER,
     storage_mass_activation: ForkActivation::never(),
     kip10_activation: ForkActivation::never(),
-    temp_storage_activation: ForkActivation::never(),
+    transient_storage_activation: ForkActivation::never(),
 
     // deflationary_phase_daa_score is the DAA score after which the pre-deflationary period
     // switches to the deflationary period. This number is calculated as follows:

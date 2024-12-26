@@ -39,13 +39,13 @@ impl TrackedMasses {
 impl BlockBodyProcessor {
     pub fn validate_body_in_isolation(self: &Arc<Self>, block: &Block) -> BlockProcessResult<u64> {
         let storage_mass_activated = self.storage_mass_activation.is_active(block.header.daa_score);
-        let temp_storage_activated = self.temp_storage_activation.is_active(block.header.daa_score);
+        let transient_storage_activated = self.transient_storage_activation.is_active(block.header.daa_score);
 
         Self::check_has_transactions(block)?;
         Self::check_hash_merkle_root(block, storage_mass_activated)?;
         Self::check_only_one_coinbase(block)?;
         self.check_transactions_in_isolation(block)?;
-        let mass = self.check_block_mass(block, storage_mass_activated, temp_storage_activated)?;
+        let mass = self.check_block_mass(block, storage_mass_activated, transient_storage_activated)?;
         self.check_duplicate_transactions(block)?;
         self.check_block_double_spends(block)?;
         self.check_no_chained_transactions(block)?;
@@ -94,11 +94,11 @@ impl BlockBodyProcessor {
         self: &Arc<Self>,
         block: &Block,
         storage_mass_activated: bool,
-        temp_storage_activated: bool,
+        transient_storage_activated: bool,
     ) -> BlockProcessResult<u64> {
         let mut total_mass: u64 = 0;
         if storage_mass_activated {
-            if temp_storage_activated {
+            if transient_storage_activated {
                 let mut tracked_masses = TrackedMasses::new();
 
                 for tx in block.transactions.iter() {
