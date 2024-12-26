@@ -2,23 +2,25 @@ use std::{collections::HashSet, sync::Arc};
 
 use super::BlockBodyProcessor;
 use crate::errors::{BlockProcessResult, RuleError};
-use kaspa_consensus_core::{block::Block, merkle::calc_hash_merkle_root, tx::TransactionOutpoint};
+use kaspa_consensus_core::{
+    block::Block, mass::transaction_estimated_serialized_size, merkle::calc_hash_merkle_root, tx::TransactionOutpoint,
+};
 
 pub const MAX_ALLOWED_BYTE_MASS: u64 = 125_000; // 125k bytes = 500_000 max block size / 4
 
 struct TrackedMasses {
     compute_mass: u64,
     storage_mass: u64,
-    temp_storage_mass: u64,
+    transient_storage_mass: u64,
 }
 
 impl TrackedMasses {
     fn new() -> Self {
-        Self { compute_mass: 0, storage_mass: 0, temp_storage_mass: 0 }
+        Self { compute_mass: 0, storage_mass: 0, transient_storage_mass: 0 }
     }
 
     fn is_any_above_threshold(&self, threshold: u64) -> bool {
-        return self.compute_mass > threshold || self.storage_mass > threshold || self.temp_storage_mass > threshold;
+        return self.compute_mass > threshold || self.storage_mass > threshold || self.transient_storage_mass > threshold;
     }
 
     fn add_compute_mass(&mut self, mass: u64) {
@@ -29,8 +31,8 @@ impl TrackedMasses {
         self.storage_mass = self.storage_mass.saturating_add(mass);
     }
 
-    fn add_temp_storage_mass(&mut self, mass: u64) {
-        self.temp_storage_mass = self.temp_storage_mass.saturating_add(mass);
+    fn add_transient_storage_mass(&mut self, mass: u64) {
+        self.transient_storage_mass = self.transient_storage_mass.saturating_add(mass);
     }
 }
 
@@ -102,13 +104,15 @@ impl BlockBodyProcessor {
                 for tx in block.transactions.iter() {
                     // This is only the compute part of the mass, the storage part cannot be computed here
                     let calculated_tx_compute_mass = self.mass_calculator.calc_tx_compute_mass(tx);
-                    let temp_storage_mass = calculated_tx_compute_mass * (self.max_block_mass / MAX_ALLOWED_BYTE_MASS);
+                    // tx_byte_size * (max_block_mass / MAX_ALLOWED_BYTE_MASS)
+                    let transient_storage_mass =
+                        transaction_estimated_serialized_size(tx) * (self.max_block_mass / MAX_ALLOWED_BYTE_MASS);
                     let committed_contextual_mass = tx.mass();
 
                     // Sum over the committed masses
                     tracked_masses.add_compute_mass(calculated_tx_compute_mass);
                     tracked_masses.add_storage_mass(committed_contextual_mass);
-                    tracked_masses.add_temp_storage_mass(temp_storage_mass);
+                    tracked_masses.add_transient_storage_mass(transient_storage_mass);
 
                     if tracked_masses.is_any_above_threshold(self.max_block_mass) {
                         return Err(RuleError::ExceedsMassLimit(self.max_block_mass));
