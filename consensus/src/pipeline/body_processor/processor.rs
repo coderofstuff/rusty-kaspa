@@ -90,7 +90,7 @@ pub struct BlockBodyProcessor {
     pub(crate) storage_mass_activation: ForkActivation,
 
     /// Temp storage mass HF
-    pub(crate) temp_storage_activation: ForkActivation,
+    pub(crate) transient_storage_activation: ForkActivation,
 }
 
 impl BlockBodyProcessor {
@@ -134,7 +134,7 @@ impl BlockBodyProcessor {
             notification_root,
             counters,
             storage_mass_activation: params.storage_mass_activation,
-            temp_storage_activation: params.temp_storage_activation,
+            transient_storage_activation: params.transient_storage_activation,
         }
     }
 
