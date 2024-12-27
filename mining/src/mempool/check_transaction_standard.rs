@@ -168,11 +168,7 @@ impl Mempool {
     /// into the mempool and relay.
     pub(crate) fn check_transaction_standard_in_context(&self, transaction: &MutableTransaction) -> NonStandardResult<()> {
         let transaction_id = transaction.id();
-        let contextual_mass = transaction
-            .tx
-            .mass()
-            .max(transaction.calculated_compute_mass.unwrap())
-            .max(transaction.calculated_transient_storage_mass.unwrap());
+        let contextual_mass = transaction.calculated_max_overall_mass();
         assert!(contextual_mass > 0, "expected to be set by consensus");
         if contextual_mass > MAXIMUM_STANDARD_TRANSACTION_MASS {
             return Err(NonStandardError::RejectContextualMass(transaction_id, contextual_mass, MAXIMUM_STANDARD_TRANSACTION_MASS));
