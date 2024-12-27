@@ -400,12 +400,20 @@ pub struct MutableTransaction<T: AsRef<Transaction> = std::sync::Arc<Transaction
     pub calculated_fee: Option<u64>,
     /// Populated compute mass (does not include the storage mass)
     pub calculated_compute_mass: Option<u64>,
+    /// Populated transient storage mass
+    pub calculated_transient_storage_mass: Option<u64>,
 }
 
 impl<T: AsRef<Transaction>> MutableTransaction<T> {
     pub fn new(tx: T) -> Self {
         let num_inputs = tx.as_ref().inputs.len();
-        Self { tx, entries: vec![None; num_inputs], calculated_fee: None, calculated_compute_mass: None }
+        Self {
+            tx,
+            entries: vec![None; num_inputs],
+            calculated_fee: None,
+            calculated_compute_mass: None,
+            calculated_transient_storage_mass: None,
+        }
     }
 
     pub fn id(&self) -> TransactionId {
@@ -414,7 +422,13 @@ impl<T: AsRef<Transaction>> MutableTransaction<T> {
 
     pub fn with_entries(tx: T, entries: Vec<UtxoEntry>) -> Self {
         assert_eq!(tx.as_ref().inputs.len(), entries.len());
-        Self { tx, entries: entries.into_iter().map(Some).collect(), calculated_fee: None, calculated_compute_mass: None }
+        Self {
+            tx,
+            entries: entries.into_iter().map(Some).collect(),
+            calculated_fee: None,
+            calculated_compute_mass: None,
+            calculated_transient_storage_mass: None,
+        }
     }
 
     /// Returns the tx wrapped as a [`VerifiableTransaction`]. Note that this function
@@ -430,7 +444,10 @@ impl<T: AsRef<Transaction>> MutableTransaction<T> {
     }
 
     pub fn is_fully_populated(&self) -> bool {
-        self.is_verifiable() && self.calculated_fee.is_some() && self.calculated_compute_mass.is_some()
+        self.is_verifiable()
+            && self.calculated_fee.is_some()
+            && self.calculated_compute_mass.is_some()
+            && self.calculated_transient_storage_mass.is_some()
     }
 
     pub fn missing_outpoints(&self) -> impl Iterator<Item = TransactionOutpoint> + '_ {

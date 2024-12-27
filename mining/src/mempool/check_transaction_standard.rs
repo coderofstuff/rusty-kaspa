@@ -61,12 +61,9 @@ impl Mempool {
         // almost as much to process as the sender fees, limit the maximum
         // size of a transaction. This also helps mitigate CPU exhaustion
         // attacks.
-        if transaction.calculated_compute_mass.unwrap() > MAXIMUM_STANDARD_TRANSACTION_MASS {
-            return Err(NonStandardError::RejectMass(
-                transaction_id,
-                transaction.calculated_compute_mass.unwrap(),
-                MAXIMUM_STANDARD_TRANSACTION_MASS,
-            ));
+        let max_tx_mass = transaction.calculated_compute_mass.unwrap().max(transaction.calculated_transient_storage_mass.unwrap());
+        if max_tx_mass > MAXIMUM_STANDARD_TRANSACTION_MASS {
+            return Err(NonStandardError::RejectMass(transaction_id, max_tx_mass, MAXIMUM_STANDARD_TRANSACTION_MASS));
         }
 
         for (i, input) in transaction.tx.inputs.iter().enumerate() {
@@ -248,6 +245,7 @@ mod tests {
         opcodes::codes::{OpReturn, OpTrue},
         script_builder::ScriptBuilder,
     };
+    use mass::transaction_estimated_serialized_size;
     use smallvec::smallvec;
     use std::sync::Arc;
 
@@ -412,6 +410,7 @@ mod tests {
         fn new_mtx(tx: Transaction, mass: u64) -> MutableTransaction {
             let mut mtx = MutableTransaction::from_tx(tx);
             mtx.calculated_compute_mass = Some(mass);
+            mtx.calculated_transient_storage_mass = Some(transaction_estimated_serialized_size(&mtx.tx) * 4);
             mtx
         }
 
