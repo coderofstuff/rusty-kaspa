@@ -157,7 +157,7 @@ impl Miner {
             .into_par_iter()
             .map(|mutable_tx| {
                 let signed_tx = sign(mutable_tx, schnorr_key);
-                let mass = self.mass_calculator.calc_tx_overall_mass(&signed_tx.as_verifiable(), None, false).unwrap();
+                let mass = self.mass_calculator.calc_tx_overall_mass(&signed_tx.as_verifiable(), None, true).unwrap();
                 signed_tx.tx.set_mass(mass);
                 let mut signed_tx = signed_tx.tx;
                 signed_tx.finalize();
