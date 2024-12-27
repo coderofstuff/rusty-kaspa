@@ -472,11 +472,21 @@ impl<T: AsRef<Transaction>> MutableTransaction<T> {
     /// function returns a value when calculated fee exists and the contextual mass is greater
     /// than zero, otherwise `None` is returned.
     pub fn calculated_feerate(&self) -> Option<f64> {
-        let contextual_mass = self.tx.as_ref().mass();
+        let contextual_mass = self.calculated_max_overall_mass();
         if contextual_mass > 0 {
             self.calculated_fee.map(|fee| fee as f64 / contextual_mass as f64)
         } else {
             None
+        }
+    }
+
+    /// Returns the maximum overall mass of this transaction if all values are set
+    /// else returns 0
+    pub fn calculated_max_overall_mass(&self) -> u64 {
+        if self.calculated_compute_mass.is_some() && self.calculated_transient_storage_mass.is_some() {
+            self.tx.as_ref().mass().max(self.calculated_compute_mass.unwrap()).max(self.calculated_transient_storage_mass.unwrap())
+        } else {
+            0
         }
     }
 
