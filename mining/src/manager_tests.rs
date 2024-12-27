@@ -20,7 +20,7 @@ mod tests {
         api::ConsensusApi,
         block::TemplateBuildMode,
         coinbase::MinerData,
-        constants::{MAX_TX_IN_SEQUENCE_NUM, SOMPI_PER_KASPA, TX_VERSION},
+        constants::{MAX_TX_IN_SEQUENCE_NUM, SOMPI_PER_KASPA, TRANSIENT_BYTE_TO_MASS_FACTOR, TX_VERSION},
         errors::tx::TxRuleError,
         mass::transaction_estimated_serialized_size,
         subnets::SUBNETWORK_ID_NATIVE,
@@ -115,6 +115,14 @@ mod tests {
                         tx.id(),
                         tx_to_insert.calculated_compute_mass.unwrap(),
                         tx.calculated_compute_mass.unwrap()
+                    );
+                    assert_eq!(
+                        tx_to_insert.calculated_transient_storage_mass.unwrap(),
+                        tx.calculated_transient_storage_mass.unwrap(),
+                        "({priority:?}, {orphan:?}, {rbf_policy:?}) wrong transient mass in transaction {}: expected: {}, got: {}",
+                        tx.id(),
+                        tx_to_insert.calculated_transient_storage_mass.unwrap(),
+                        tx.calculated_transient_storage_mass.unwrap()
                     );
                 }
                 assert!(
@@ -1349,6 +1357,8 @@ mod tests {
         mutable_tx.calculated_fee = Some(DEFAULT_MINIMUM_RELAY_TRANSACTION_FEE);
         // Please note: this is the ConsensusMock version of the calculated_mass which differs from Consensus
         mutable_tx.calculated_compute_mass = Some(transaction_estimated_serialized_size(&mutable_tx.tx));
+        mutable_tx.calculated_transient_storage_mass =
+            Some(transaction_estimated_serialized_size(&mutable_tx.tx) * TRANSIENT_BYTE_TO_MASS_FACTOR);
         mutable_tx.entries[0] = Some(entry);
 
         mutable_tx
