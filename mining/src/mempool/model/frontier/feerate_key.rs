@@ -81,9 +81,10 @@ impl From<&MempoolTransaction> for FeerateTransactionKey {
         let calc_tx_mass = tx.mtx.calculated_compute_mass.expect("compute mass was expected to be calculated prior");
         let calc_transient_mass =
             tx.mtx.calculated_transient_storage_mass.expect("transient storage mass was expected to be calculated prior");
-        // Pre-Transient Storage HF, the below is a NOOP.
+        // Pre-Transient Storage HF, tx.mass() will contain both compute and storage masses.
         // Post-Transient Storage HF, tx.mass() will only be the storage mass. Use the max with calc_tx_max to preserve
         // original FeerateTransactionKey behavior when that happens
+        // In addition, on both pre and post HF, we'll now also consider the transient storage mass
         let mass = tx.mtx.tx.mass().max(calc_tx_mass).max(calc_transient_mass);
         let fee = tx.mtx.calculated_fee.expect("fee is expected to be populated");
         assert_ne!(mass, 0, "mass field is expected to be set when inserting to the mempool");
