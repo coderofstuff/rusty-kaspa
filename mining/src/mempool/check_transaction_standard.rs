@@ -236,7 +236,7 @@ mod tests {
     use kaspa_addresses::{Address, Prefix, Version};
     use kaspa_consensus_core::{
         config::params::Params,
-        constants::{MAX_TX_IN_SEQUENCE_NUM, SOMPI_PER_KASPA, TX_VERSION},
+        constants::{MAX_TX_IN_SEQUENCE_NUM, SOMPI_PER_KASPA, TRANSIENT_BYTE_TO_MASS_FACTOR, TX_VERSION},
         network::NetworkType,
         subnets::SUBNETWORK_ID_NATIVE,
         tx::{ScriptPublicKey, ScriptVec, Transaction, TransactionInput, TransactionOutpoint, TransactionOutput},
@@ -410,7 +410,8 @@ mod tests {
         fn new_mtx(tx: Transaction, mass: u64) -> MutableTransaction {
             let mut mtx = MutableTransaction::from_tx(tx);
             mtx.calculated_compute_mass = Some(mass);
-            mtx.calculated_transient_storage_mass = Some(transaction_estimated_serialized_size(&mtx.tx) * 4);
+            mtx.calculated_transient_storage_mass =
+                Some(transaction_estimated_serialized_size(&mtx.tx) * TRANSIENT_BYTE_TO_MASS_FACTOR);
             mtx
         }
 
