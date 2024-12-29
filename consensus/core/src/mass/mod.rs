@@ -120,8 +120,19 @@ impl MassCalculator {
     }
 
     /// Calculates the overall mass of this transaction, combining both compute and storage masses.
-    pub fn calc_tx_overall_mass(&self, tx: &impl VerifiableTransaction, cached_compute_mass: Option<u64>) -> Option<u64> {
-        self.calc_tx_storage_mass(tx).map(|mass| mass.max(cached_compute_mass.unwrap_or_else(|| self.calc_tx_compute_mass(tx.tx()))))
+    pub fn calc_tx_overall_mass(
+        &self,
+        tx: &impl VerifiableTransaction,
+        cached_compute_mass: Option<u64>,
+        is_transient_storage_activated: bool,
+    ) -> Option<u64> {
+        self.calc_tx_storage_mass(tx).map(|mass| {
+            if is_transient_storage_activated {
+                mass
+            } else {
+                mass.max(cached_compute_mass.unwrap_or_else(|| self.calc_tx_compute_mass(tx.tx())))
+            }
+        })
     }
 }
 
@@ -258,6 +269,22 @@ mod tests {
         tx.tx.outputs[0].value = 50;
         let storage_mass = MassCalculator::new(0, 0, 0, storage_mass_parameter).calc_tx_storage_mass(&tx.as_verifiable()).unwrap();
         assert_eq!(storage_mass, 5000000000);
+    }
+
+    #[test]
+    fn test_calc_tx_overall_mass() {
+        let tx = generate_tx_from_amounts(&[100, 200], &[50, 250]);
+        let storage_mass_parameter = 10u64.pow(12);
+        let mass_calculator = MassCalculator::new(1, 10, 1000, storage_mass_parameter);
+        let storage_mass = mass_calculator.calc_tx_storage_mass(&tx.as_verifiable()).unwrap();
+        let compute_mass = mass_calculator.calc_tx_compute_mass(&tx.tx);
+
+        // Pre-HF behavior
+        let overall_mass = storage_mass.max(compute_mass);
+        assert_eq!(overall_mass, mass_calculator.calc_tx_overall_mass(&tx.as_verifiable(), None, false).unwrap());
+
+        // Post-HF behavior
+        assert_eq!(storage_mass, mass_calculator.calc_tx_overall_mass(&tx.as_verifiable(), Some(compute_mass), true).unwrap());
     }
 
     fn generate_tx_from_amounts(ins: &[u64], outs: &[u64]) -> MutableTransaction<Transaction> {

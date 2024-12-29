@@ -61,12 +61,9 @@ impl Mempool {
         // almost as much to process as the sender fees, limit the maximum
         // size of a transaction. This also helps mitigate CPU exhaustion
         // attacks.
-        if transaction.calculated_compute_mass.unwrap() > MAXIMUM_STANDARD_TRANSACTION_MASS {
-            return Err(NonStandardError::RejectMass(
-                transaction_id,
-                transaction.calculated_compute_mass.unwrap(),
-                MAXIMUM_STANDARD_TRANSACTION_MASS,
-            ));
+        let max_tx_mass = transaction.calculated_compute_mass.unwrap().max(transaction.calculated_transient_storage_mass.unwrap());
+        if max_tx_mass > MAXIMUM_STANDARD_TRANSACTION_MASS {
+            return Err(NonStandardError::RejectMass(transaction_id, max_tx_mass, MAXIMUM_STANDARD_TRANSACTION_MASS));
         }
 
         for (i, input) in transaction.tx.inputs.iter().enumerate() {
@@ -171,7 +168,7 @@ impl Mempool {
     /// into the mempool and relay.
     pub(crate) fn check_transaction_standard_in_context(&self, transaction: &MutableTransaction) -> NonStandardResult<()> {
         let transaction_id = transaction.id();
-        let contextual_mass = transaction.tx.mass();
+        let contextual_mass = transaction.calculated_max_overall_mass();
         assert!(contextual_mass > 0, "expected to be set by consensus");
         if contextual_mass > MAXIMUM_STANDARD_TRANSACTION_MASS {
             return Err(NonStandardError::RejectContextualMass(transaction_id, contextual_mass, MAXIMUM_STANDARD_TRANSACTION_MASS));
@@ -239,7 +236,7 @@ mod tests {
     use kaspa_addresses::{Address, Prefix, Version};
     use kaspa_consensus_core::{
         config::params::Params,
-        constants::{MAX_TX_IN_SEQUENCE_NUM, SOMPI_PER_KASPA, TX_VERSION},
+        constants::{MAX_TX_IN_SEQUENCE_NUM, SOMPI_PER_KASPA, TRANSIENT_BYTE_TO_MASS_FACTOR, TX_VERSION},
         network::NetworkType,
         subnets::SUBNETWORK_ID_NATIVE,
         tx::{ScriptPublicKey, ScriptVec, Transaction, TransactionInput, TransactionOutpoint, TransactionOutput},
@@ -248,6 +245,7 @@ mod tests {
         opcodes::codes::{OpReturn, OpTrue},
         script_builder::ScriptBuilder,
     };
+    use mass::transaction_estimated_serialized_size;
     use smallvec::smallvec;
     use std::sync::Arc;
 
@@ -412,6 +410,8 @@ mod tests {
         fn new_mtx(tx: Transaction, mass: u64) -> MutableTransaction {
             let mut mtx = MutableTransaction::from_tx(tx);
             mtx.calculated_compute_mass = Some(mass);
+            mtx.calculated_transient_storage_mass =
+                Some(transaction_estimated_serialized_size(&mtx.tx) * TRANSIENT_BYTE_TO_MASS_FACTOR);
             mtx
         }
 

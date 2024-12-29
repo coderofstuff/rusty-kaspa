@@ -99,11 +99,9 @@ impl OrphanPool {
     }
 
     fn check_orphan_mass(&self, transaction: &MutableTransaction) -> RuleResult<()> {
-        if transaction.calculated_compute_mass.unwrap() > self.config.maximum_orphan_transaction_mass {
-            return Err(RuleError::RejectBadOrphanMass(
-                transaction.calculated_compute_mass.unwrap(),
-                self.config.maximum_orphan_transaction_mass,
-            ));
+        let max_tx_mass = transaction.calculated_compute_mass.unwrap().max(transaction.calculated_transient_storage_mass.unwrap());
+        if max_tx_mass > self.config.maximum_orphan_transaction_mass {
+            return Err(RuleError::RejectBadOrphanMass(max_tx_mass, self.config.maximum_orphan_transaction_mass));
         }
         Ok(())
     }
