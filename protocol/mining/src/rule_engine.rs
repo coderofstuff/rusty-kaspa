@@ -21,7 +21,7 @@ use kaspa_core::{
 use kaspa_p2p_flows::flow_context::FlowContext;
 
 const RULE_ENGINE: &str = "mining-rule-engine";
-const SYNC_RATE_THRESHOLD: f64 = 0.90;
+const SYNC_RATE_THRESHOLD: f64 = 0.50;
 
 pub enum NearlySyncedFinder<'a> {
     BySession(&'a ConsensusSessionOwned),

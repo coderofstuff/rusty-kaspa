@@ -3098,6 +3098,7 @@ dependencies = [
  "kaspa-notify",
  "kaspa-p2p-flows",
  "kaspa-p2p-lib",
+ "kaspa-p2p-mining",
  "kaspa-perf-monitor",
  "kaspa-rpc-core",
  "kaspa-txscript",
