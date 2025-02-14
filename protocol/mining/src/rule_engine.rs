@@ -1,8 +1,5 @@
 use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::{atomic::AtomicBool, Arc},
     time::{Duration, Instant},
 };
 
@@ -10,6 +7,7 @@ use kaspa_consensus_core::{
     api::counters::ProcessingCounters,
     config::{params::NEW_DIFFICULTY_WINDOW_DURATION, Config},
     daa_score_timestamp::DaaScoreTimestamp,
+    mining_rules::MiningRules,
     network::NetworkType::{Mainnet, Testnet},
 };
 use kaspa_consensusmanager::ConsensusManager;
@@ -19,12 +17,16 @@ use kaspa_core::{
         tick::{TickReason, TickService},
     },
     time::unix_now,
-    trace, warn,
+    trace,
 };
 use kaspa_p2p_lib::Hub;
 
+use crate::rules::{
+    blue_parents_only_rule::BlueParentsOnlyRule, mining_rule::MiningRule, no_transactions_rule::NoTransactionsRule,
+    sync_rate_rule::SyncRateRule, ExtraData,
+};
+
 const RULE_ENGINE: &str = "mining-rule-engine";
-const SYNC_RATE_THRESHOLD: f64 = 0.10;
 
 #[derive(Clone)]
 pub struct MiningRuleEngine {
@@ -35,6 +37,8 @@ pub struct MiningRuleEngine {
     use_sync_rate_rule: Arc<AtomicBool>,
     consensus_manager: Arc<ConsensusManager>,
     hub: Hub,
+    mining_rules: Arc<MiningRules>,
+    rules: Vec<Arc<dyn MiningRule>>,
 }
 
 impl MiningRuleEngine {
@@ -44,6 +48,7 @@ impl MiningRuleEngine {
         let mut last_snapshot = self.processing_counters.snapshot();
         let mut last_log_time = Instant::now();
         loop {
+            // START: Sync monitor
             if let TickReason::Shutdown = self.tick_service.tick(Duration::from_secs(snapshot_interval)).await {
                 // Let the system print final logs before exiting
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -62,42 +67,26 @@ impl MiningRuleEngine {
             let delta = &snapshot - &last_snapshot;
 
             if elapsed_time.as_secs() > 0 {
-                let expected_blocks = (elapsed_time.as_millis() as u64) / self.config.target_time_per_block;
-                let received_blocks = delta.body_counts.max(delta.header_counts);
-                let rate: f64 = (received_blocks as f64) / (expected_blocks as f64);
-
                 let session = self.consensus_manager.consensus().unguarded_session();
 
                 let finality_point = session.async_finality_point().await;
                 let finality_point_timestamp = session.async_get_header(finality_point).await.unwrap().timestamp;
-                // Finality point is considered "recent" if it is within 3 finality durations from the current time
-                let is_finality_recent = finality_point_timestamp >= unix_now().saturating_sub(self.config.finality_duration() * 3);
 
-                trace!(
-                    "Sync rate: {:.2} | Finality point recent: {} | Elapsed time: {}s | Found/Expected blocks: {}/{}",
-                    rate,
-                    is_finality_recent,
-                    elapsed_time.as_secs(),
-                    delta.body_counts,
-                    expected_blocks,
-                );
+                let extra_data = ExtraData {
+                    finality_point_timestamp,
+                    target_time_per_block: self.config.target_time_per_block,
+                    has_sufficient_peer_connectivity: self.has_sufficient_peer_connectivity(),
+                    finality_duration: self.config.finality_duration(),
+                    elapsed_time,
+                    sink_daa_score_timestamp: session.async_get_sink_daa_score_timestamp().await,
+                    merge_depth: self.config.merge_depth,
+                };
 
-                if is_finality_recent && rate < SYNC_RATE_THRESHOLD {
-                    // if sync rate rule conditions are met:
-                    if let Ok(false) = self.use_sync_rate_rule.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed) {
-                        warn!("Sync rate {:.2} is below threshold: {}", rate, SYNC_RATE_THRESHOLD);
-                    }
-                } else {
-                    // else when sync rate conditions are not met:
-                    if let Ok(true) = self.use_sync_rate_rule.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed) {
-                        if !is_finality_recent {
-                            warn!("Sync rate {:.2} recovered: {} by entering IBD", rate, SYNC_RATE_THRESHOLD);
-                        } else {
-                            warn!("Sync rate {:.2} recovered: {}", rate, SYNC_RATE_THRESHOLD);
-                        }
-                    } else if !is_finality_recent {
-                        trace!("Finality period is old. Timestamp: {}. Sync rate: {:.2}", finality_point_timestamp, rate);
-                    }
+                trace!("Current Mining Rule: {:?}", self.mining_rules);
+
+                // Check for all the rules
+                for rule in &self.rules {
+                    rule.check_rule(&delta, &extra_data);
                 }
             }
 
@@ -112,15 +101,16 @@ impl MiningRuleEngine {
         processing_counters: Arc<ProcessingCounters>,
         tick_service: Arc<TickService>,
         hub: Hub,
+        mining_rules: Arc<MiningRules>,
     ) -> Self {
-        Self {
-            consensus_manager,
-            config,
-            processing_counters,
-            tick_service,
-            hub,
-            use_sync_rate_rule: Arc::new(AtomicBool::new(false)),
-        }
+        let use_sync_rate_rule = Arc::new(AtomicBool::new(false));
+        let rules: Vec<Arc<(dyn MiningRule + 'static)>> = vec![
+            Arc::new(SyncRateRule::new(use_sync_rate_rule.clone())),
+            Arc::new(BlueParentsOnlyRule::new(mining_rules.blue_parents_only.clone())),
+            Arc::new(NoTransactionsRule::new(mining_rules.no_transactions.clone())),
+        ];
+
+        Self { consensus_manager, config, processing_counters, tick_service, hub, use_sync_rate_rule, mining_rules, rules }
     }
 
     pub fn should_mine(&self, sink_daa_score_timestamp: DaaScoreTimestamp) -> bool {
