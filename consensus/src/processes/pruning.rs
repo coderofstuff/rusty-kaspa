@@ -13,7 +13,7 @@ use crate::model::{
     },
 };
 use kaspa_consensus_core::{blockhash::BlockHashExtensions, config::params::ForkedParam};
-use kaspa_core::warn;
+use kaspa_core::{trace, warn};
 use kaspa_hashes::Hash;
 use parking_lot::RwLock;
 
@@ -354,16 +354,61 @@ impl<
             }
         }
 
+        // [Crescendo] This will contain pruning point tips that may be in an isolated chain that we're no longer pointing to
+        // after the HF.
+        //
+        // Entries that go into here come only from past_pruning_points store so they must all be points that became pruning
+        // points in the past
+        let mut skipped_pps = VecDeque::new();
+
+        // There may be pp in the past that were no longer pointed to by future blocks due to the HF.
+        // We can skip over those, but we need to make sure that those blocks still point back all the way to genesis
         for idx in (0..=pruning_info.index).rev() {
             let pp = self.past_pruning_points_store.get(idx).unwrap();
+            trace!("idx: {} | pp: {}", idx, pp);
+            trace!("idx: {} | expected_pps_queue: {:#?}", idx, expected_pps_queue);
             let pp_header = self.headers_store.get_header(pp).unwrap();
             let Some(expected_pp) = expected_pps_queue.pop_front() else {
                 // If we have less than expected pruning points.
                 return false;
             };
 
+            // this pp may be the pruning point of a previous pp we skipped over. If it is, remove the previous entry
+            // from the skipped list since we know that the previous skipped pp points to this.
+            for skipped_pp_idx in (0..skipped_pps.len()).rev() {
+                let skipped = skipped_pps[skipped_pp_idx];
+                let skipped_header = self.headers_store.get_header(skipped).unwrap();
+
+                // a skipped pp we saw has this pp as it's pruning point. We can get rid of that previous tip and only track from here
+                if skipped_header.pruning_point == pp {
+                    // remove is O(n), but skipped_pps is expected to have very few elements (1 or 2 elements at a time) so it's fine
+                    if let Some(_) = skipped_pps.remove(skipped_pp_idx) {
+                        trace!(
+                            "idx: {} | previously seen pp {} has pruning point {} which is the same as pp {}",
+                            idx,
+                            skipped,
+                            pp,
+                            skipped_header.pruning_point
+                        );
+                    }
+                }
+            }
+
             if expected_pp != pp {
-                return false;
+                // pp is definitely a point that this node has moved to in the past
+                // pp may be the beginning of a new chain of pps to genesis (where last tip IS pp itself)
+                // so we put back the expected_pp in the queue and add the current pp to a list so we can check them later
+                // Add this pp to the list of skipped pps
+                if pp != self.genesis_hash {
+                    skipped_pps.push_back(pp);
+                } else {
+                    trace!("expected_pp: {}", expected_pp);
+                    trace!("pp {} is genesis at idx {}", pp, idx);
+                }
+
+                // Put back this expected_pp since it must match some other pruning point in the past
+                expected_pps_queue.push_front(expected_pp);
+                trace!("idx: {} | skipped_pps: {:#?}", idx, skipped_pps);
             }
 
             if idx == 0 {
@@ -377,6 +422,7 @@ impl<
 
             // Add the pruning point from the POV of the current one if it's
             // not already added.
+            // ^^^ the above isn't necessarily true!!!
             match expected_pps_queue.back() {
                 Some(last_added_pp) => {
                     if *last_added_pp != pp_header.pruning_point {
@@ -384,13 +430,17 @@ impl<
                     }
                 }
                 None => {
-                    // expected_pps_queue should always have one block in the queue
-                    // until we reach genesis.
-                    return false;
+                    // // expected_pps_queue should always have one block in the queue
+                    // // until we reach genesis.
+                    // return false;
+                    expected_pps_queue.push_back(pp_header.pruning_point);
                 }
             }
         }
 
-        true
+        // Skipped PPs are isolated chains that we're no longer pointing to.
+        // There must be exactly zero that we haven't seen come back to genesis at the end of this check
+        // If there are no isolated chains (such as pre-HF) then this is guaranteed to be empty.
+        skipped_pps.is_empty()
     }
 }
