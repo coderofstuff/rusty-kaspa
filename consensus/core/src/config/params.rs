@@ -694,7 +694,7 @@ pub const CRESCENDO_FAST_DEVNET: CrescendoParams = CrescendoParams {
     mergeset_size_limit: TenBps::mergeset_size_limit(),
     merge_depth: 600 * 10,    // 10M
     finality_depth: 900 * 10, // 15M
-    pruning_depth: 5400 * 10, // 1.5H
+    pruning_depth: 2250 * 10, // 1.5H
 
     coinbase_maturity: TenBps::coinbase_maturity(),
 
@@ -721,9 +721,9 @@ pub const DEVNET_PARAMS: Params = Params {
     min_difficulty_window_size: MIN_DIFFICULTY_WINDOW_SIZE / 10,
     prior_max_block_parents: 10,
     prior_mergeset_size_limit: 36,
-    prior_merge_depth: 600,     // 10M
-    prior_finality_depth: 1800, // 0.5H
-    prior_pruning_depth: 5400,  // 1.5H
+    prior_merge_depth: 600,    // 10M
+    prior_finality_depth: 900, // 15mins
+    prior_pruning_depth: 2250, // 37.5mins
     coinbase_payload_script_public_key_max_len: 150,
     max_coinbase_payload_len: 204,
 
@@ -757,5 +757,5 @@ pub const DEVNET_PARAMS: Params = Params {
     pruning_proof_m: 1000,
 
     crescendo: CRESCENDO_FAST_DEVNET,
-    crescendo_activation: ForkActivation(9000), // 2.5H
+    crescendo_activation: ForkActivation(5400), // 1.5H
 };
