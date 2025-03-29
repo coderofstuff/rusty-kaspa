@@ -42,6 +42,22 @@ pub struct ProcessingCountersSnapshot {
     pub mass_counts: u64,
 }
 
+impl Default for ProcessingCountersSnapshot {
+    fn default() -> Self {
+        Self {
+            blocks_submitted: 0,
+            header_counts: 0,
+            dep_counts: 0,
+            mergeset_counts: 0,
+            body_counts: 0,
+            txs_counts: 0,
+            chain_block_counts: 0,
+            chain_disqualified_counts: 0,
+            mass_counts: 0,
+        }
+    }
+}
+
 impl core::ops::Sub for &ProcessingCountersSnapshot {
     type Output = ProcessingCountersSnapshot;
 
