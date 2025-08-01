@@ -1,27 +1,45 @@
-use std::sync::Arc;
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::{BinaryHeap, VecDeque},
+    sync::Arc,
+};
 
-use kaspa_consensus_core::{BlockHashMap, BlockHashSet};
+use itertools::Itertools;
+use kaspa_consensus_core::{
+    blockhash::{self, BlockHashes},
+    BlockHashMap, BlockHashSet, BlueWorkType, HashKTypeMap, HashMapCustomHasher, KType,
+};
+use kaspa_database::prelude::{StoreError, StoreResultEmptyTuple};
 use kaspa_hashes::Hash;
+use kaspa_math::Uint192;
 use parking_lot::RwLock;
 
-use crate::model::{
-    services::reachability::{MTReachabilityService, ReachabilityService},
-    stores::{
-        children::ChildrenStore,
-        headers::DbHeadersStore,
-        reachability::{DbReachabilityStore, MemoryReachabilityStore, ReachabilityStore},
-        relations::{DbRelationsStore, MemoryRelationsStore, RelationsStore},
+use crate::{
+    model::{
+        services::reachability::{MTReachabilityService, ReachabilityService},
+        stores::{
+            children::ChildrenStore,
+            dagknight::{DagknightStore, DagknightStoreReader},
+            ghostdag::{GhostdagData, GhostdagStoreReader, MemoryGhostdagStore},
+            headers::HeaderStoreReader,
+            reachability::{MemoryReachabilityStore, ReachabilityStore, ReachabilityStoreReader},
+            relations::{MemoryRelationsStore, RelationsStore, RelationsStoreReader},
+        },
+    },
+    processes::{
+        dagknight::manager::ConflictZoneManager, difficulty::calc_work, ghostdag::ordering::SortableBlock,
+        reachability::relations::RelationsStoreInFutureOfRoot,
     },
 };
 
 /*
     Task 0:
         Hierarchic conflict resolution
-        
+
         input: set of parents P (|P| >= 1)
         output:  a selected parent p \in P
         pseudo:
-        
+
         while |P| > 1:
             g = find the latest common chain ancestor of P // the genesis of the conflict
             split P into subgroups {P_1, ..., P_n} such that blocks within each subgroup agree about the chain ancestor above g // each such subgroup is "united" re the conflict zone induced by g
@@ -33,8 +51,8 @@ use crate::model::{
     Task 1:
         Goal: a more sophisticated F
         Possible idea: fix k, run GD over subdag = future(g) \cup past(P), select P_i which contains the GD selected parent from P
-        Main challenge: adapt the GD protocol to run on such a subdag (defined by future and past constrains). We did something like this in the pruning proof by abstracting the relations store 
-        
+        Main challenge: adapt the GD protocol to run on such a subdag (defined by future and past constrains). We did something like this in the pruning proof by abstracting the relations store
+
     Task 2:
         Vanilla DK
         Implement F with basic DK logic, i.e., searching the k space
@@ -42,8 +60,8 @@ use crate::model::{
 
     ------------
 
-    Notation: the version of k-coloring where the set of parents you can inherit a blueset for is restricted to to those 
-              agreeing with you, should be named DK-committed coloring (megachain = DK-chain) 
+    Notation: the version of k-coloring where the set of parents you can inherit a blueset for is restricted to to those
+              agreeing with you, should be named DK-committed coloring (megachain = DK-chain)
 
     There are 3 usages of GD coloring out of selected chain:
         1. coinbase rewards
@@ -52,43 +70,46 @@ use crate::model::{
 
     Q. how do keep all these with DK?
 
-    A. 
+    A.
         For 1. 2. the answer is to have an incremental coloring with a fixed k over the main DK chain (name: global incremental/committed coloring )
-        For 3. it seems like we need a global free coloring (probably same fixed k)  
+        For 3. it seems like we need a global free coloring (probably same fixed k)
 
     ------------
 
     Possible next steps:
         1. move code to correct place
         2. moving to DK storage objects
-        3. switch GD/k-coloring to committed coloring 
+        3. switch GD/k-coloring to committed coloring
 */
 
-pub struct DagknightConflictEntry {
-    // TODO: incremental colouring data for relevant k values
-}
-
-pub struct DagknightData {
-    /// A mapping from conflict roots to incremental conflict data
-    entries: BlockHashMap<DagknightConflictEntry>,
-
-    /// The selected parent of this block as chosen by the DAGKNIGHT protocol
-    selected_parent: Hash,
-}
-
 /// A struct encapsulating the logic and algorithms of the DAGKNIGHT protocol
-pub struct DagknightExecutor {
+pub struct DagknightExecutor<
+    C: DagknightStore + DagknightStoreReader,
+    O: GhostdagStoreReader,
+    D: HeaderStoreReader + 'static,
+    E: RelationsStoreReader + Clone,
+    R: ReachabilityStoreReader + ?Sized + Clone,
+> {
     // TODO: access to relevant stores and to the reachability service
 
     // pub(super) k: KType,
     genesis_hash: Hash,
-    pub(super) relations_stores: Arc<RwLock<Vec<DbRelationsStore>>>,
-    pub(super) headers_store: Arc<DbHeadersStore>,
-    pub(super) reachability_service: MTReachabilityService<DbReachabilityStore>,
+    pub(super) dagknight_store: Arc<C>,
+    pub(super) ghostdag_store: Arc<O>,
+    pub(super) headers_store: Arc<D>,
+    pub(super) relations_stores: Arc<RwLock<Vec<E>>>,
+    pub(super) reachability_service: MTReachabilityService<R>,
 }
 
-impl DagknightExecutor {
-    pub fn dagknight(&self, _parents: &[Hash]) -> DagknightData {
+impl<
+        C: DagknightStore + DagknightStoreReader,
+        O: GhostdagStoreReader,
+        D: HeaderStoreReader,
+        E: RelationsStoreReader + Clone,
+        R: ReachabilityStoreReader + ?Sized + Clone,
+    > DagknightExecutor<C, O, D, E, R>
+{
+    pub fn dagknight(&self, parents: &[Hash]) -> Hash {
         /*
             input: a set of block parents
             output: the selected parent + incremental metadata
@@ -107,7 +128,51 @@ impl DagknightExecutor {
                 5. Cascade voting -- requires most thought for making incremental
         */
 
-        todo!()
+        let current_parents = parents.to_vec();
+
+        // g = find LCCA
+        let mut conflict_genesis = self.common_chain_ancestor(parents);
+        let mut curr_subgroup = current_parents;
+
+        while curr_subgroup.len() > 1 {
+            // This is the total work of all the blocks in the entire area
+            let zone_work = self.calc_conflict_zone_work(conflict_genesis, &curr_subgroup);
+            let group_map = curr_subgroup
+                .iter()
+                .copied()
+                .into_group_map_by(|&parent| self.reachability_service.get_next_chain_ancestor(parent, conflict_genesis));
+
+            // Shortcut condition to avoid doing unnecessary work
+            if group_map.len() == 1 {
+                // There is exactly one group, we don't rank anymore.
+                let (&curr_conflict_genesis, subgroup) = group_map.iter().next().unwrap();
+                curr_subgroup = subgroup.to_vec();
+                conflict_genesis = curr_conflict_genesis;
+                continue;
+            }
+
+            // Pick a "winner" among these subgroups
+            let (winning_conflict_genesis, winning_subgroup) = group_map
+                .iter()
+                .map(|(curr_conflict_genesis, value)| {
+                    let rank_value = self.rank(conflict_genesis, value, zone_work, curr_subgroup.clone());
+                    (rank_value, curr_conflict_genesis, value)
+                })
+                .min_by(|(a, _, _), (b, _, _)| a.cmp(b))
+                .map(|(rank, conflict_genesis, subgroup)| {
+                    println!("Winning rank value: k = {} | sp = {:#?}", rank.k, rank.subgroup_virtual.hash);
+                    (*conflict_genesis, subgroup)
+                })
+                .unwrap();
+
+            curr_subgroup = winning_subgroup.to_vec();
+            conflict_genesis = winning_conflict_genesis;
+        }
+        assert_eq!(1, curr_subgroup.len(), "Expected dagknight to have only a single parent at the end");
+
+        // TODO: fill the entries
+        // DagknightData { selected_parent: , entries: BlockHashMap::new() }
+        curr_subgroup[0]
     }
 
     fn common_chain_ancestor(&self, parents: &[Hash]) -> Hash {
@@ -119,6 +184,11 @@ impl DagknightExecutor {
         */
 
         let start = parents[0];
+
+        if start == self.genesis_hash {
+            return self.genesis_hash;
+        }
+
         for cb in self.reachability_service.default_backward_chain_iterator(start).skip(1) {
             if self.reachability_service.is_chain_ancestor_of_all(cb, &parents[1..]) {
                 return cb;
@@ -143,6 +213,150 @@ impl DagknightExecutor {
 
 
         */
+    }
+
+    fn rank(&self, conflict_genesis: Hash, subgroup: &Vec<Hash>, zone_work: BlueWorkType, full_subgroup: Vec<Hash>) -> RankValue {
+        // for k in 0, 1, ..., infinity:
+        // tie breaking is assumed to be by comparing selected_parent
+        let (k, subgroup_virtual) = (0..u16::MAX)
+            .find_map(|curr_k| {
+                // 1. Get the tips from K of the pre-calculated K-cluster where root = conflict genesis
+                // 1.1 If it doesn't exist, calculate it now, starting from the root
+                // 1.2 If the tips exist:
+                // 1.2.3 While the tips != this subgroup -> calculate the gap in missing GD data
+                // 2. Calculate the GD selected parent, conditioned that the tips agree with this subgroup
+                let subgroup_virtual_gd = self.fill_bounded_ghostdag_data(conflict_genesis, subgroup, &full_subgroup, curr_k);
+                let subgroup_virtual =
+                    SortableBlock { hash: subgroup_virtual_gd.selected_parent, blue_work: subgroup_virtual_gd.blue_work };
+
+                // Michael: here is where cascade voting eventually belongs
+                if subgroup_virtual.blue_work >= zone_work / 2 {
+                    // With this "k" value, our selected parent is at least half the total region's work
+                    Some((curr_k, subgroup_virtual))
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+
+        RankValue { k, subgroup_virtual }
+    }
+
+    /// Goes through all the blocks in the conflict zone and sums up all their work (not blue work)
+    fn calc_conflict_zone_work(&self, conflict_genesis: Hash, subgroup: &Vec<Hash>) -> Uint192 {
+        let mut queue = VecDeque::new();
+        let mut visited = BlockHashSet::new();
+
+        let mut zone_work = Uint192::ZERO;
+
+        queue.push_back(conflict_genesis);
+
+        let relations_reader = self.relations_stores.read()[0].clone();
+
+        while !queue.is_empty() {
+            let curr = queue.pop_front().unwrap();
+
+            if !self.reachability_service.is_dag_ancestor_of_any(curr, &mut subgroup.iter().copied()) {
+                continue;
+            }
+
+            if visited.contains(&curr) {
+                continue;
+            }
+
+            visited.insert(curr);
+
+            if curr != self.genesis_hash {
+                zone_work = zone_work + calc_work(self.headers_store.get_bits(curr).unwrap());
+            }
+
+            for child in relations_reader.get_children(curr).unwrap().read().iter().copied() {
+                queue.push_back(child);
+            }
+        }
+
+        return zone_work;
+    }
+
+    fn fill_bounded_ghostdag_data(&self, root: Hash, subgroup: &Vec<Hash>, tips: &Vec<Hash>, ghostdag_k: KType) -> GhostdagData {
+        // let conflict_zone_map = self.dagknight_store.
+        // FIXME: merge this with the stored data in DagknightStore since the methods require something useful
+        // NOTE: Instead of a ghostdag_store, this should be retrieving the data from the dagknight_store
+        // let ghostdag_store = Arc::new(MemoryGhostdagStore::new());
+
+        let reachability_service = self.reachability_service.clone();
+        let relations_store = self.relations_stores.read();
+        let relations_service = RelationsStoreInFutureOfRoot::new(relations_store[0].clone(), reachability_service.clone(), root);
+        let conflict_manager = ConflictZoneManager::new(
+            ghostdag_k,
+            root,
+            self.dagknight_store.clone(),
+            relations_service.clone(),
+            reachability_service.clone(),
+            self.headers_store.clone(),
+        );
+
+        // Note there is no need to initialize origin since we have a single root
+        if !conflict_manager.has(root) {
+            conflict_manager
+                .insert(
+                    root,
+                    Arc::new(GhostdagData::new(
+                        0,
+                        Default::default(),
+                        blockhash::ORIGIN,
+                        BlockHashes::new(Vec::new()),
+                        BlockHashes::new(Vec::new()),
+                        HashKTypeMap::new(BlockHashMap::new()),
+                    )),
+                )
+                .unwrap();
+        } else {
+            println!("conflict_manager::skip::root::{}", root.to_le_u64()[3]);
+        }
+
+        let mut topological_heap: BinaryHeap<_> = Default::default();
+        // NOTE: Fill this with the data from DK store
+        let mut visited = BlockHashSet::new();
+
+        // NOTE: Right now it's initializing from the root, but really it should initialized from the saved tips we know
+        // for the k-cluster with this root (since we're tracking tips). This way, the BFS starts only from the tips if
+        // we see another conflict for this root+k.
+        topological_heap.push(Reverse(SortableBlock { hash: root, blue_work: 0.into() }));
+
+        loop {
+            let Some(current) = topological_heap.pop() else {
+                break;
+            };
+            let current_hash = current.0.hash;
+            if !visited.insert(current_hash) {
+                continue;
+            }
+
+            if !reachability_service.is_dag_ancestor_of_any(current_hash, &mut tips.iter().copied()) {
+                // We don't care about blocks in the antipast of the selected tips
+                continue;
+            }
+
+            if !conflict_manager.has(current_hash) {
+                let parents = &relations_service.get_parents(current_hash).unwrap();
+                // NOTE: This should be saved for the current block in the DK data
+                let current_gd = conflict_manager.k_colouring(parents, ghostdag_k, None);
+
+                conflict_manager.insert(current_hash, Arc::new(current_gd)).unwrap_or_exists();
+            }
+
+            let child_blue_work = conflict_manager.get_blue_work(current_hash).unwrap() + 1;
+
+            for child in relations_service.get_children(current_hash).unwrap().read().iter().copied() {
+                topological_heap.push(Reverse(SortableBlock { hash: child, blue_work: child_blue_work }));
+            }
+        }
+
+        // NOTE: This is how I'm doing the "conditioned" to be in agreement
+        let selected_parent_in_group = conflict_manager.find_selected_parent(subgroup.iter().copied());
+        let sp_virtual_gd = conflict_manager.k_colouring(&tips, ghostdag_k, Some(selected_parent_in_group));
+        sp_virtual_gd
     }
 }
 
@@ -365,12 +579,104 @@ impl DagPlan {
     }
 }
 
+#[derive(PartialEq, Eq)]
+pub struct RankValue {
+    pub k: KType,
+    pub subgroup_virtual: SortableBlock,
+}
+
+impl PartialOrd for RankValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankValue {
+    /// Sample ordering:
+    /// { k: 0, sp_bw: 1} < { k: 1, sp_bw: 1}   => one "k" is lower than another
+    /// { k: 0, sp_bw: 10} < { k: 0, sp_bw: 1}  => same "k", different blue work. rankvalue with higher bw comes first
+    /// { k: 1, sp_bw: 5, sp_hash: 77} < { k: 1, sp_bw: 5, sp_hash: 66} => same "k" and "bw", rankvalue with higher sp hash value comes first
+    fn cmp(&self, other: &Self) -> Ordering {
+        if self.k == other.k {
+            // let ordering = self.selected_parent.cmp(&other.selected_parent);
+            // NOTE: When ordering by RankValue and k is the same, a "smaller" rank would mean a "greater" selected parent
+            let ordering = other.subgroup_virtual.cmp(&self.subgroup_virtual);
+            // println!("a: {} | b: {} | ordering: {:?}", self.subgroup_virtual.blue_work, other.subgroup_virtual.blue_work, ordering);
+            return ordering;
+        }
+
+        return self.k.cmp(&other.k);
+    }
+}
+
+#[derive(Clone)]
+struct MemoryHeaderStore {
+    ghostdag_store: Arc<MemoryGhostdagStore>,
+}
+
+impl MemoryHeaderStore {
+    fn new(ghostdag_store: Arc<MemoryGhostdagStore>) -> Self {
+        Self { ghostdag_store }
+    }
+}
+
+impl HeaderStoreReader for MemoryHeaderStore {
+    fn get_bits(&self, _hash: Hash) -> std::result::Result<u32, StoreError> {
+        // Just need some fake value to use
+        Ok(0x1e7fffff)
+    }
+
+    fn get_blue_score(&self, hash: Hash) -> std::result::Result<u64, StoreError> {
+        self.ghostdag_store.get_blue_score(hash)
+    }
+
+    fn get_compact_header_data(
+        &self,
+        _hash: Hash,
+    ) -> std::result::Result<crate::model::stores::headers::CompactHeaderData, StoreError> {
+        unimplemented!()
+    }
+
+    fn get_daa_score(&self, hash: Hash) -> std::result::Result<u64, StoreError> {
+        self.ghostdag_store.get_blue_score(hash)
+    }
+
+    fn get_header(&self, _hash: Hash) -> std::result::Result<Arc<kaspa_consensus_core::header::Header>, StoreError> {
+        unimplemented!()
+    }
+
+    fn get_header_with_block_level(
+        &self,
+        _hash: Hash,
+    ) -> std::result::Result<crate::model::stores::headers::HeaderWithBlockLevel, StoreError> {
+        unimplemented!()
+    }
+
+    fn get_timestamp(&self, _hash: Hash) -> std::result::Result<u64, StoreError> {
+        unimplemented!()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::{cell::RefCell, fs::File};
+
+    use kaspa_consensus_core::blockhash::ORIGIN;
+    use kaspa_consensus_core::config::params::ForkedParam;
+    use parking_lot::lock_api::RwLock;
+
     use super::*;
+    use crate::model::stores::ghostdag::GhostdagStore;
+    use crate::processes::ghostdag::protocol::GhostdagManager;
+    use crate::processes::reachability::tests::gen::generate_complex_dag;
     use crate::{
-        model::stores::{reachability::MemoryReachabilityStore, relations::MemoryRelationsStore},
+        model::stores::{
+            dagknight::MemoryDagknightStore, ghostdag::MemoryGhostdagStore, reachability::MemoryReachabilityStore,
+            relations::MemoryRelationsStore,
+        },
         processes::reachability::tests::{DagBlock, DagBuilder},
+        test_helpers::generate_dot_with_chain,
     };
 
     #[test]
@@ -402,5 +708,187 @@ mod tests {
                 builder.add_block(DagBlock::new((*block).into(), parents.iter().map(|&i| i.into()).collect()));
             }
         }
+    }
+
+    fn run_dagknight_test(k_max: KType, plan: DagPlan, base_name: &str) {
+        let genesis_hash = plan.genesis.into();
+
+        let dk_map = RefCell::new(HashMap::new());
+
+        let mut reachability = MemoryReachabilityStore::new();
+        let mut relations = MemoryRelationsStore::new();
+        // Global GD store. To be used for global coloring:
+        let ghostdag_store = Arc::new(MemoryGhostdagStore::new());
+        let headers_store = Arc::new(MemoryHeaderStore::new(ghostdag_store.clone()));
+        let dagknight_store = Arc::new(MemoryDagknightStore::new(dk_map));
+
+        let gd_manager = GhostdagManager::new(
+            genesis_hash,
+            ForkedParam::new_const(k_max),
+            ghostdag_store.clone(),
+            relations.clone(),
+            headers_store.clone(),
+            reachability.clone(),
+        );
+
+        ghostdag_store.insert(genesis_hash, Arc::new(gd_manager.genesis_ghostdag_data())).unwrap();
+
+        let mut relations_stores = Vec::new();
+        relations_stores.push(relations.clone());
+        let dk_executor = DagknightExecutor {
+            genesis_hash,
+            dagknight_store: dagknight_store.clone(),
+            ghostdag_store: ghostdag_store.clone(),
+            headers_store: headers_store.clone(),
+            reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
+            relations_stores: Arc::new(RwLock::new(relations_stores)),
+        };
+        let mut builder = DagBuilder::new(&mut reachability, &mut relations);
+        builder.init();
+        let genesis = DagBlock::new(genesis_hash, vec![ORIGIN]);
+        builder.add_block(genesis.clone());
+
+        let mut tips = BlockHashSet::new();
+        tips.insert(genesis.hash);
+
+        for block_data in &plan.blocks {
+            let block_id: u64 = block_data.0;
+            let block_hash = block_id.into();
+            tips.insert(block_hash);
+
+            let parent_hashes: Vec<Hash> = block_data.1.iter().map(|&a| Hash::from_u64_word(a)).collect();
+
+            parent_hashes.iter().for_each(|ph| {
+                tips.remove(ph);
+            });
+
+            let new_block = DagBlock::new(block_hash, parent_hashes);
+
+            let selected_parent = dk_executor.dagknight(&new_block.parents);
+            // let selected_parent = dk_data.selected_parent;
+            let gd_data = gd_manager.ghostdag_customized(&new_block.parents, None, Some(selected_parent));
+
+            builder.add_block_with_selected_parent(new_block, selected_parent);
+            ghostdag_store.insert(block_hash, Arc::new(gd_data)).unwrap();
+            // dagknight_store.insert(block_hash, Arc::new(dk_data)).unwrap();
+        }
+
+        let tip_hashes = tips.iter().copied().collect_vec();
+        let virtual_hash = Hash::from_u64_word(plan.blocks.last().unwrap().0 + 1);
+        let virtual_block = DagBlock::new(virtual_hash, tip_hashes.clone());
+        let selected_parent = dk_executor.dagknight(&virtual_block.parents.clone());
+        // let selected_parent = dk_data.selected_parent;
+        let gd_data = gd_manager.ghostdag_customized(&tip_hashes, None, Some(selected_parent));
+        println!("virtual_block: {} | sp: {}", virtual_block.hash, selected_parent);
+        builder.add_block_with_selected_parent(virtual_block, selected_parent);
+        ghostdag_store.insert(virtual_hash, Arc::new(gd_data)).unwrap();
+
+        // let blues = BlockHashSet::new();
+        let mut reds = BlockHashSet::new();
+
+        // Collect chain nodes during VSPC traversal
+        let mut chain_nodes = BlockHashSet::new();
+        let mut curr = virtual_hash;
+        chain_nodes.insert(curr);
+
+        while curr != genesis.hash {
+            let mergeset_reds = ghostdag_store.get_mergeset_reds(curr).unwrap();
+            mergeset_reds.iter().for_each(|mrr| {
+                reds.insert(*mrr);
+            });
+
+            let chain_parent = reachability.get_chain_parent(curr);
+            println!("{} <- {}", chain_parent.to_le_u64()[3], curr.to_le_u64()[3]);
+            chain_nodes.insert(chain_parent);
+            curr = chain_parent;
+        }
+
+        // Generate DOT file with chain nodes as double circles
+        let mut all_blocks = vec![(plan.genesis, vec![])];
+        all_blocks.extend(plan.blocks.clone());
+        all_blocks.push((virtual_hash.to_le_u64()[3], tips.iter().map(|h| h.to_le_u64()[3]).collect_vec()));
+        generate_dot_with_chain(&all_blocks, &chain_nodes, reds, base_name).expect("Failed to generate DOT file");
+    }
+
+    #[test]
+    fn test_dag_dk_sample() {
+        let plan = DagPlan {
+            genesis: 1,
+            blocks: vec![
+                (2, vec![1]),
+                (3, vec![2]),
+                (4, vec![3]),
+                (5, vec![4]),
+                (6, vec![5]),
+                (7, vec![6]),
+                (8, vec![7]),
+                (9, vec![7]),
+                (10, vec![8, 9]),
+                (11, vec![10]),
+                (12, vec![1]),
+                (13, vec![12]),
+                (14, vec![13]),
+                (15, vec![14]),
+                (16, vec![15]),
+                (17, vec![6, 16]),
+            ],
+        };
+
+        run_dagknight_test(0, plan, "dag_bps_whitepaper_sample");
+    }
+
+    #[test]
+    fn test_dag_from_json() {
+        // Test the Task 0 implementation here
+        let json_filename = "dag_bps_2.json";
+        let file = File::open(json_filename).expect("Unable to open JSON file");
+        let json_data: serde_json::Value = serde_json::from_reader(file).expect("Unable to parse JSON");
+
+        let genesis = json_data["genesis"].as_u64().expect("Genesis is not a number");
+        let blocks = json_data["blocks"].as_array().expect("Blocks is not an array");
+
+        // Construct DagPlan from JSON data
+        let dag_plan = DagPlan {
+            genesis,
+            blocks: blocks
+                .iter()
+                .map(|block| {
+                    let id = block["id"].as_u64().unwrap();
+                    let parents = block["parents"].as_array().unwrap().iter().map(|p| p.as_u64().unwrap()).collect();
+                    (id, parents)
+                })
+                .chain(vec![(60, vec![1]), (61, vec![1]), (62, vec![60, 61]), (63, vec![60, 61])])
+                .collect(),
+        };
+
+        // print the data
+        println!("Genesis: {}", dag_plan.genesis);
+        println!("Blocks: {}", dag_plan.blocks.len());
+
+        // Sample here is 2BPS. K = 31
+        run_dagknight_test(31, dag_plan, "dag_bps_2");
+    }
+
+    #[test]
+    fn test_complex_dag() {
+        let (genesis, mut blocks) = generate_complex_dag(0.1, 10.0, 50);
+        let (_, attacker_blocks) = generate_complex_dag(0.1, 10.0, 40);
+
+        // Make the attacker blocks still point to the original genesis and adjust their labels
+        let mut attacker_blocks = attacker_blocks
+            .iter()
+            .map(|(block, parents)| {
+                let block = if *block == genesis { *block } else { block + 100 };
+                let parents = parents.iter().map(|&p| if p == genesis { p } else { p + 100 }).collect_vec();
+
+                (block, parents)
+            })
+            .collect_vec();
+
+        blocks.append(&mut attacker_blocks);
+
+        let plan = DagPlan { genesis, blocks };
+
+        run_dagknight_test(5, plan, "dag_complex");
     }
 }
