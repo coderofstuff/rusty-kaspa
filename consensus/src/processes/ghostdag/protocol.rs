@@ -125,17 +125,26 @@ impl<T: GhostdagStoreReader, S: RelationsStoreReader, U: ReachabilityService, V:
     ///
     /// For further details see the article <https://eprint.iacr.org/2018/104.pdf>
     pub fn ghostdag(&self, parents: &[Hash]) -> GhostdagData {
+        self.ghostdag_customized(parents, None, None)
+    }
+
+    pub fn ghostdag_customized(
+        &self,
+        parents: &[Hash],
+        custom_k: Option<KType>,
+        custom_selected_parent: Option<Hash>,
+    ) -> GhostdagData {
         assert!(!parents.is_empty(), "genesis must be added via a call to init");
 
         // Run the GHOSTDAG parent selection algorithm
-        let selected_parent = self.find_selected_parent(parents.iter().copied());
+        let selected_parent = custom_selected_parent.unwrap_or(self.find_selected_parent(parents.iter().copied()));
         // Handle the special case of origin children first
         if selected_parent.is_origin() {
             // ORIGIN is always a single parent so both blue score and work should remain zero
             return GhostdagData::new_with_selected_parent(selected_parent, 1); // k is only a capacity hint here
         }
         // [Crescendo]: get k as function of the selected parent DAA score
-        let k = self.k.get(self.headers_store.get_daa_score(selected_parent).unwrap());
+        let k = custom_k.unwrap_or(self.k.get(self.headers_store.get_daa_score(selected_parent).unwrap()));
         // Initialize new GHOSTDAG block data with the selected parent
         let mut new_block_data = GhostdagData::new_with_selected_parent(selected_parent, k);
         // Get the mergeset in consensus-agreed topological order (topological here means forward in time from blocks to children)
