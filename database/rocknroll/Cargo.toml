@@ -21,7 +21,7 @@ kaspad.workspace = true
 
 async-channel.workspace = true
 parking_lot.workspace = true
-
+chrono.workspace = true
 clap.workspace = true
 faster-hex.workspace = true
 itertools.workspace = true
