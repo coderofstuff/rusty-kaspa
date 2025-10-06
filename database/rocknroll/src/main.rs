@@ -57,4 +57,5 @@ fn main() {
             }
         }
     }
+    info!("Accepted txs in range: {}", count);
 }
