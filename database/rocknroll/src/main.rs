@@ -36,8 +36,10 @@ fn main() {
     let storage = ConsensusStorage::new(db.clone(), config.clone());
     let services = ConsensusServices::new(db, storage.clone(), config, Default::default(), Default::default());
 
-    let start: SystemTime = Utc.with_ymd_and_hms(2025, 10, 5, 0, 0, 0).unwrap().into();
-    let end: SystemTime = Utc.with_ymd_and_hms(2025, 10, 6, 0, 0, 0).unwrap().into();
+    let start_datetime = Utc.with_ymd_and_hms(2025, 10, 5, 0, 0, 0).unwrap();
+    let end_datetime = Utc.with_ymd_and_hms(2025, 10, 6, 0, 0, 0).unwrap();
+    let start: SystemTime = start_datetime.into();
+    let end: SystemTime = end_datetime.into();
 
     let pp = storage.pruning_point_store.read().pruning_point().unwrap();
     let sink = storage.lkg_virtual_state.load().ghostdag_data.selected_parent;
@@ -52,10 +54,13 @@ fn main() {
             let ad = storage.acceptance_data_store.get(cb).unwrap();
             let mergeset_accepted_txs_count = ad.iter().map(|d| d.accepted_transactions.len()).sum::<usize>();
             count += mergeset_accepted_txs_count;
-            if (count - mergeset_accepted_txs_count) / 1_000_000 != count / 1_000_000 {
+            if (count - mergeset_accepted_txs_count) / 10_000_000 != count / 10_000_000 {
                 info!("Accepted txs in range: {}", count);
             }
         }
     }
-    info!("Accepted txs in range: {}", count);
+    info!(
+        "\n=======================================\n\tAccepted txs in range {} - {}: {}\n=======================================",
+        start_datetime.format("%d/%m/%Y %H:%M"), end_datetime.format("%d/%m/%Y %H:%M"), count
+    );
 }
