@@ -2,13 +2,11 @@ use std::{cmp::Reverse, collections::BinaryHeap, sync::Arc};
 
 use itertools::Itertools;
 use kaspa_consensus_core::{
-    blockhash::{BlockHashExtensions, BlockHashes},
-    header::Header,
-    pruning::PruningPointProof,
-    BlockHashMap, BlockHashSet, BlockLevel, HashMapCustomHasher, KType,
+    blockhash::BlockHashExtensions, header::Header, pruning::PruningPointProof, BlockHashMap, BlockHashSet, BlockLevel,
+    HashMapCustomHasher, KType,
 };
 use kaspa_core::debug;
-use kaspa_database::prelude::{CachePolicy, ConnBuilder, StoreError, StoreResult, StoreResultEmptyTuple, StoreResultExtensions, DB};
+use kaspa_database::prelude::{CachePolicy, ConnBuilder, StoreResultEmptyTuple, StoreResultExtensions, DB};
 use kaspa_hashes::Hash;
 
 use crate::{
@@ -23,43 +21,11 @@ use crate::{
     processes::{
         ghostdag::{ordering::SortableBlock, protocol::GhostdagManager},
         pruning_proof::PruningProofManagerInternalError,
+        reachability::relations::RelationsStoreInFutureOfRoot,
     },
 };
 
 use super::{PruningProofManager, PruningProofManagerInternalResult};
-
-#[derive(Clone)]
-struct RelationsStoreInFutureOfRoot<T: RelationsStoreReader, U: ReachabilityService> {
-    relations_store: T,
-    reachability_service: U,
-    root: Hash,
-}
-
-impl<T: RelationsStoreReader, U: ReachabilityService> RelationsStoreReader for RelationsStoreInFutureOfRoot<T, U> {
-    fn get_parents(&self, hash: Hash) -> Result<BlockHashes, kaspa_database::prelude::StoreError> {
-        self.relations_store.get_parents(hash).map(|hashes| {
-            Arc::new(hashes.iter().copied().filter(|h| self.reachability_service.is_dag_ancestor_of(self.root, *h)).collect_vec())
-        })
-    }
-
-    fn get_children(&self, hash: Hash) -> StoreResult<kaspa_database::prelude::ReadLock<BlockHashSet>> {
-        // We assume hash is in future of root
-        assert!(self.reachability_service.is_dag_ancestor_of(self.root, hash));
-        self.relations_store.get_children(hash)
-    }
-
-    fn has(&self, hash: Hash) -> Result<bool, StoreError> {
-        if self.reachability_service.is_dag_ancestor_of(self.root, hash) {
-            Ok(false)
-        } else {
-            self.relations_store.has(hash)
-        }
-    }
-
-    fn counts(&self) -> Result<(usize, usize), kaspa_database::prelude::StoreError> {
-        unimplemented!()
-    }
-}
 
 impl PruningProofManager {
     pub(crate) fn build_pruning_point_proof(&self, pp: Hash) -> PruningPointProof {
@@ -340,11 +306,11 @@ impl PruningProofManager {
         level: BlockLevel,
         ghostdag_k: KType,
     ) -> bool {
-        let relations_service = RelationsStoreInFutureOfRoot {
-            relations_store: self.level_relations_services[level as usize].clone(),
-            reachability_service: self.reachability_service.clone(),
+        let relations_service = RelationsStoreInFutureOfRoot::new(
+            self.level_relations_services[level as usize].clone(),
+            self.reachability_service.clone(),
             root,
-        };
+        );
         let gd_manager = GhostdagManager::with_level(
             root,
             ghostdag_k,
