@@ -135,8 +135,6 @@ impl<
         let mut curr_subgroup = current_parents;
 
         while curr_subgroup.len() > 1 {
-            // This is the total work of all the blocks in the entire area
-            let zone_work = self.calc_conflict_zone_work(conflict_genesis, &curr_subgroup);
             let group_map = curr_subgroup
                 .iter()
                 .copied()
@@ -150,6 +148,12 @@ impl<
                 conflict_genesis = curr_conflict_genesis;
                 continue;
             }
+
+            // TODO: Implement calculating zone work including all tips (not just those in [conflict_genesis, subgroup])
+            // The above requires adding a deficit implementation for the zone_work / 2 threshold.
+
+            // This is the total work of all the blocks in the entire area
+            let zone_work = self.calc_conflict_zone_work(conflict_genesis, &curr_subgroup);
 
             // Pick a "winner" among these subgroups
             let (winning_conflict_genesis, winning_subgroup) = group_map
@@ -220,16 +224,15 @@ impl<
         // tie breaking is assumed to be by comparing selected_parent
         let (k, subgroup_virtual) = (0..u16::MAX)
             .find_map(|curr_k| {
-                // 1. Get the tips from K of the pre-calculated K-cluster where root = conflict genesis
-                // 1.1 If it doesn't exist, calculate it now, starting from the root
-                // 1.2 If the tips exist:
-                // 1.2.3 While the tips != this subgroup -> calculate the gap in missing GD data
-                // 2. Calculate the GD selected parent, conditioned that the tips agree with this subgroup
                 let subgroup_virtual_gd = self.fill_bounded_ghostdag_data(conflict_genesis, subgroup, &full_subgroup, curr_k);
                 let subgroup_virtual =
                     SortableBlock { hash: subgroup_virtual_gd.selected_parent, blue_work: subgroup_virtual_gd.blue_work };
 
                 // Michael: here is where cascade voting eventually belongs
+                // TODO: If zone_work is fixed to cover all the work from the POV of all tips, zone_work / 2 threshold
+                // will need some adjustment for some deficit. But in lieu of that, I'm thinking a possible workaround
+                // is if the blue work is no longer increasing with k, iteration can stop (since any more extra iterations)
+                // is expected to also not increase blue work anyway.
                 if subgroup_virtual.blue_work >= zone_work / 2 {
                     // With this "k" value, our selected parent is at least half the total region's work
                     Some((curr_k, subgroup_virtual))
@@ -279,11 +282,6 @@ impl<
     }
 
     fn fill_bounded_ghostdag_data(&self, root: Hash, subgroup: &Vec<Hash>, tips: &Vec<Hash>, ghostdag_k: KType) -> GhostdagData {
-        // let conflict_zone_map = self.dagknight_store.
-        // FIXME: merge this with the stored data in DagknightStore since the methods require something useful
-        // NOTE: Instead of a ghostdag_store, this should be retrieving the data from the dagknight_store
-        // let ghostdag_store = Arc::new(MemoryGhostdagStore::new());
-
         let reachability_service = self.reachability_service.clone();
         let relations_store = self.relations_stores.read();
         let relations_service = RelationsStoreInFutureOfRoot::new(relations_store[0].clone(), reachability_service.clone(), root);
@@ -316,10 +314,12 @@ impl<
         }
 
         let mut topological_heap: BinaryHeap<_> = Default::default();
-        // NOTE: Fill this with the data from DK store
+
         let mut visited = BlockHashSet::new();
 
-        // NOTE: Right now it's initializing from the root, but really it should initialized from the saved tips we know
+        // TODO: Determine starting roots by backward iterating from subgroup tips to root
+        // and stopping at the last blocks without GD data yet
+        // TODO: Right now it's initializing from the root, but really it should initialized from the saved tips we know
         // for the k-cluster with this root (since we're tracking tips). This way, the BFS starts only from the tips if
         // we see another conflict for this root+k.
         topological_heap.push(Reverse(SortableBlock { hash: root, blue_work: 0.into() }));
@@ -346,6 +346,8 @@ impl<
                 conflict_manager.insert(current_hash, Arc::new(current_gd)).unwrap_or_exists();
             }
 
+            // FIXME: not the correct way to do the topological sort, but I wonder if we really need topological
+            // here or if BFS is sufficient
             let child_blue_work = conflict_manager.get_blue_work(current_hash).unwrap() + 1;
 
             for child in relations_service.get_children(current_hash).unwrap().read().iter().copied() {
