@@ -80,7 +80,7 @@ impl<
     }
 
     fn get_key(&self, pov_hash: Hash) -> DagknightKey {
-        DagknightKey { k: self.k, pov_hash, root_hash: self.root }
+        DagknightKey::new(self.root, pov_hash, self.k)
     }
 
     pub fn get_blue_score(&self, pov_hash: Hash) -> Result<u64, StoreError> {
