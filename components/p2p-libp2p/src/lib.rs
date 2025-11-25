@@ -13,4 +13,7 @@ pub mod transport;
 
 pub use config::{Config, Identity, Mode};
 pub use service::Libp2pService;
-pub use transport::{Libp2pConnector, Libp2pError, Libp2pOutboundConnector};
+pub use transport::{
+    BoxedLibp2pStream, Libp2pConnector, Libp2pError, Libp2pOutboundConnector, Libp2pStream, Libp2pStreamProvider,
+    PlaceholderStreamProvider,
+};

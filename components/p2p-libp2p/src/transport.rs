@@ -154,3 +154,28 @@ pub type BoxedLibp2pStream = Box<dyn Libp2pStream>;
 pub trait Libp2pStreamProvider: Send + Sync {
     fn dial<'a>(&'a self, address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
 }
+
+/// Placeholder libp2p stream provider. Returns Disabled/NotImplemented until
+/// the real libp2p bridge is wired in.
+#[derive(Clone)]
+pub struct PlaceholderStreamProvider {
+    config: Config,
+}
+
+impl PlaceholderStreamProvider {
+    pub fn new(config: Config) -> Self {
+        Self { config }
+    }
+}
+
+impl Libp2pStreamProvider for PlaceholderStreamProvider {
+    fn dial<'a>(&'a self, _address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+        let enabled = self.config.mode.is_enabled();
+        Box::pin(async move {
+            if !enabled {
+                return Err(Libp2pError::Disabled);
+            }
+            Err(Libp2pError::NotImplemented)
+        })
+    }
+}

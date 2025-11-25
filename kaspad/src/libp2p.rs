@@ -80,7 +80,8 @@ pub fn libp2p_status_from_config(config: &AdapterConfig, peer_id: Option<PeerId>
 
 pub fn outbound_connector_from_config(config: &AdapterConfig) -> Arc<dyn OutboundConnector> {
     if config.mode.is_enabled() {
-        Arc::new(Libp2pOutboundConnector::new(config.clone(), Arc::new(TcpConnector)))
+        let provider = Arc::new(kaspa_p2p_libp2p::PlaceholderStreamProvider::new(config.clone()));
+        Arc::new(Libp2pOutboundConnector::with_provider(config.clone(), Arc::new(TcpConnector), provider))
     } else {
         Arc::new(TcpConnector)
     }
