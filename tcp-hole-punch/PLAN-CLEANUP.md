@@ -94,7 +94,7 @@ If you believe a change in one of these directories is absolutely required, you 
    - [x] Add libp2p service skeleton to host dial/listen/reservation start-up (currently stubbed/unimplemented).
    - [x] Structure adapter crate into submodules (e.g., `helper_api`, `reservations`, `transport`, `metadata`) to avoid a god module.
    - [x] Make `ConnectionHandler` transport-agnostic: accept `AsyncRead/AsyncWrite` + metadata. Metadata separates identity (PeerId/IP), path (relay/origin), capabilities—document this boundary.
-   - [ ] Synthetic address stable per PeerId (relay-agnostic); store relay metadata separately. Synthetic address is identity accounting only (not a reachable address).
+   - [x] Synthetic address stable per PeerId (relay-agnostic); store relay metadata separately. Synthetic address is identity accounting only (not a reachable address).
 
 4. **Protocol / Metadata**
 

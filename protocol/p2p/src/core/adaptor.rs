@@ -27,6 +27,7 @@ pub struct DirectMetadataFactory;
 impl MetadataFactory for DirectMetadataFactory {
     fn for_outbound(&self, reported_ip: kaspa_utils::networking::IpAddress) -> TransportMetadata {
         TransportMetadata {
+            libp2p_peer_id: None,
             peer_id: None,
             reported_ip: Some(reported_ip),
             path: PathKind::Direct,
@@ -36,6 +37,7 @@ impl MetadataFactory for DirectMetadataFactory {
 
     fn for_inbound(&self, reported_ip: kaspa_utils::networking::IpAddress) -> TransportMetadata {
         TransportMetadata {
+            libp2p_peer_id: None,
             peer_id: None,
             reported_ip: Some(reported_ip),
             path: PathKind::Direct,

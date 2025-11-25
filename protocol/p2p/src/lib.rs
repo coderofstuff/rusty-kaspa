@@ -3,6 +3,9 @@ pub mod pb {
     tonic::include_proto!("protowire");
 }
 
+// Allow internal modules/tests to refer to the crate by its external name.
+extern crate self as kaspa_p2p_lib;
+
 pub mod common;
 pub mod convert;
 pub mod echo;

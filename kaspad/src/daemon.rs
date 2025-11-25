@@ -326,7 +326,7 @@ pub fn create_core_with_runtime(runtime: &Runtime, args: &Args, fd_total_budget:
 
     let app_dir = get_app_dir_from_args(args);
     #[cfg(feature = "libp2p")]
-    let (_libp2p_config, libp2p_status, outbound_connector): (
+    let (libp2p_config, libp2p_status, outbound_connector): (
         kaspa_p2p_libp2p::Config,
         GetLibp2pStatusResponse,
         Arc<dyn kaspa_p2p_lib::OutboundConnector>,
@@ -336,6 +336,10 @@ pub fn create_core_with_runtime(runtime: &Runtime, args: &Args, fd_total_budget:
         let connector = crate::libp2p::outbound_connector_from_config(&cfg);
         (cfg, status, connector)
     };
+    #[cfg(feature = "libp2p")]
+    if libp2p_config.mode.is_enabled() {
+        info!("libp2p mode enabled; transport is currently unimplemented and outbound connections will return NotImplemented");
+    }
     #[cfg(not(feature = "libp2p"))]
     let libp2p_status: GetLibp2pStatusResponse = GetLibp2pStatusResponse::disabled();
     #[cfg(not(feature = "libp2p"))]
