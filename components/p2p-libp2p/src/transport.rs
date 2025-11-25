@@ -59,10 +59,6 @@ impl OutboundConnector for Libp2pOutboundConnector {
         handler: &'a kaspa_p2p_lib::ConnectionHandler,
     ) -> BoxFuture<'a, Result<Arc<Router>, ConnectionError>> {
         // Placeholder: fall back to TCP until libp2p dial is implemented.
-        if !self.config.mode.is_enabled() {
-            return self.fallback.connect(address, metadata, handler);
-        }
-
         self.fallback.connect(address, metadata, handler)
     }
 }
