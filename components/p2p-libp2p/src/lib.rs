@@ -8,7 +8,9 @@ pub mod config;
 pub mod helper_api;
 pub mod metadata;
 pub mod reservations;
+pub mod service;
 pub mod transport;
 
 pub use config::{Config, Identity, Mode};
+pub use service::Libp2pService;
 pub use transport::{Libp2pConnector, Libp2pError, Libp2pOutboundConnector};

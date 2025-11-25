@@ -24,6 +24,7 @@ serde = ["dep:serde", "serde_with"]
 
 [dev-dependencies]
 futures = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
