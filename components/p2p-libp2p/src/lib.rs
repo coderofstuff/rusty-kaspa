@@ -9,10 +9,12 @@ pub mod helper_api;
 pub mod metadata;
 pub mod reservations;
 pub mod service;
+pub mod swarm;
 pub mod transport;
 
 pub use config::{Config, Identity, Mode};
 pub use service::Libp2pService;
+pub use swarm::{build_base_swarm, BaseBehaviour};
 pub use transport::{
     BoxedLibp2pStream, Libp2pConnector, Libp2pError, Libp2pIdentity, Libp2pOutboundConnector, Libp2pStream, Libp2pStreamProvider,
     PlaceholderStreamProvider, SwarmStreamProvider,
