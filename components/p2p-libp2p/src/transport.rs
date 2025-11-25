@@ -1,12 +1,14 @@
 use crate::{config::Config, metadata::TransportMetadata};
 use futures_util::future::BoxFuture;
+use kaspa_p2p_lib::common::ProtocolError;
 use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
 use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
 use log::info;
 use log::warn;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::str::FromStr;
+use std::sync::{Arc, OnceLock};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Libp2pError {
@@ -14,6 +16,8 @@ pub enum Libp2pError {
     NotImplemented,
     #[error("libp2p not enabled")]
     Disabled,
+    #[error("libp2p dial failed: {0}")]
+    DialFailed(String),
 }
 
 /// Placeholder libp2p transport connector. Will be expanded with real libp2p dial/listen logic.
@@ -82,11 +86,16 @@ mod tests {
 pub struct Libp2pOutboundConnector {
     config: Config,
     fallback: Arc<dyn OutboundConnector>,
+    provider: Option<Arc<dyn Libp2pStreamProvider>>,
 }
 
 impl Libp2pOutboundConnector {
     pub fn new(config: Config, fallback: Arc<dyn OutboundConnector>) -> Self {
-        Self { config, fallback }
+        Self { config, fallback, provider: None }
+    }
+
+    pub fn with_provider(config: Config, fallback: Arc<dyn OutboundConnector>, provider: Arc<dyn Libp2pStreamProvider>) -> Self {
+        Self { config, fallback, provider: Some(provider) }
     }
 }
 
@@ -97,18 +106,51 @@ impl OutboundConnector for Libp2pOutboundConnector {
         metadata: CoreTransportMetadata,
         handler: &'a kaspa_p2p_lib::ConnectionHandler,
     ) -> BoxFuture<'a, Result<Arc<Router>, ConnectionError>> {
-        let mut metadata = metadata;
-        metadata.capabilities.libp2p = true;
-        metadata.path = kaspa_p2p_lib::PathKind::Unknown;
         if !self.config.mode.is_enabled() {
+            let mut metadata = metadata;
+            metadata.capabilities.libp2p = false;
             return self.fallback.connect(address, metadata, handler);
         }
 
         static WARN_ONCE: OnceLock<()> = OnceLock::new();
         WARN_ONCE.get_or_init(|| warn!("libp2p mode enabled but libp2p connector is not implemented; falling back to TCP"));
 
-        Box::pin(async move {
-            Err(ConnectionError::ProtocolError(kaspa_p2p_lib::common::ProtocolError::Other("libp2p outbound connector unimplemented")))
-        })
+        if let Some(provider) = &self.provider {
+            let address = match NetAddress::from_str(&address) {
+                Ok(addr) => addr,
+                Err(_) => {
+                    return Box::pin(async move {
+                        Err(ConnectionError::ProtocolError(ProtocolError::Other("invalid libp2p address provided")))
+                    })
+                }
+            };
+
+            let provider = provider.clone();
+            let handler = handler.clone();
+            return Box::pin(async move {
+                let (mut md, stream) = provider
+                    .dial(address)
+                    .await
+                    .map_err(|_| ConnectionError::ProtocolError(ProtocolError::Other("libp2p dial failed")))?;
+
+                md.capabilities.libp2p = true;
+                md.path = kaspa_p2p_lib::PathKind::Unknown;
+                handler.connect_with_stream(stream, md).await
+            });
+        }
+
+        Box::pin(async move { Err(ConnectionError::ProtocolError(ProtocolError::Other("libp2p outbound connector unimplemented"))) })
     }
+}
+
+/// Bound for streams accepted/dialed via libp2p.
+pub trait Libp2pStream: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> Libp2pStream for T {}
+
+pub type BoxedLibp2pStream = Box<dyn Libp2pStream>;
+
+/// A provider for libp2p streams (dialed or accepted). The real implementation
+/// will bridge to the libp2p swarm and return a stream plus transport metadata.
+pub trait Libp2pStreamProvider: Send + Sync {
+    fn dial<'a>(&'a self, address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
 }

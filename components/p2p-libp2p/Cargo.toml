@@ -17,6 +17,7 @@ kaspa-p2p-lib.workspace = true
 futures-util = { workspace = true, default-features = false, features = ["alloc"] }
 thiserror.workspace = true
 log.workspace = true
+tokio.workspace = true
 
 [features]
 default = []
