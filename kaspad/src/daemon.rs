@@ -325,17 +325,21 @@ pub fn create_core_with_runtime(runtime: &Runtime, args: &Args, fd_total_budget:
     );
 
     let app_dir = get_app_dir_from_args(args);
-    let libp2p_status: GetLibp2pStatusResponse = {
-        #[cfg(feature = "libp2p")]
-        {
-            let libp2p_config = libp2p_config_from_args(&args.libp2p, &app_dir);
-            crate::libp2p::libp2p_status_from_config(&libp2p_config, None)
-        }
-        #[cfg(not(feature = "libp2p"))]
-        {
-            GetLibp2pStatusResponse::disabled()
-        }
+    #[cfg(feature = "libp2p")]
+    let (_libp2p_config, libp2p_status, outbound_connector): (
+        kaspa_p2p_libp2p::Config,
+        GetLibp2pStatusResponse,
+        Arc<dyn kaspa_p2p_lib::OutboundConnector>,
+    ) = {
+        let cfg = libp2p_config_from_args(&args.libp2p, &app_dir);
+        let status = crate::libp2p::libp2p_status_from_config(&cfg, None);
+        let connector = crate::libp2p::outbound_connector_from_config(&cfg);
+        (cfg, status, connector)
     };
+    #[cfg(not(feature = "libp2p"))]
+    let libp2p_status: GetLibp2pStatusResponse = GetLibp2pStatusResponse::disabled();
+    #[cfg(not(feature = "libp2p"))]
+    let outbound_connector: Arc<dyn kaspa_p2p_lib::OutboundConnector> = Arc::new(kaspa_p2p_lib::TcpConnector);
     let db_dir = app_dir.join(network.to_prefixed()).join(DEFAULT_DATA_DIR);
 
     // Print package name and version
@@ -667,6 +671,7 @@ Do you confirm? (y/n)";
         notification_root,
         hub.clone(),
         mining_rule_engine.clone(),
+        outbound_connector.clone(),
     ));
     let p2p_service = Arc::new(P2pService::new(
         flow_context.clone(),

@@ -29,8 +29,8 @@ use kaspa_mining::mempool::tx::{Orphan, Priority};
 use kaspa_mining::{manager::MiningManagerProxy, mempool::tx::RbfPolicy};
 use kaspa_notify::notifier::Notify;
 use kaspa_p2p_lib::{
-    Capabilities, ConnectionInitializer, Hub, KaspadHandshake, MetadataFactory, PathKind, PeerKey, PeerProperties, Router,
-    TransportMetadata,
+    Capabilities, ConnectionInitializer, Hub, KaspadHandshake, MetadataFactory, OutboundConnector, PathKind, PeerKey, PeerProperties,
+    Router, TransportMetadata,
     common::ProtocolError,
     convert::model::version::Version,
     make_message,
@@ -234,6 +234,8 @@ pub struct FlowContextInner {
 
     // Mining rule engine
     mining_rule_engine: Arc<MiningRuleEngine>,
+
+    outbound_connector: Arc<dyn OutboundConnector>,
 }
 
 #[derive(Clone)]
@@ -308,6 +310,7 @@ impl FlowContext {
         notification_root: Arc<ConsensusNotificationRoot>,
         hub: Hub,
         mining_rule_engine: Arc<MiningRuleEngine>,
+        outbound_connector: Arc<dyn OutboundConnector>,
     ) -> Self {
         let bps = config.bps() as usize;
         let orphan_resolution_range = BASELINE_ORPHAN_RESOLUTION_RANGE + (bps as f64).log2().ceil() as u32;
@@ -337,6 +340,7 @@ impl FlowContext {
                 max_orphans,
                 config,
                 mining_rule_engine,
+                outbound_connector,
             }),
         }
     }
@@ -369,6 +373,10 @@ impl FlowContext {
 
     pub fn connection_manager(&self) -> Option<Arc<ConnectionManager>> {
         self.connection_manager.read().clone()
+    }
+
+    pub fn outbound_connector(&self) -> Arc<dyn OutboundConnector> {
+        self.outbound_connector.clone()
     }
 
     pub fn consensus(&self) -> ConsensusInstance {

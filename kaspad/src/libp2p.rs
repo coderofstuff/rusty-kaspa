@@ -1,9 +1,11 @@
 use clap::ValueEnum;
-use kaspa_p2p_libp2p::{Config as AdapterConfig, Identity as AdapterIdentity, Mode as AdapterMode};
+use kaspa_p2p_lib::{OutboundConnector, TcpConnector};
+use kaspa_p2p_libp2p::{Config as AdapterConfig, Identity as AdapterIdentity, Libp2pOutboundConnector, Mode as AdapterMode};
 use kaspa_rpc_core::{GetLibp2pStatusResponse, RpcLibp2pIdentity, RpcLibp2pMode};
 use kaspa_utils::networking::PeerId;
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
+use std::sync::Arc;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -74,6 +76,19 @@ pub fn libp2p_status_from_config(config: &AdapterConfig, peer_id: Option<PeerId>
     };
 
     GetLibp2pStatusResponse { mode, peer_id, identity }
+}
+
+pub fn outbound_connector_from_config(config: &AdapterConfig) -> Arc<dyn OutboundConnector> {
+    if config.mode.is_enabled() {
+        Arc::new(Libp2pOutboundConnector::new(config.clone(), Arc::new(TcpConnector)))
+    } else {
+        Arc::new(TcpConnector)
+    }
+}
+
+#[cfg(not(feature = "libp2p"))]
+pub fn outbound_connector_from_config(_config: &AdapterConfig) -> Arc<dyn OutboundConnector> {
+    Arc::new(TcpConnector)
 }
 
 fn resolve_identity_path(path: &Path, app_dir: &Path) -> PathBuf {

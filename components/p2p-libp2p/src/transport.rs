@@ -1,6 +1,7 @@
 use crate::{config::Config, metadata::TransportMetadata};
 use futures_util::future::BoxFuture;
-use kaspa_p2p_lib::{PeerKey, Router, TransportConnector};
+use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
+use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
 use std::sync::Arc;
 
@@ -35,5 +36,33 @@ impl TransportConnector for Libp2pConnector {
             let _ = metadata;
             Err(Libp2pError::NotImplemented)
         })
+    }
+}
+
+/// Outbound connector that prefers libp2p when enabled, otherwise falls back to TCP.
+pub struct Libp2pOutboundConnector {
+    config: Config,
+    fallback: Arc<dyn OutboundConnector>,
+}
+
+impl Libp2pOutboundConnector {
+    pub fn new(config: Config, fallback: Arc<dyn OutboundConnector>) -> Self {
+        Self { config, fallback }
+    }
+}
+
+impl OutboundConnector for Libp2pOutboundConnector {
+    fn connect<'a>(
+        &'a self,
+        address: String,
+        metadata: CoreTransportMetadata,
+        handler: &'a kaspa_p2p_lib::ConnectionHandler,
+    ) -> BoxFuture<'a, Result<Arc<Router>, ConnectionError>> {
+        // Placeholder: fall back to TCP until libp2p dial is implemented.
+        if !self.config.mode.is_enabled() {
+            return self.fallback.connect(address, metadata, handler);
+        }
+
+        self.fallback.connect(address, metadata, handler)
     }
 }
