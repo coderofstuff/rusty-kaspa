@@ -90,9 +90,6 @@ pub struct DagknightExecutor<
     E: RelationsStoreReader + Clone,
     R: ReachabilityStoreReader + ?Sized + Clone,
 > {
-    // TODO: access to relevant stores and to the reachability service
-
-    // pub(super) k: KType,
     genesis_hash: Hash,
     pub(super) dagknight_store: Arc<C>,
     pub(super) ghostdag_store: Arc<O>,
@@ -149,10 +146,7 @@ impl<
                 continue;
             }
 
-            // TODO: Implement calculating zone work including all tips (not just those in [conflict_genesis, subgroup])
-            // The above requires adding a deficit implementation for the zone_work / 2 threshold.
-
-            // This is the total work of all the blocks in the entire area
+            // This is the total work of all the blocks for the entire conflict zone
             let zone_work = self.calc_conflict_zone_work(conflict_genesis, &curr_subgroup);
 
             // Pick a "winner" among these subgroups
@@ -174,8 +168,6 @@ impl<
         }
         assert_eq!(1, curr_subgroup.len(), "Expected dagknight to have only a single parent at the end");
 
-        // TODO: fill the entries
-        // DagknightData { selected_parent: , entries: BlockHashMap::new() }
         curr_subgroup[0]
     }
 
@@ -228,12 +220,14 @@ impl<
                 let subgroup_virtual =
                     SortableBlock { hash: subgroup_virtual_gd.selected_parent, blue_work: subgroup_virtual_gd.blue_work };
 
-                // Michael: here is where cascade voting eventually belongs
-                // TODO: If zone_work is fixed to cover all the work from the POV of all tips, zone_work / 2 threshold
-                // will need some adjustment for some deficit. But in lieu of that, I'm thinking a possible workaround
-                // is if the blue work is no longer increasing with k, iteration can stop (since any more extra iterations)
-                // is expected to also not increase blue work anyway.
+                // TODO: Since this implementation is still very lax in that it allows for coloring the
+                // side that doesn't agree with subgroup blue, we're guaranteed to always be able to cover
+                // zone_work / 2 with a large enough k.
+                //
+                // This is because K = |conflict zone| would make all blocks blue, therefore there must be a K
+                // that can cover zone_work / 2
                 if subgroup_virtual.blue_work >= zone_work / 2 {
+                    // Michael: here is where cascade voting eventually belongs
                     // With this "k" value, our selected parent is at least half the total region's work
                     Some((curr_k, subgroup_virtual))
                 } else {
@@ -281,6 +275,17 @@ impl<
         return zone_work;
     }
 
+    // Calculates the rank of the subgroup over the region: <root, tips>
+    // root = conflict genesis
+    // subgroup = the current subgroup
+    // tips = all thips in this conflict. part of which is the subgroup
+    //
+    // Returns the "virtual" GD of this subgroup where it's SP must be within subgroup
+    //
+    // Rationale for returning virtual GD:
+    // "virtual" would represent the total blue work in the conflict zone from the POV of this subgroup
+    // with the given K. Downside of the current implementation is that it will allow coloring
+    // the blocks from the side that doesn't agree with the subgroup blue.
     fn fill_bounded_ghostdag_data(&self, root: Hash, subgroup: &Vec<Hash>, tips: &Vec<Hash>, ghostdag_k: KType) -> GhostdagData {
         let reachability_service = self.reachability_service.clone();
         let relations_store = self.relations_stores.read();
@@ -309,8 +314,6 @@ impl<
                     )),
                 )
                 .unwrap();
-        } else {
-            println!("conflict_manager::skip::root::{}", root.to_le_u64()[3]);
         }
 
         let mut topological_heap: BinaryHeap<_> = Default::default();
@@ -322,7 +325,7 @@ impl<
         // TODO: Right now it's initializing from the root, but really it should initialized from the saved tips we know
         // for the k-cluster with this root (since we're tracking tips). This way, the BFS starts only from the tips if
         // we see another conflict for this root+k.
-        topological_heap.push(Reverse(SortableBlock { hash: root, blue_work: 0.into() }));
+        topological_heap.push(Reverse(SortableBlock { hash: root, blue_work: self.ghostdag_store.get_blue_work(root).unwrap() }));
 
         loop {
             let Some(current) = topological_heap.pop() else {
@@ -340,24 +343,27 @@ impl<
 
             if !conflict_manager.has(current_hash) {
                 let parents = &relations_service.get_parents(current_hash).unwrap();
-                // NOTE: This should be saved for the current block in the DK data
                 let current_gd = conflict_manager.k_colouring(parents, ghostdag_k, None);
 
                 conflict_manager.insert(current_hash, Arc::new(current_gd)).unwrap_or_exists();
             }
 
-            // FIXME: not the correct way to do the topological sort, but I wonder if we really need topological
-            // here or if BFS is sufficient
-            let child_blue_work = conflict_manager.get_blue_work(current_hash).unwrap() + 1;
-
             for child in relations_service.get_children(current_hash).unwrap().read().iter().copied() {
-                topological_heap.push(Reverse(SortableBlock { hash: child, blue_work: child_blue_work }));
+                // TODO: Wrong assumption alert!
+                // I'm assuming self.ghostdag_store.get_blue_work will allow for topological BFS
+                // However, the global ghostdag_store is filled such that the SP is forced to be
+                // the DK selected parent (not GD max blue work parent). Not sure how else to get a blue
+                // work here for topological sort.
+                topological_heap
+                    .push(Reverse(SortableBlock { hash: child, blue_work: self.ghostdag_store.get_blue_work(child).unwrap() }));
             }
         }
 
         // NOTE: This is how I'm doing the "conditioned" to be in agreement
         let selected_parent_in_group = conflict_manager.find_selected_parent(subgroup.iter().copied());
         let sp_virtual_gd = conflict_manager.k_colouring(&tips, ghostdag_k, Some(selected_parent_in_group));
+        // This would represent the blue work covered by the diamond <root, tips>
+        // where SP is guaranteed to be in subgroup
         sp_virtual_gd
     }
 }
@@ -712,6 +718,12 @@ mod tests {
         }
     }
 
+    /// This is the main body of the test.
+    /// 1. It sets up the necessary stores
+    /// 2. Reads the DagPlan
+    /// 3. Runs DK over the blocks on it, fills the global GD store with the results
+    /// 4. Generates a DOT file over that GD store showing the SPC and blocks colored
+    ///    according to the global GD store
     fn run_dagknight_test(k_max: KType, plan: DagPlan, base_name: &str) {
         let genesis_hash = plan.genesis.into();
 
@@ -859,7 +871,7 @@ mod tests {
                     let parents = block["parents"].as_array().unwrap().iter().map(|p| p.as_u64().unwrap()).collect();
                     (id, parents)
                 })
-                .chain(vec![(60, vec![1]), (61, vec![1]), (62, vec![60, 61]), (63, vec![60, 61])])
+                .chain(vec![(60, vec![1]), (61, vec![1]), (62, vec![60, 61]), (63, vec![60, 61]), (70, vec![50, 51, 63])])
                 .collect(),
         };
 
