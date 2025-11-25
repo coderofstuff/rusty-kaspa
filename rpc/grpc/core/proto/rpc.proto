@@ -897,6 +897,17 @@ message GetSyncStatusResponseMessage {
   RPCError error = 1000;
 }
 
+message GetLibp2pStatusRequestMessage{
+}
+
+message GetLibp2pStatusResponseMessage{
+  string mode = 1;
+  string peerId = 2;
+  string identityKind = 3;
+  string identityPath = 4;
+  RPCError error = 1000;
+}
+
 message GetDaaScoreTimestampEstimateRequestMessage {
   repeated uint64 daaScores = 1;
 }

@@ -86,7 +86,7 @@ If you believe a change in one of these directories is absolutely required, you 
    - [x] Remove libp2p crates from default workspace members so the default build has no libp2p dependency.
    - [x] Runtime modes: `off`, `full`; `helper-only` may exist as alias to `full` until a real need. Helper control port requires explicit flag (no default bind).
    - [x] Default identity ephemeral (in-memory). Provide a single canonical flag (e.g., `--libp2p-identity-path`; alias optional) as the only way to persist.
-   - [ ] Expose current PeerId in `getLibpStatus` plus whether it is ephemeral or persisted (and path if persisted); document privacy trade-offs.
+   - [x] Expose current PeerId in `getLibpStatus` plus whether it is ephemeral or persisted (and path if persisted); document privacy trade-offs.
 
 3. **Adapter / Injection Boundary**
 

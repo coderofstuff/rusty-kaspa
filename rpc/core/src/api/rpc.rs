@@ -102,6 +102,15 @@ pub trait RpcApi: Sync + Send + AnySync {
         request: GetSyncStatusRequest,
     ) -> RpcResult<GetSyncStatusResponse>;
 
+    async fn get_libp2p_status(&self) -> RpcResult<GetLibp2pStatusResponse> {
+        self.get_libp_2_p_status_call(None, GetLibp2pStatusRequest {}).await
+    }
+    async fn get_libp_2_p_status_call(
+        &self,
+        connection: Option<&DynRpcConnection>,
+        request: GetLibp2pStatusRequest,
+    ) -> RpcResult<GetLibp2pStatusResponse>;
+
     // ---
 
     /// Requests the network the node is currently running against.

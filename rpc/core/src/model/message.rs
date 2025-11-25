@@ -2473,6 +2473,123 @@ impl Deserializer for GetSyncStatusResponse {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RpcLibp2pMode {
+    Off,
+    Full,
+    Helper,
+}
+
+impl Default for RpcLibp2pMode {
+    fn default() -> Self {
+        RpcLibp2pMode::Off
+    }
+}
+
+impl Serializer for RpcLibp2pMode {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        store!(u8, &(*self as u8), writer)
+    }
+}
+
+impl Deserializer for RpcLibp2pMode {
+    fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let value = load!(u8, reader)?;
+        match value {
+            0 => Ok(RpcLibp2pMode::Off),
+            1 => Ok(RpcLibp2pMode::Full),
+            2 => Ok(RpcLibp2pMode::Helper),
+            _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid libp2p mode")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RpcLibp2pIdentity {
+    Ephemeral,
+    Persisted { path: String },
+}
+
+impl Serializer for RpcLibp2pIdentity {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        match self {
+            RpcLibp2pIdentity::Ephemeral => {
+                store!(u8, &0u8, writer)?;
+            }
+            RpcLibp2pIdentity::Persisted { path } => {
+                store!(u8, &1u8, writer)?;
+                store!(String, path, writer)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Deserializer for RpcLibp2pIdentity {
+    fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let value = load!(u8, reader)?;
+        match value {
+            0 => Ok(RpcLibp2pIdentity::Ephemeral),
+            1 => Ok(RpcLibp2pIdentity::Persisted { path: load!(String, reader)? }),
+            _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid libp2p identity")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GetLibp2pStatusRequest {}
+
+impl Serializer for GetLibp2pStatusRequest {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        store!(u16, &1, writer)?;
+        Ok(())
+    }
+}
+
+impl Deserializer for GetLibp2pStatusRequest {
+    fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let _version = load!(u16, reader)?;
+        Ok(Self {})
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GetLibp2pStatusResponse {
+    pub mode: RpcLibp2pMode,
+    pub peer_id: Option<String>,
+    pub identity: RpcLibp2pIdentity,
+}
+
+impl GetLibp2pStatusResponse {
+    pub fn disabled() -> Self {
+        Self { mode: RpcLibp2pMode::Off, peer_id: None, identity: RpcLibp2pIdentity::Ephemeral }
+    }
+}
+
+impl Serializer for GetLibp2pStatusResponse {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        store!(u16, &1, writer)?;
+        serialize!(RpcLibp2pMode, &self.mode, writer)?;
+        serialize!(Option<String>, &self.peer_id, writer)?;
+        serialize!(RpcLibp2pIdentity, &self.identity, writer)?;
+        Ok(())
+    }
+}
+
+impl Deserializer for GetLibp2pStatusResponse {
+    fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let _version = load!(u16, reader)?;
+        let mode = load!(RpcLibp2pMode, reader)?;
+        let peer_id = load!(Option<String>, reader)?;
+        let identity = load!(RpcLibp2pIdentity, reader)?;
+        Ok(Self { mode, peer_id, identity })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetDaaScoreTimestampEstimateRequest {

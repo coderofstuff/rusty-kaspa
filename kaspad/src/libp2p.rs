@@ -1,5 +1,7 @@
 use clap::ValueEnum;
 use kaspa_p2p_libp2p::{Config as AdapterConfig, Identity as AdapterIdentity, Mode as AdapterMode};
+use kaspa_rpc_core::{GetLibp2pStatusResponse, RpcLibp2pIdentity, RpcLibp2pMode};
+use kaspa_utils::networking::PeerId;
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::{
@@ -55,6 +57,23 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path) -> AdapterConf
         .unwrap_or(AdapterIdentity::Ephemeral);
 
     AdapterConfig { mode: AdapterMode::from(args.libp2p_mode).effective(), identity, helper_listen: args.libp2p_helper_listen }
+}
+
+pub fn libp2p_status_from_config(config: &AdapterConfig, peer_id: Option<PeerId>) -> GetLibp2pStatusResponse {
+    let peer_id = peer_id.map(|id| id.to_string());
+
+    let identity = match &config.identity {
+        AdapterIdentity::Ephemeral => RpcLibp2pIdentity::Ephemeral,
+        AdapterIdentity::Persisted(path) => RpcLibp2pIdentity::Persisted { path: path.display().to_string() },
+    };
+
+    let mode = match config.mode.effective() {
+        AdapterMode::Off => RpcLibp2pMode::Off,
+        AdapterMode::Full => RpcLibp2pMode::Full,
+        AdapterMode::Helper => RpcLibp2pMode::Helper,
+    };
+
+    GetLibp2pStatusResponse { mode, peer_id, identity }
 }
 
 fn resolve_identity_path(path: &Path, app_dir: &Path) -> PathBuf {

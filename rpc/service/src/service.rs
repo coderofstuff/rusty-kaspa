@@ -122,6 +122,7 @@ pub struct RpcCoreService {
     fee_estimate_cache: ExpiringCache<RpcFeeEstimate>,
     fee_estimate_verbose_cache: ExpiringCache<kaspa_mining::errors::MiningManagerResult<GetFeeEstimateExperimentalResponse>>,
     mining_rule_engine: Arc<MiningRuleEngine>,
+    libp2p_status: GetLibp2pStatusResponse,
 }
 
 const RPC_CORE: &str = "rpc-core";
@@ -148,6 +149,7 @@ impl RpcCoreService {
         grpc_tower_counters: Arc<TowerConnectionCounters>,
         system_info: SystemInfo,
         mining_rule_engine: Arc<MiningRuleEngine>,
+        libp2p_status: GetLibp2pStatusResponse,
     ) -> Self {
         // This notifier UTXOs subscription granularity to index-processor or consensus notifier
         let policies = match index_notifier {
@@ -227,6 +229,7 @@ impl RpcCoreService {
             fee_estimate_cache: ExpiringCache::new(Duration::from_millis(500), Duration::from_millis(1000)),
             fee_estimate_verbose_cache: ExpiringCache::new(Duration::from_millis(500), Duration::from_millis(1000)),
             mining_rule_engine,
+            libp2p_status,
         }
     }
 
@@ -1291,6 +1294,14 @@ NOTE: This error usually indicates an RPC conversion error between the node and 
             added_chain_block_hashes: chain_path.added.into(),
             chain_block_accepted_transactions: chain_blocks_accepted_transactions.into(),
         })
+    }
+
+    async fn get_libp_2_p_status_call(
+        &self,
+        _connection: Option<&DynRpcConnection>,
+        _request: GetLibp2pStatusRequest,
+    ) -> RpcResult<GetLibp2pStatusResponse> {
+        Ok(self.libp2p_status.clone())
     }
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

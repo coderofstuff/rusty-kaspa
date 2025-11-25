@@ -122,6 +122,14 @@ impl RpcApi for RpcCoreMock {
         Err(RpcError::NotImplemented)
     }
 
+    async fn get_libp_2_p_status_call(
+        &self,
+        _connection: Option<&DynRpcConnection>,
+        _request: GetLibp2pStatusRequest,
+    ) -> RpcResult<GetLibp2pStatusResponse> {
+        Err(RpcError::NotImplemented)
+    }
+
     async fn get_current_network_call(
         &self,
         _connection: Option<&DynRpcConnection>,

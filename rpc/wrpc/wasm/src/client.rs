@@ -977,6 +977,8 @@ build_wrpc_wasm_bindgen_interface!(
         /// Obtains basic information about the synchronization status of the Kaspa node.
         /// Returned information: Syncing status.
         GetSyncStatus,
+        /// Returns the current libp2p status (mode/identity/peer ID).
+        GetLibp2pStatus,
         /// Feerate estimates
         GetFeeEstimate,
         /// Retrieves the current network configuration.
