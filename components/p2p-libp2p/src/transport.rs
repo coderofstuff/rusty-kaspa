@@ -66,6 +66,16 @@ mod tests {
         let res = block_on(connector.connect(addr));
         assert!(matches!(res, Err(Libp2pError::Disabled)));
     }
+
+    #[test]
+    fn libp2p_connect_enabled_stubbed() {
+        let mut cfg = Config::default();
+        cfg.mode = crate::Mode::Full;
+        let connector = Libp2pConnector::new(cfg);
+        let addr = kaspa_utils::networking::NetAddress::from_str("127.0.0.1:16110").unwrap();
+        let res = block_on(connector.connect(addr));
+        assert!(matches!(res, Err(Libp2pError::NotImplemented)));
+    }
 }
 
 /// Outbound connector that prefers libp2p when enabled, otherwise falls back to TCP.
