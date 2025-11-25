@@ -107,6 +107,8 @@ impl OutboundConnector for Libp2pOutboundConnector {
         static WARN_ONCE: OnceLock<()> = OnceLock::new();
         WARN_ONCE.get_or_init(|| warn!("libp2p mode enabled but libp2p connector is not implemented; falling back to TCP"));
 
-        self.fallback.connect(address, metadata, handler)
+        Box::pin(async move {
+            Err(ConnectionError::ProtocolError(kaspa_p2p_lib::common::ProtocolError::Other("libp2p outbound connector unimplemented")))
+        })
     }
 }
