@@ -1,6 +1,8 @@
-use crate::transport::{BoxedLibp2pStream, Libp2pStreamProvider};
+use crate::swarm::build_base_swarm;
+use crate::transport::{BoxedLibp2pStream, Libp2pIdentity, Libp2pStreamProvider, SwarmStreamProvider};
 use crate::{config::Config, transport::Libp2pError};
 use kaspa_p2p_lib::{ConnectionHandler, MetadataConnectInfo};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_stream::once;
 
@@ -16,7 +18,7 @@ impl Libp2pService {
         Self { config, provider: None }
     }
 
-    pub fn with_provider(config: Config, provider: std::sync::Arc<dyn Libp2pStreamProvider>) -> Self {
+    pub fn with_provider(config: Config, provider: Arc<dyn Libp2pStreamProvider>) -> Self {
         Self { config, provider: Some(provider) }
     }
 
@@ -26,9 +28,7 @@ impl Libp2pService {
             return Err(Libp2pError::Disabled);
         }
 
-        if self.provider.is_none() {
-            return Err(Libp2pError::NotImplemented);
-        }
+        let _provider = self.provider_or_build()?;
 
         // In a full implementation, this would spawn dial/listen/reservation loops.
         Err(Libp2pError::NotImplemented)
@@ -41,7 +41,7 @@ impl Libp2pService {
             return Err(Libp2pError::Disabled);
         }
 
-        let provider = self.provider.as_ref().ok_or(Libp2pError::NotImplemented)?.clone();
+        let provider = self.provider_or_build()?;
         let (metadata, _close, stream) = provider.listen().await?;
         let info = MetadataConnectInfo::new(None, metadata);
 
@@ -49,6 +49,17 @@ impl Libp2pService {
         handler.serve_with_incoming(once(Result::<_, std::io::Error>::Ok(connected)));
 
         Ok(())
+    }
+
+    fn provider_or_build(&self) -> Result<Arc<dyn Libp2pStreamProvider>, Libp2pError> {
+        if let Some(p) = &self.provider {
+            return Ok(p.clone());
+        }
+
+        let identity = Libp2pIdentity::from_config(&self.config).map_err(|e| Libp2pError::Identity(e.to_string()))?;
+        let swarm = build_base_swarm(&identity)?;
+        let provider: Arc<dyn Libp2pStreamProvider> = Arc::new(SwarmStreamProvider::new(identity, Arc::new(Mutex::new(swarm))));
+        Ok(provider)
     }
 }
 

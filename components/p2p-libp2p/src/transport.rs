@@ -303,11 +303,12 @@ pub fn to_multiaddr(address: NetAddress) -> Result<Multiaddr, Libp2pError> {
 /// Currently returns `NotImplemented` for both dial and listen.
 pub struct SwarmStreamProvider {
     pub identity: Libp2pIdentity,
+    pub swarm: std::sync::Arc<std::sync::Mutex<libp2p::Swarm<crate::swarm::BaseBehaviour>>>,
 }
 
 impl SwarmStreamProvider {
-    pub fn new(identity: Libp2pIdentity) -> Self {
-        Self { identity }
+    pub fn new(identity: Libp2pIdentity, swarm: std::sync::Arc<std::sync::Mutex<libp2p::Swarm<crate::swarm::BaseBehaviour>>>) -> Self {
+        Self { identity, swarm }
     }
 }
 
