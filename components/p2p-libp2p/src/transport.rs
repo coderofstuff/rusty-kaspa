@@ -29,7 +29,11 @@ impl TransportConnector for Libp2pConnector {
     type Future<'a> = BoxFuture<'a, Result<(Arc<Router>, TransportMetadata, PeerKey), Self::Error>>;
 
     fn connect<'a>(&'a self, _address: NetAddress) -> Self::Future<'a> {
-        let _metadata = TransportMetadata::default();
-        Box::pin(async { Err(Libp2pError::NotImplemented) })
+        let metadata = TransportMetadata::default();
+        // TODO: integrate real libp2p dial and wrap in Router.
+        Box::pin(async move {
+            let _ = metadata;
+            Err(Libp2pError::NotImplemented)
+        })
     }
 }
