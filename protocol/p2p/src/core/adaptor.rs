@@ -1,7 +1,8 @@
-use crate::ConnectionError;
 use crate::common::ProtocolError;
+use crate::core::connection_handler::{ConnectionHandler, MetadataFactory};
 use crate::core::hub::Hub;
-use crate::{Router, core::connection_handler::ConnectionHandler};
+use crate::transport::{Capabilities, PathKind, TransportMetadata};
+use crate::{ConnectionError, Router};
 use kaspa_utils::networking::NetAddress;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
 use std::ops::Deref;
@@ -17,6 +18,30 @@ use super::peer::PeerKey;
 #[tonic::async_trait]
 pub trait ConnectionInitializer: Sync + Send {
     async fn initialize_connection(&self, new_router: Arc<Router>) -> Result<(), ProtocolError>;
+}
+
+/// Default metadata factory for plain TCP connections.
+#[derive(Default)]
+pub struct DirectMetadataFactory;
+
+impl MetadataFactory for DirectMetadataFactory {
+    fn for_outbound(&self, reported_ip: kaspa_utils::networking::IpAddress) -> TransportMetadata {
+        TransportMetadata {
+            peer_id: None,
+            reported_ip: Some(reported_ip),
+            path: PathKind::Direct,
+            capabilities: Capabilities::default(),
+        }
+    }
+
+    fn for_inbound(&self, reported_ip: kaspa_utils::networking::IpAddress) -> TransportMetadata {
+        TransportMetadata {
+            peer_id: None,
+            reported_ip: Some(reported_ip),
+            path: PathKind::Direct,
+            capabilities: Capabilities::default(),
+        }
+    }
 }
 
 /// The main object to create for managing a fully-fledged Kaspa P2P peer
@@ -46,9 +71,14 @@ impl Adaptor {
     }
 
     /// Creates a P2P adaptor with only client-side support. Typical Kaspa nodes should use `Adaptor::bidirectional`
-    pub fn client_only(hub: Hub, initializer: Arc<dyn ConnectionInitializer>, counters: Arc<TowerConnectionCounters>) -> Arc<Self> {
+    pub fn client_only(
+        hub: Hub,
+        initializer: Arc<dyn ConnectionInitializer>,
+        counters: Arc<TowerConnectionCounters>,
+        metadata_factory: Arc<dyn MetadataFactory>,
+    ) -> Arc<Self> {
         let (hub_sender, hub_receiver) = mpsc_channel(Self::hub_channel_size());
-        let connection_handler = ConnectionHandler::new(hub_sender, initializer.clone(), counters);
+        let connection_handler = ConnectionHandler::new(hub_sender, initializer.clone(), counters, metadata_factory);
         let adaptor = Arc::new(Adaptor::new(None, connection_handler, hub));
         adaptor.hub.clone().start_event_loop(hub_receiver, initializer);
         adaptor
@@ -60,9 +90,10 @@ impl Adaptor {
         hub: Hub,
         initializer: Arc<dyn ConnectionInitializer>,
         counters: Arc<TowerConnectionCounters>,
+        metadata_factory: Arc<dyn MetadataFactory>,
     ) -> Result<Arc<Self>, ConnectionError> {
         let (hub_sender, hub_receiver) = mpsc_channel(Self::hub_channel_size());
-        let connection_handler = ConnectionHandler::new(hub_sender, initializer.clone(), counters);
+        let connection_handler = ConnectionHandler::new(hub_sender, initializer.clone(), counters, metadata_factory);
         let server_termination = connection_handler.serve(serve_address)?;
         let adaptor = Arc::new(Adaptor::new(Some(server_termination), connection_handler, hub));
         adaptor.hub.clone().start_event_loop(hub_receiver, initializer);

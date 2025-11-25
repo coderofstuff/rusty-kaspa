@@ -3,7 +3,7 @@ use crate::core::hub::HubEvent;
 use crate::pb::{
     KaspadMessage, p2p_client::P2pClient as ProtoP2pClient, p2p_server::P2p as ProtoP2p, p2p_server::P2pServer as ProtoP2pServer,
 };
-use crate::transport::{Capabilities, PathKind, TransportMetadata};
+use crate::transport::TransportMetadata;
 use crate::{ConnectionInitializer, Router};
 use futures::FutureExt;
 use kaspa_core::{debug, info};
@@ -52,6 +52,13 @@ pub struct ConnectionHandler {
     hub_sender: MpscSender<HubEvent>,
     initializer: Arc<dyn ConnectionInitializer>,
     counters: Arc<TowerConnectionCounters>,
+    metadata_factory: Arc<dyn MetadataFactory + Send + Sync>,
+}
+
+/// Factory to build transport metadata for new inbound/outbound connections.
+pub trait MetadataFactory: Send + Sync {
+    fn for_outbound(&self, reported_ip: IpAddress) -> TransportMetadata;
+    fn for_inbound(&self, reported_ip: IpAddress) -> TransportMetadata;
 }
 
 impl ConnectionHandler {
@@ -59,8 +66,9 @@ impl ConnectionHandler {
         hub_sender: MpscSender<HubEvent>,
         initializer: Arc<dyn ConnectionInitializer>,
         counters: Arc<TowerConnectionCounters>,
+        metadata_factory: Arc<dyn MetadataFactory + Send + Sync>,
     ) -> Self {
-        Self { hub_sender, initializer, counters }
+        Self { hub_sender, initializer, counters, metadata_factory }
     }
 
     /// Launches a P2P server listener loop
@@ -122,12 +130,7 @@ impl ConnectionHandler {
         let incoming_stream = client.message_stream(ReceiverStream::new(outgoing_receiver)).await?.into_inner();
 
         let reported_ip: IpAddress = socket_address.ip().into();
-        let metadata = TransportMetadata {
-            peer_id: None,
-            reported_ip: Some(reported_ip),
-            path: PathKind::Direct,
-            capabilities: Capabilities::default(),
-        };
+        let metadata = self.metadata_factory.for_outbound(reported_ip);
 
         let router = Router::new(socket_address, true, metadata, self.hub_sender.clone(), incoming_stream, outgoing_route).await;
 
@@ -221,12 +224,7 @@ impl ProtoP2p for ConnectionHandler {
         let incoming_stream = request.into_inner();
 
         let reported_ip: IpAddress = remote_address.ip().into();
-        let metadata = TransportMetadata {
-            peer_id: None,
-            reported_ip: Some(reported_ip),
-            path: PathKind::Direct,
-            capabilities: Capabilities::default(),
-        };
+        let metadata = self.metadata_factory.for_inbound(reported_ip);
 
         // Build the router object
         let router = Router::new(remote_address, false, metadata, self.hub_sender.clone(), incoming_stream, outgoing_route).await;

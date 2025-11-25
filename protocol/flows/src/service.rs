@@ -6,7 +6,7 @@ use kaspa_core::{
     task::service::{AsyncService, AsyncServiceFuture},
     trace,
 };
-use kaspa_p2p_lib::Adaptor;
+use kaspa_p2p_lib::{Adaptor, MetadataFactory};
 use kaspa_utils::triggers::SingleTrigger;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
 
@@ -65,11 +65,24 @@ impl AsyncService for P2pService {
         // Prepare a shutdown signal receiver
         let shutdown_signal = self.shutdown.listener.clone();
 
+        let metadata_factory: Arc<dyn MetadataFactory> = self.flow_context.clone();
+
         let p2p_adaptor = if self.inbound_limit == 0 {
-            Adaptor::client_only(self.flow_context.hub().clone(), self.flow_context.clone(), self.counters.clone())
+            Adaptor::client_only(
+                self.flow_context.hub().clone(),
+                self.flow_context.clone(),
+                self.counters.clone(),
+                metadata_factory.clone(),
+            )
         } else {
-            Adaptor::bidirectional(self.listen, self.flow_context.hub().clone(), self.flow_context.clone(), self.counters.clone())
-                .unwrap()
+            Adaptor::bidirectional(
+                self.listen,
+                self.flow_context.hub().clone(),
+                self.flow_context.clone(),
+                self.counters.clone(),
+                metadata_factory.clone(),
+            )
+            .unwrap()
         };
         let connection_manager = ConnectionManager::new(
             p2p_adaptor.clone(),
