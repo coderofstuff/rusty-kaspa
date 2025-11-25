@@ -21,6 +21,12 @@ pub struct Libp2pConnector {
     pub config: Config,
 }
 
+impl Default for Libp2pConnector {
+    fn default() -> Self {
+        Self { config: Config::default() }
+    }
+}
+
 impl Libp2pConnector {
     pub fn new(config: Config) -> Self {
         Self { config }
