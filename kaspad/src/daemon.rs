@@ -8,7 +8,7 @@ use kaspa_consensus_core::{
     mining_rules::MiningRules,
 };
 use kaspa_consensus_notify::{root::ConsensusNotificationRoot, service::NotifyService};
-use kaspa_core::{core::Core, debug, info, trace, warn};
+use kaspa_core::{core::Core, debug, info, trace};
 use kaspa_core::{kaspad_env::version, task::tick::TickService};
 use kaspa_database::{
     prelude::{CachePolicy, DbWriter, DirectDbWriter, RocksDbPreset},
@@ -27,6 +27,7 @@ use kaspa_utils::networking::ContextualNetAddress;
 use kaspa_utils::networking::NET_ADDRESS_SERVICE_LIBP2P_RELAY;
 use kaspa_utils::sysinfo::SystemInfo;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
+use log::warn;
 
 #[cfg(feature = "libp2p")]
 use crate::libp2p::libp2p_config_from_args;
