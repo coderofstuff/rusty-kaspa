@@ -99,6 +99,7 @@ If you believe a change in one of these directories is absolutely required, you 
    - [x] Wire libp2p outbound connector to a stream provider hook (placeholder for now) so adapter can hand libp2p streams into the transport seam.
    - [x] Allow inbound connections to provide precomputed transport metadata (for libp2p streams) via connect info, with synthetic addressing fallback.
    - [x] Stub libp2p service/provider listen bridge using tonic `Connected` metadata; full libp2p dial/listen to be implemented on this seam.
+   - [x] Libp2p identity loader (ephemeral or persisted key) and runtime hook for outbound connector/status reporting; placeholder provider now carries peer_id/libp2p capability.
 
 4. **Protocol / Metadata**
 
