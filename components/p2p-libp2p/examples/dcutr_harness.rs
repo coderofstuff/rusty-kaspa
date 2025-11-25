@@ -27,12 +27,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(target) = target {
         match target.parse::<NetAddress>() {
-            Ok(addr) => {
-                match provider.dial(addr).await {
-                    Ok((_md, _stream)) => println!("dial succeeded to {target}"),
-                    Err(err) => eprintln!("dial failed to {target}: {err}"),
-                }
-            }
+            Ok(addr) => match provider.dial(addr).await {
+                Ok((_md, _stream)) => println!("dial succeeded to {target}"),
+                Err(err) => eprintln!("dial failed to {target}: {err}"),
+            },
             Err(err) => eprintln!("invalid target address {target}: {err}"),
         }
     }
