@@ -312,13 +312,13 @@ impl SwarmStreamProvider {
 }
 
 impl Libp2pStreamProvider for SwarmStreamProvider {
-    fn dial<'a>(&'a self, _address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+    fn dial<'a>(&'a self, address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
         let peer_id = self.identity.peer_id.to_string();
         Box::pin(async move {
             let mut md = TransportMetadata::default();
             md.capabilities.libp2p = true;
             md.libp2p_peer_id = Some(peer_id);
-            Err(Libp2pError::NotImplemented)
+            Err(Libp2pError::DialFailed(format!("libp2p dial not implemented for {address}")))
         })
     }
 
@@ -328,7 +328,7 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
             let mut md = TransportMetadata::default();
             md.capabilities.libp2p = true;
             md.libp2p_peer_id = Some(peer_id);
-            Err(Libp2pError::NotImplemented)
+            Err(Libp2pError::ListenFailed("libp2p listen not implemented".into()))
         })
     }
 }
