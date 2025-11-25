@@ -100,6 +100,7 @@ If you believe a change in one of these directories is absolutely required, you 
    - [x] Allow inbound connections to provide precomputed transport metadata (for libp2p streams) via connect info, with synthetic addressing fallback.
    - [x] Stub libp2p service/provider listen bridge using tonic `Connected` metadata; full libp2p dial/listen to be implemented on this seam.
    - [x] Libp2p identity loader (ephemeral or persisted key) and runtime hook for outbound connector/status reporting; placeholder provider now carries peer_id/libp2p capability.
+   - [ ] Implement swarm-based `Libp2pStreamProvider` (dial/listen) and wire into libp2p service/runtime; populate real metadata.
 
 4. **Protocol / Metadata**
 
