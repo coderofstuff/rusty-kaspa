@@ -132,7 +132,7 @@ t as alias to `full` until a real need. Helper control port requires explicit fl
    - [x] Handshake timeout behaviour (slow path terminates within configured window).
    - [ ] IBD/RPC gating tests that **match `upstream/master` behaviour** (early IBD rejects, post-IBD accepts for template/submit/UTXO, etc.) – logic unchanged, just codified.
    - [x] Mixed v8/v9 interop with relay metadata.
-   - [ ] DCUtR/helper harness behind a feature (kept for review/repro).
+   - [x] DCUtR/helper harness behind a feature (kept for review/repro).
    - [x] Multiaddr robustness: malformed inputs do not panic and end up accounted in `unknown` bucket.
 
 8. **Docs / UX**
