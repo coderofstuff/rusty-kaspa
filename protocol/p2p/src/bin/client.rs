@@ -13,6 +13,7 @@ async fn main() {
         initializer,
         Default::default(),
         Arc::new(DirectMetadataFactory::default()),
+        Arc::new(kaspa_p2p_lib::TcpConnector),
     );
     // [1] - connect 128 peers + flows
     let ip_port = String::from("[::1]:50051");

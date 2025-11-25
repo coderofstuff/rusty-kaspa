@@ -66,6 +66,7 @@ impl AsyncService for P2pService {
         let shutdown_signal = self.shutdown.listener.clone();
 
         let metadata_factory: Arc<dyn MetadataFactory> = self.flow_context.clone();
+        let outbound_connector: Arc<dyn kaspa_p2p_lib::OutboundConnector> = Arc::new(kaspa_p2p_lib::TcpConnector);
 
         let p2p_adaptor = if self.inbound_limit == 0 {
             Adaptor::client_only(
@@ -73,6 +74,7 @@ impl AsyncService for P2pService {
                 self.flow_context.clone(),
                 self.counters.clone(),
                 metadata_factory.clone(),
+                outbound_connector.clone(),
             )
         } else {
             Adaptor::bidirectional(
@@ -81,6 +83,7 @@ impl AsyncService for P2pService {
                 self.flow_context.clone(),
                 self.counters.clone(),
                 metadata_factory.clone(),
+                outbound_connector.clone(),
             )
             .unwrap()
         };

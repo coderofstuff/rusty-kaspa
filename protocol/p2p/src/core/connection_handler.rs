@@ -53,6 +53,7 @@ pub struct ConnectionHandler {
     initializer: Arc<dyn ConnectionInitializer>,
     counters: Arc<TowerConnectionCounters>,
     metadata_factory: Arc<dyn MetadataFactory + Send + Sync>,
+    outbound_connector: Arc<dyn OutboundConnector>,
 }
 
 /// Factory to build transport metadata for new inbound/outbound connections.
@@ -61,14 +62,39 @@ pub trait MetadataFactory: Send + Sync {
     fn for_inbound(&self, reported_ip: IpAddress) -> TransportMetadata;
 }
 
+/// A pluggable outbound connector. Defaults to TCP; libp2p will provide another.
+pub trait OutboundConnector: Send + Sync {
+    fn connect<'a>(
+        &'a self,
+        address: String,
+        metadata: TransportMetadata,
+        handler: &'a ConnectionHandler,
+    ) -> Pin<Box<dyn futures::Future<Output = Result<Arc<Router>, ConnectionError>> + Send + 'a>>;
+}
+
+/// Default TCP outbound connector.
+pub struct TcpConnector;
+
+impl OutboundConnector for TcpConnector {
+    fn connect<'a>(
+        &'a self,
+        address: String,
+        metadata: TransportMetadata,
+        handler: &'a ConnectionHandler,
+    ) -> Pin<Box<dyn futures::Future<Output = Result<Arc<Router>, ConnectionError>> + Send + 'a>> {
+        Box::pin(async move { handler.connect_tcp(address, metadata).await })
+    }
+}
+
 impl ConnectionHandler {
     pub(crate) fn new(
         hub_sender: MpscSender<HubEvent>,
         initializer: Arc<dyn ConnectionInitializer>,
         counters: Arc<TowerConnectionCounters>,
         metadata_factory: Arc<dyn MetadataFactory + Send + Sync>,
+        outbound_connector: Arc<dyn OutboundConnector>,
     ) -> Self {
-        Self { hub_sender, initializer, counters, metadata_factory }
+        Self { hub_sender, initializer, counters, metadata_factory, outbound_connector }
     }
 
     /// Launches a P2P server listener loop
@@ -107,50 +133,11 @@ impl ConnectionHandler {
         let Some(socket_address) = peer_address.to_socket_addrs()?.next() else {
             return Err(ConnectionError::NoAddress);
         };
-        let peer_address = format!("http://{}", peer_address); // Add scheme prefix as required by Tonic
-
-        let channel = tonic::transport::Endpoint::new(peer_address)?
-            .timeout(Duration::from_millis(Self::communication_timeout()))
-            .connect_timeout(Duration::from_millis(Self::connect_timeout()))
-            .tcp_keepalive(Some(Duration::from_millis(Self::keep_alive())))
-            .connect()
-            .await?;
-
-        let channel = ServiceBuilder::new()
-            .layer(MapResponseBodyLayer::new(move |body| CountBytesBody::new(body, self.counters.bytes_rx.clone())))
-            .layer(MapRequestBodyLayer::new(move |body| CountBytesBody::new(body, self.counters.bytes_tx.clone()).boxed_unsync()))
-            .service(channel);
-
-        let mut client = ProtoP2pClient::new(channel)
-            .send_compressed(tonic::codec::CompressionEncoding::Gzip)
-            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-            .max_decoding_message_size(P2P_MAX_MESSAGE_SIZE);
-
-        let (outgoing_route, outgoing_receiver) = mpsc_channel(Self::outgoing_network_channel_size());
-        let incoming_stream = client.message_stream(ReceiverStream::new(outgoing_receiver)).await?.into_inner();
-
         let reported_ip: IpAddress = socket_address.ip().into();
         let metadata = self.metadata_factory.for_outbound(reported_ip);
 
-        let router = Router::new(socket_address, true, metadata, self.hub_sender.clone(), incoming_stream, outgoing_route).await;
-
-        // For outbound peers, we perform the initialization as part of the connect logic
-        match self.initializer.initialize_connection(router.clone()).await {
-            Ok(()) => {
-                // Notify the central Hub about the new peer
-                self.hub_sender.send(HubEvent::NewPeer(router.clone())).await.expect("hub receiver should never drop before senders");
-            }
-
-            Err(err) => {
-                router.try_sending_reject_message(&err).await;
-                // Ignoring the new router
-                router.close().await;
-                debug!("P2P, handshake failed for outbound peer {}: {}", router, err);
-                return Err(ConnectionError::ProtocolError(err));
-            }
-        }
-
-        Ok(router)
+        // Delegate to the configured outbound connector (defaults to TCP)
+        self.outbound_connector.connect(peer_address, metadata, self).await
     }
 
     /// Connect to a new peer with `retry_attempts` retries and `retry_interval` duration between each attempt
@@ -185,6 +172,53 @@ impl ConnectionHandler {
                 }
             }
         }
+    }
+
+    pub(crate) async fn connect_tcp(&self, peer_address: String, metadata: TransportMetadata) -> Result<Arc<Router>, ConnectionError> {
+        let Some(socket_address) = peer_address.to_socket_addrs()?.next() else {
+            return Err(ConnectionError::NoAddress);
+        };
+        let peer_address = format!("http://{}", peer_address); // Add scheme prefix as required by Tonic
+
+        let channel = tonic::transport::Endpoint::new(peer_address)?
+            .timeout(Duration::from_millis(Self::communication_timeout()))
+            .connect_timeout(Duration::from_millis(Self::connect_timeout()))
+            .tcp_keepalive(Some(Duration::from_millis(Self::keep_alive())))
+            .connect()
+            .await?;
+
+        let channel = ServiceBuilder::new()
+            .layer(MapResponseBodyLayer::new(move |body| CountBytesBody::new(body, self.counters.bytes_rx.clone())))
+            .layer(MapRequestBodyLayer::new(move |body| CountBytesBody::new(body, self.counters.bytes_tx.clone()).boxed_unsync()))
+            .service(channel);
+
+        let mut client = ProtoP2pClient::new(channel)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .max_decoding_message_size(P2P_MAX_MESSAGE_SIZE);
+
+        let (outgoing_route, outgoing_receiver) = mpsc_channel(Self::outgoing_network_channel_size());
+        let incoming_stream = client.message_stream(ReceiverStream::new(outgoing_receiver)).await?.into_inner();
+
+        let router = Router::new(socket_address, true, metadata, self.hub_sender.clone(), incoming_stream, outgoing_route).await;
+
+        // For outbound peers, we perform the initialization as part of the connect logic
+        match self.initializer.initialize_connection(router.clone()).await {
+            Ok(()) => {
+                // Notify the central Hub about the new peer
+                self.hub_sender.send(HubEvent::NewPeer(router.clone())).await.expect("hub receiver should never drop before senders");
+            }
+
+            Err(err) => {
+                router.try_sending_reject_message(&err).await;
+                // Ignoring the new router
+                router.close().await;
+                debug!("P2P, handshake failed for outbound peer {}: {}", router, err);
+                return Err(ConnectionError::ProtocolError(err));
+            }
+        }
+
+        Ok(router)
     }
 
     // TODO: revisit the below constants

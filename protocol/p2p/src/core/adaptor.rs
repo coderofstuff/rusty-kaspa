@@ -76,9 +76,11 @@ impl Adaptor {
         initializer: Arc<dyn ConnectionInitializer>,
         counters: Arc<TowerConnectionCounters>,
         metadata_factory: Arc<dyn MetadataFactory>,
+        outbound_connector: Arc<dyn super::connection_handler::OutboundConnector>,
     ) -> Arc<Self> {
         let (hub_sender, hub_receiver) = mpsc_channel(Self::hub_channel_size());
-        let connection_handler = ConnectionHandler::new(hub_sender, initializer.clone(), counters, metadata_factory);
+        let connection_handler =
+            ConnectionHandler::new(hub_sender, initializer.clone(), counters, metadata_factory, outbound_connector);
         let adaptor = Arc::new(Adaptor::new(None, connection_handler, hub));
         adaptor.hub.clone().start_event_loop(hub_receiver, initializer);
         adaptor
@@ -91,9 +93,11 @@ impl Adaptor {
         initializer: Arc<dyn ConnectionInitializer>,
         counters: Arc<TowerConnectionCounters>,
         metadata_factory: Arc<dyn MetadataFactory>,
+        outbound_connector: Arc<dyn super::connection_handler::OutboundConnector>,
     ) -> Result<Arc<Self>, ConnectionError> {
         let (hub_sender, hub_receiver) = mpsc_channel(Self::hub_channel_size());
-        let connection_handler = ConnectionHandler::new(hub_sender, initializer.clone(), counters, metadata_factory);
+        let connection_handler =
+            ConnectionHandler::new(hub_sender, initializer.clone(), counters, metadata_factory, outbound_connector);
         let server_termination = connection_handler.serve(serve_address)?;
         let adaptor = Arc::new(Adaptor::new(Some(server_termination), connection_handler, hub));
         adaptor.hub.clone().start_event_loop(hub_receiver, initializer);

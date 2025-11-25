@@ -16,6 +16,7 @@ async fn main() {
         initializer,
         Default::default(),
         Arc::new(DirectMetadataFactory::default()),
+        Arc::new(kaspa_p2p_lib::TcpConnector),
     )
     .unwrap();
     // [1] - connect to a few peers
