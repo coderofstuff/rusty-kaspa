@@ -418,6 +418,57 @@ impl ConnectionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kaspa_p2p_lib::transport::{Capabilities, TransportMetadata};
+    use kaspa_utils::networking::{IpAddress, PeerId};
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::time::Instant;
+
+    fn make_peer(path: PathKind, ip: Ipv4Addr) -> Peer {
+        let metadata = TransportMetadata { path, capabilities: Capabilities { libp2p: true }, ..Default::default() };
+        Peer::new(
+            PeerId::new(uuid::Uuid::new_v4()),
+            SocketAddr::from((ip, 16000)),
+            false,
+            Instant::now(),
+            Arc::new(PeerProperties::default()),
+            0,
+            metadata,
+        )
+    }
+
+    #[test]
+    fn relay_overflow_enforces_per_relay_cap() {
+        let relay_a = PathKind::Relay { relay_id: Some("relay-a".into()) };
+        let relay_b = PathKind::Relay { relay_id: Some("relay-b".into()) };
+        let peers = vec![
+            make_peer(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 1)),
+            make_peer(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 2)),
+            make_peer(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 3)),
+            make_peer(relay_b.clone(), Ipv4Addr::new(10, 0, 0, 4)),
+        ];
+        let refs: Vec<&Peer> = peers.iter().collect();
+        let dropped = ConnectionManager::relay_overflow(&refs, 2, 8);
+        assert_eq!(dropped.len(), 1, "only one peer from relay-a should be dropped");
+        assert!(dropped.iter().all(|p| matches!(p.metadata().path, PathKind::Relay { .. })));
+    }
+
+    #[test]
+    fn relay_overflow_enforces_unknown_bucket() {
+        let relay_unknown = PathKind::Relay { relay_id: None };
+        let peers = vec![
+            make_peer(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 1)),
+            make_peer(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 2)),
+            make_peer(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 3)),
+        ];
+        let refs: Vec<&Peer> = peers.iter().collect();
+        let dropped = ConnectionManager::relay_overflow(&refs, 4, 2);
+        assert_eq!(dropped.len(), 1, "unknown relay bucket should drop overflow");
+        assert!(matches!(dropped[0].metadata().path, PathKind::Relay { relay_id: None }));
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
     use kaspa_p2p_lib::{transport::TransportMetadata, Capabilities, PathKind};
     use std::time::Instant;
 
