@@ -95,6 +95,7 @@ If you believe a change in one of these directories is absolutely required, you 
    - [x] Structure adapter crate into submodules (e.g., `helper_api`, `reservations`, `transport`, `metadata`) to avoid a god module.
    - [x] Make `ConnectionHandler` transport-agnostic: accept `AsyncRead/AsyncWrite` + metadata. Metadata separates identity (PeerId/IP), path (relay/origin), capabilities—document this boundary.
    - [x] Synthetic address stable per PeerId (relay-agnostic); store relay metadata separately. Synthetic address is identity accounting only (not a reachable address).
+   - [x] Add stream-based P2P entrypoints with libp2p-tuned h2 settings (`connect_with_stream`/`serve_with_incoming`) to support adapter dial/listen.
 
 4. **Protocol / Metadata**
 

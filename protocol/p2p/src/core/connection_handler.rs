@@ -5,24 +5,31 @@ use crate::pb::{
 };
 use crate::transport::TransportMetadata;
 use crate::{ConnectionInitializer, Router};
-use futures::FutureExt;
+use futures::{FutureExt, Stream};
+use hyper::client::conn::http2::Builder as HyperH2Builder;
+use hyper::client::conn::http2::SendRequest as HyperSendRequest;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use kaspa_core::{debug, info};
 use kaspa_utils::networking::{IpAddress, NetAddress};
 use kaspa_utils_tower::{
     counters::TowerConnectionCounters,
     middleware::{BodyExt, CountBytesBody, MapRequestBodyLayer, MapResponseBodyLayer, ServiceBuilder},
 };
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{Sender as MpscSender, channel as mpsc_channel};
 use tokio::sync::oneshot::{Sender as OneshotSender, channel as oneshot_channel};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::transport::Uri;
 use tonic::transport::{Error as TonicError, Server as TonicServer};
+use tonic::{body::BoxBody, transport::server::Connected};
 use tonic::{Request, Response, Status as TonicStatus, Streaming};
+use tower::Service;
 
 #[derive(Error, Debug)]
 pub enum ConnectionError {
@@ -44,6 +51,10 @@ pub enum ConnectionError {
 
 /// Maximum P2P decoded gRPC message size to send and receive
 const P2P_MAX_MESSAGE_SIZE: usize = 1024 * 1024 * 1024; // 1GB
+const LIBP2P_HTTP2_STREAM_WINDOW: u32 = 8 * 1024 * 1024; // 8 MiB
+const LIBP2P_HTTP2_CONNECTION_WINDOW: u32 = 16 * 1024 * 1024; // 16 MiB
+const LIBP2P_HTTP2_MAX_FRAME_SIZE: u32 = 1024 * 1024; // 1 MiB
+const LIBP2P_HTTP2_MAX_HEADER_LIST_SIZE: u32 = 64 * 1024; // 64 KiB
 
 /// Handles Router creation for both server and client-side new connections
 #[derive(Clone)]
@@ -221,6 +232,54 @@ impl ConnectionHandler {
         Ok(router)
     }
 
+    /// Connect to a peer using a pre-established async stream instead of dialing by address.
+    ///
+    /// This is intended for libp2p/DCUtR paths where the transport is provided by an
+    /// outer layer. The stream is wrapped with an h2 client tuned for libp2p buffers,
+    /// and a synthetic socket address is derived from the provided metadata.
+    pub async fn connect_with_stream<S>(&self, stream: S, metadata: TransportMetadata) -> Result<Arc<Router>, ConnectionError>
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
+        let socket_address = metadata
+            .synthetic_socket_addr()
+            .or_else(|| metadata.reported_ip.map(|ip| SocketAddr::new(ip.into(), 0)))
+            .ok_or(ConnectionError::NoAddress)?;
+
+        let channel =
+            build_libp2p_channel(stream, Duration::from_millis(Self::connect_timeout())).await.map_err(ConnectionError::IoError)?;
+
+        let channel = ServiceBuilder::new()
+            .layer(MapResponseBodyLayer::new(move |body| CountBytesBody::new(body, self.counters.bytes_rx.clone())))
+            .layer(MapRequestBodyLayer::new(move |body| CountBytesBody::new(body, self.counters.bytes_tx.clone()).boxed_unsync()))
+            .service(channel);
+
+        let mut client = ProtoP2pClient::with_origin(channel, Uri::from_static("http://kaspa.libp2p"))
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .max_decoding_message_size(P2P_MAX_MESSAGE_SIZE);
+
+        let (outgoing_route, outgoing_receiver) = mpsc_channel(Self::outgoing_network_channel_size());
+        let incoming_stream = client.message_stream(ReceiverStream::new(outgoing_receiver)).await?.into_inner();
+
+        let router = Router::new(socket_address, true, metadata, self.hub_sender.clone(), incoming_stream, outgoing_route).await;
+
+        match self.initializer.initialize_connection(router.clone()).await {
+            Ok(()) => {
+                self.hub_sender.send(HubEvent::NewPeer(router.clone())).await.expect("hub receiver should never drop before senders");
+            }
+
+            Err(err) => {
+                router.try_sending_reject_message(&err).await;
+                router.close().await;
+                debug!("P2P, handshake failed for outbound peer {}: {}", router, err);
+                return Err(ConnectionError::ProtocolError(err));
+            }
+        }
+
+        Ok(router)
+    }
+
     // TODO: revisit the below constants
     fn outgoing_network_channel_size() -> usize {
         // TODO: this number is taken from go-kaspad and should be re-evaluated
@@ -237,6 +296,36 @@ impl ConnectionHandler {
 
     fn connect_timeout() -> u64 {
         1_000
+    }
+
+    /// Serve incoming connections from a custom stream source (e.g., libp2p substreams).
+    pub(crate) fn serve_with_incoming<S, I>(&self, incoming: I)
+    where
+        S: AsyncRead + AsyncWrite + Connected + Send + Unpin + 'static,
+        I: Stream<Item = Result<S, std::io::Error>> + Send + 'static,
+    {
+        let connection_handler = self.clone();
+        let bytes_tx = self.counters.bytes_tx.clone();
+        let bytes_rx = self.counters.bytes_rx.clone();
+
+        tokio::spawn(async move {
+            let proto_server = ProtoP2pServer::new(connection_handler)
+                .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+                .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+                .max_decoding_message_size(P2P_MAX_MESSAGE_SIZE);
+
+            let serve_result = configure_libp2p_server(TonicServer::builder())
+                .layer(MapRequestBodyLayer::new(move |body| CountBytesBody::new(body, bytes_rx.clone()).boxed_unsync()))
+                .layer(MapResponseBodyLayer::new(move |body| CountBytesBody::new(body, bytes_tx.clone())))
+                .add_service(proto_server)
+                .serve_with_incoming(incoming)
+                .await;
+
+            match serve_result {
+                Ok(_) => debug!("P2P Server stopped (incoming stream closed)"),
+                Err(err) => panic!("P2P, server stopped with error: {err:?}"),
+            }
+        });
     }
 }
 
@@ -268,5 +357,192 @@ impl ProtoP2p for ConnectionHandler {
 
         // Give tonic a receiver stream (messages sent to it will be forwarded to the network peer)
         Ok(Response::new(Box::pin(ReceiverStream::new(outgoing_receiver).map(Ok)) as Self::MessageStreamStream))
+    }
+}
+
+fn configure_libp2p_server(builder: TonicServer) -> TonicServer {
+    builder
+        .max_frame_size(Some(LIBP2P_HTTP2_MAX_FRAME_SIZE))
+        .initial_stream_window_size(Some(LIBP2P_HTTP2_STREAM_WINDOW))
+        .initial_connection_window_size(Some(LIBP2P_HTTP2_CONNECTION_WINDOW))
+        .http2_keepalive_interval(Some(Duration::from_secs(30)))
+        .http2_keepalive_timeout(Some(Duration::from_secs(10)))
+        .http2_max_header_list_size(Some(LIBP2P_HTTP2_MAX_HEADER_LIST_SIZE))
+        .http2_adaptive_window(Some(false))
+}
+
+type Libp2pGrpcService = Libp2pSendRequest;
+
+struct Libp2pSendRequest {
+    inner: HyperSendRequest<BoxBody>,
+}
+
+impl From<HyperSendRequest<BoxBody>> for Libp2pSendRequest {
+    fn from(inner: HyperSendRequest<BoxBody>) -> Self {
+        Self { inner }
+    }
+}
+
+impl Service<http::Request<BoxBody>> for Libp2pSendRequest {
+    type Response = http::Response<BoxBody>;
+    type Error = hyper::Error;
+    type Future = Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<BoxBody>) -> Self::Future {
+        debug!("libp2p gRPC send request: {}", req.uri());
+        let fut = self.inner.send_request(req);
+        Box::pin(async move {
+            match fut.await {
+                Ok(res) => Ok(res.map(tonic::body::boxed)),
+                Err(err) => {
+                    debug!("libp2p gRPC request failed: {err:?}");
+                    Err(err)
+                }
+            }
+        })
+    }
+}
+
+async fn build_libp2p_channel<S>(stream: S, connect_timeout: Duration) -> Result<Libp2pGrpcService, std::io::Error>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let exec = TokioExecutor::new();
+    let mut builder = HyperH2Builder::new(exec.clone());
+    builder
+        .timer(TokioTimer::new())
+        .initial_stream_window_size(Some(LIBP2P_HTTP2_STREAM_WINDOW))
+        .initial_connection_window_size(Some(LIBP2P_HTTP2_CONNECTION_WINDOW))
+        .keep_alive_interval(Some(Duration::from_secs(30)))
+        .keep_alive_timeout(Duration::from_secs(10))
+        .keep_alive_while_idle(true)
+        .max_frame_size(Some(LIBP2P_HTTP2_MAX_FRAME_SIZE))
+        .max_header_list_size(LIBP2P_HTTP2_MAX_HEADER_LIST_SIZE)
+        .adaptive_window(false);
+
+    let handshake = tokio::time::timeout(connect_timeout, builder.handshake(TokioIo::new(stream)))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "libp2p grpc handshake timed out"))?;
+
+    let (send_request, connection) = handshake.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+
+    tokio::spawn(async move {
+        if let Err(err) = connection.await {
+            debug!("libp2p h2 connection error: {:?}", err);
+        }
+    });
+
+    Ok(Libp2pSendRequest::from(send_request))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{adaptor::Adaptor, hub::Hub};
+    use crate::transport::Capabilities;
+    use crate::{DirectMetadataFactory, PathKind};
+    use kaspa_utils::networking::PeerId;
+    use std::net::SocketAddr;
+    use std::task::{Context, Poll};
+    use tokio::io::{duplex, AsyncRead, AsyncWrite};
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
+    use uuid::Uuid;
+
+    #[derive(Clone)]
+    struct TestInitializer;
+
+    #[tonic::async_trait]
+    impl ConnectionInitializer for TestInitializer {
+        async fn initialize_connection(&self, router: Arc<Router>) -> Result<(), ProtocolError> {
+            router.set_identity(PeerId::new(Uuid::new_v4()));
+            router.start();
+            Ok(())
+        }
+    }
+
+    struct TestServerIo {
+        stream: tokio::io::DuplexStream,
+        remote: SocketAddr,
+    }
+
+    impl TestServerIo {
+        fn new(stream: tokio::io::DuplexStream, remote: SocketAddr) -> Self {
+            Self { stream, remote }
+        }
+    }
+
+    impl Connected for TestServerIo {
+        type ConnectInfo = tonic::transport::server::TcpConnectInfo;
+
+        fn connect_info(&self) -> Self::ConnectInfo {
+            tonic::transport::server::TcpConnectInfo { local_addr: None, remote_addr: Some(self.remote) }
+        }
+    }
+
+    impl AsyncRead for TestServerIo {
+        fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for TestServerIo {
+        fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connect_with_stream_establishes_router() {
+        kaspa_core::log::try_init_logger("info");
+
+        let initializer = Arc::new(TestInitializer);
+        let counters = Arc::new(TowerConnectionCounters::default());
+        let hub = Hub::new();
+        let (hub_tx, hub_rx) = mpsc::channel(Adaptor::hub_channel_size());
+        hub.clone().start_event_loop(hub_rx, initializer.clone());
+        let handler = ConnectionHandler::new(
+            hub_tx,
+            initializer.clone(),
+            counters,
+            Arc::new(DirectMetadataFactory::default()),
+            Arc::new(TcpConnector),
+        );
+
+        let (client_half, server_half) = duplex(8 * 1024);
+        let remote_addr = SocketAddr::from(([127, 0, 0, 1], 4000));
+
+        let (incoming_tx, incoming_rx) = mpsc::channel(1);
+        incoming_tx.send(TestServerIo::new(server_half, remote_addr)).await.expect("send server stream");
+        drop(incoming_tx);
+        let incoming_stream = ReceiverStream::new(incoming_rx).map(|io| Ok::<_, std::io::Error>(io));
+        handler.serve_with_incoming(incoming_stream);
+
+        let metadata = TransportMetadata {
+            libp2p_peer_id: Some("peer-stream-test".to_string()),
+            peer_id: None,
+            reported_ip: None,
+            path: PathKind::Direct,
+            capabilities: Capabilities::default(),
+        };
+        let expected_addr = metadata.synthetic_socket_addr().expect("synthetic address");
+
+        let router = handler.connect_with_stream(client_half, metadata).await.expect("connect via stream");
+        assert_eq!(router.net_address(), expected_addr);
+        assert_eq!(router.metadata().libp2p_peer_id.as_deref(), Some("peer-stream-test"));
+
+        router.close().await;
     }
 }
