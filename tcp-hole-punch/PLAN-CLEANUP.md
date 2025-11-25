@@ -75,9 +75,9 @@ If you believe a change in one of these directories is absolutely required, you 
 
    Goal: ensure we have **not** accidentally changed IBD/RPC behaviour relative to `upstream/master`.
 
-   - [ ] Diff IBD and RPC gating code against `upstream/master` and confirm there are **no runtime changes** in this branch. If any appear, revert to master.
-   - [ ] Confirm pruning/catch-up logic matches `upstream/master` (no new logic, no removals).
-   - [ ] Do **not** add new IBD abstractions (no new state machine, no new enums) as part of this project.
+   - [x] Diff IBD and RPC gating code against `upstream/master` and confirm there are **no runtime changes** in this branch. If any appear, revert to master.
+   - [x] Confirm pruning/catch-up logic matches `upstream/master` (no new logic, no removals).
+   - [x] Do **not** add new IBD abstractions (no new state machine, no new enums) as part of this project.
    - [ ] Optionally add tests that codify `upstream/master` IBD/RPC semantics (e.g., which RPCs are allowed during IBD), without changing production logic.
 
 2. **Gating & Identity**
