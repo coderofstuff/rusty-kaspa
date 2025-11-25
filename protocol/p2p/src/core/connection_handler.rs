@@ -312,7 +312,7 @@ impl ConnectionHandler {
     }
 
     /// Serve incoming connections from a custom stream source (e.g., libp2p substreams).
-    pub(crate) fn serve_with_incoming<S, I>(&self, incoming: I)
+    pub fn serve_with_incoming<S, I>(&self, incoming: I)
     where
         S: AsyncRead + AsyncWrite + Connected + Send + Unpin + 'static,
         I: Stream<Item = Result<S, std::io::Error>> + Send + 'static,
