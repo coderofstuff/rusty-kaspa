@@ -1,0 +1,18 @@
+[package]
+name = "kaspa-p2p-libp2p"
+description = "Kaspa libp2p transport adapter (feature-gated)"
+rust-version.workspace = true
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+include.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[features]
+default = []
+
+[lints]
+workspace = true

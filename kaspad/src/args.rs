@@ -12,6 +12,8 @@ use serde_with::{DisplayFromStr, serde_as};
 use std::{ffi::OsString, fs};
 use toml::from_str;
 
+#[cfg(feature = "libp2p")]
+use crate::libp2p::{Libp2pArgs as Libp2pCliArgs, Libp2pMode};
 #[cfg(feature = "devnet-prealloc")]
 use kaspa_addresses::Address;
 #[cfg(feature = "devnet-prealloc")]
@@ -20,6 +22,8 @@ use kaspa_consensus_core::tx::{TransactionOutpoint, UtxoEntry};
 use kaspa_txscript::pay_to_address_script;
 #[cfg(feature = "devnet-prealloc")]
 use std::sync::Arc;
+#[cfg(feature = "libp2p")]
+use std::{net::SocketAddr, path::PathBuf};
 
 #[serde_as]
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +96,10 @@ pub struct Args {
     pub ram_scale: f64,
     pub retention_period_days: Option<f64>,
 
+    #[cfg(feature = "libp2p")]
+    #[serde(flatten)]
+    pub libp2p: Libp2pCliArgs,
+
     pub override_params_file: Option<String>,
 
     pub rocksdb_preset: Option<String>,
@@ -148,6 +156,8 @@ impl Default for Args {
             disable_grpc: false,
             ram_scale: 1.0,
             retention_period_days: None,
+            #[cfg(feature = "libp2p")]
+            libp2p: Default::default(),
             override_params_file: None,
             rocksdb_preset: None,
             rocksdb_wal_dir: None,
@@ -443,6 +453,37 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
         )
         ;
 
+    #[cfg(feature = "libp2p")]
+    let cmd = cmd
+        .arg(
+            Arg::new("libp2p-mode")
+                .long("libp2p-mode")
+                .env("KASPAD_LIBP2P_MODE")
+                .value_name("MODE")
+                .default_value("off")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(Libp2pMode))
+                .help("Libp2p mode: off, full, helper (helper is an alias for full until a narrower helper-only mode exists)."),
+        )
+        .arg(
+            Arg::new("libp2p-identity-path")
+                .long("libp2p-identity-path")
+                .env("KASPAD_LIBP2P_IDENTITY_PATH")
+                .value_name("PATH")
+                .require_equals(true)
+                .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                .help("Persist libp2p identity to the given file path; default is ephemeral in-memory identity."),
+        )
+        .arg(
+            Arg::new("libp2p-helper-listen")
+                .long("libp2p-helper-listen")
+                .env("KASPAD_LIBP2P_HELPER_LISTEN")
+                .value_name("IP:PORT")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(SocketAddr))
+                .help("Enable the libp2p helper/control API on the specified socket address. Disabled unless set explicitly."),
+        );
+
     #[cfg(feature = "devnet-prealloc")]
     let cmd = cmd
         .arg(Arg::new("num-prealloc-utxos").long("num-prealloc-utxos").require_equals(true).value_parser(clap::value_parser!(u64)))
@@ -521,6 +562,19 @@ impl Args {
             disable_grpc: arg_match_unwrap_or::<bool>(&m, "nogrpc", defaults.disable_grpc),
             ram_scale: arg_match_unwrap_or::<f64>(&m, "ram-scale", defaults.ram_scale),
             retention_period_days: m.get_one::<f64>("retention-period-days").cloned().or(defaults.retention_period_days),
+            #[cfg(feature = "libp2p")]
+            libp2p: Libp2pCliArgs {
+                libp2p_mode: arg_match_unwrap_or::<Libp2pMode>(&m, "libp2p-mode", defaults.libp2p.libp2p_mode),
+                libp2p_identity_path: m
+                    .get_one::<String>("libp2p-identity-path")
+                    .cloned()
+                    .map(PathBuf::from)
+                    .or(defaults.libp2p.libp2p_identity_path),
+                libp2p_helper_listen: m
+                    .get_one::<SocketAddr>("libp2p-helper-listen")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_helper_listen),
+            },
 
             #[cfg(feature = "devnet-prealloc")]
             num_prealloc_utxos: m.get_one::<u64>("num-prealloc-utxos").cloned(),

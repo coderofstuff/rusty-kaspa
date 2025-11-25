@@ -3039,6 +3039,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaspa-p2p-libp2p"
+version = "1.0.1"
+
+[[package]]
 name = "kaspa-p2p-mining"
 version = "1.1.0-rc.3"
 dependencies = [
@@ -3783,6 +3787,7 @@ dependencies = [
  "kaspa-notify",
  "kaspa-p2p-flows",
  "kaspa-p2p-lib",
+ "kaspa-p2p-libp2p",
  "kaspa-p2p-mining",
  "kaspa-perf-monitor",
  "kaspa-rpc-core",

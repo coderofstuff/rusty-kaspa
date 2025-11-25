@@ -82,10 +82,10 @@ If you believe a change in one of these directories is absolutely required, you 
 
 2. **Gating & Identity**
 
-   - [ ] Add `libp2p` feature flag (off by default); guard all libp2p/bridge/helper code with `#[cfg(feature = "libp2p")]`.
-   - [ ] Remove libp2p crates from default workspace members so the default build has no libp2p dependency.
-   - [ ] Runtime modes: `off`, `full`; `helper-only` may exist as alias to `full` until a real need. Helper control port requires explicit flag (no default bind).
-   - [ ] Default identity ephemeral (in-memory). Provide a single canonical flag (e.g., `--libp2p-identity-path`; alias optional) as the only way to persist.
+   - [x] Add `libp2p` feature flag (off by default); guard all libp2p/bridge/helper code with `#[cfg(feature = "libp2p")]`.
+   - [x] Remove libp2p crates from default workspace members so the default build has no libp2p dependency.
+   - [x] Runtime modes: `off`, `full`; `helper-only` may exist as alias to `full` until a real need. Helper control port requires explicit flag (no default bind).
+   - [x] Default identity ephemeral (in-memory). Provide a single canonical flag (e.g., `--libp2p-identity-path`; alias optional) as the only way to persist.
    - [ ] Expose current PeerId in `getLibpStatus` plus whether it is ephemeral or persisted (and path if persisted); document privacy trade-offs.
 
 3. **Adapter / Injection Boundary**
