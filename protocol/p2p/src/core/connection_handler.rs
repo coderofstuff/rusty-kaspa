@@ -469,6 +469,7 @@ mod tests {
     use crate::transport::Capabilities;
     use crate::{DirectMetadataFactory, PathKind};
     use kaspa_utils::networking::PeerId;
+    use std::net::Ipv4Addr;
     use std::net::SocketAddr;
     use std::task::{Context, Poll};
     use tokio::io::{duplex, AsyncRead, AsyncWrite};
@@ -513,6 +514,23 @@ mod tests {
         async fn initialize_connection(&self, router: Arc<Router>) -> Result<(), ProtocolError> {
             router.start();
             Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct BasicHandshakeInitializer {
+        version_timeout: std::time::Duration,
+        ready_timeout: std::time::Duration,
+    }
+
+    #[tonic::async_trait]
+    impl ConnectionInitializer for BasicHandshakeInitializer {
+        async fn initialize_connection(&self, router: Arc<Router>) -> Result<(), ProtocolError> {
+            let mut handshake = KaspadHandshake::new(&router, self.version_timeout, self.ready_timeout);
+            router.start();
+            let self_version_message = build_test_version_message();
+            handshake.handshake(self_version_message).await?;
+            handshake.exchange_ready_messages().await
         }
     }
 
@@ -752,5 +770,72 @@ mod tests {
             other => panic!("expected timeout/close, got {other:?}"),
         }
         assert!(elapsed < std::time::Duration::from_secs(1), "handshake timeout should fire quickly (elapsed: {:?})", elapsed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interop_relay_metadata_handshake_succeeds() {
+        kaspa_core::log::try_init_logger("info");
+
+        let initializer = Arc::new(BasicHandshakeInitializer {
+            version_timeout: std::time::Duration::from_secs(1),
+            ready_timeout: std::time::Duration::from_secs(2),
+        });
+
+        let counters = Arc::new(TowerConnectionCounters::default());
+
+        let server_hub = Hub::new();
+        let (server_tx, server_rx) = mpsc::channel(Adaptor::hub_channel_size());
+        server_hub.clone().start_event_loop(server_rx, initializer.clone());
+        let server_handler = ConnectionHandler::new(
+            server_tx,
+            initializer.clone(),
+            counters.clone(),
+            Arc::new(DirectMetadataFactory::default()),
+            Arc::new(TcpConnector),
+        );
+
+        let client_hub = Hub::new();
+        let (client_tx, client_rx) = mpsc::channel(Adaptor::hub_channel_size());
+        client_hub.clone().start_event_loop(client_rx, initializer.clone());
+        let client_handler = ConnectionHandler::new(
+            client_tx,
+            initializer.clone(),
+            counters,
+            Arc::new(DirectMetadataFactory::default()),
+            Arc::new(TcpConnector),
+        );
+
+        let (client_half, server_half) = duplex(8 * 1024);
+
+        // Server side: baseline metadata (no libp2p/relay awareness).
+        let server_metadata = TransportMetadata {
+            libp2p_peer_id: None,
+            peer_id: None,
+            reported_ip: Some(Ipv4Addr::new(203, 0, 113, 10).into()),
+            path: PathKind::Direct,
+            capabilities: Capabilities::default(),
+        };
+        let info = MetadataConnectInfo::new(Some(SocketAddr::from(([203, 0, 113, 10], 16000))), server_metadata);
+
+        // Client side: libp2p/relay metadata to simulate a "new" node.
+        let client_metadata = TransportMetadata {
+            libp2p_peer_id: Some("interop-new-peer".to_string()),
+            peer_id: None,
+            reported_ip: None,
+            path: PathKind::Relay { relay_id: Some("relay-xyz".into()) },
+            capabilities: Capabilities { libp2p: true },
+        };
+
+        let (incoming_tx, incoming_rx) = mpsc::channel(1);
+        incoming_tx.send(MetaServerIo::new(server_half, info)).await.expect("send server stream");
+        drop(incoming_tx);
+        let incoming_stream = ReceiverStream::new(incoming_rx).map(|io| Ok::<_, std::io::Error>(io));
+        server_handler.serve_with_incoming(incoming_stream);
+
+        let router = client_handler.connect_with_stream(client_half, client_metadata.clone()).await.expect("handshake should succeed");
+        assert_eq!(router.metadata().path, client_metadata.path);
+        assert_eq!(router.metadata().capabilities.libp2p, true);
+
+        router.close().await;
     }
 }

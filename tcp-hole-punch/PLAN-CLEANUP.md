@@ -78,7 +78,8 @@ If you believe a change in one of these directories is absolutely required, you 
    - [x] Diff IBD and RPC gating code against `upstream/master` and confirm there are **no runtime changes** in this branch. If any appear, revert to master.
    - [x] Confirm pruning/catch-up logic matches `upstream/master` (no new logic, no removals).
    - [x] Do **not** add new IBD abstractions (no new state machine, no new enums) as part of this project.
-   - [ ] Optionally add tests that codify `upstream/master` IBD/RPC semantics (e.g., which RPCs are allowed during IBD), without changing production logic.
+   - [ ] Optionally add tests that codify `upstream/master` IBD/RPC semantics (e.g., which RPCs are allowed during IBD), without changing production logic.  
+     _Decision: skipped for now (no runtime changes in this area; low risk)._
 
 2. **Gating & Identity**
 
@@ -130,7 +131,7 @@ t as alias to `full` until a real need. Helper control port requires explicit fl
    - [x] Synthetic address stability across relays.
    - [x] Handshake timeout behaviour (slow path terminates within configured window).
    - [ ] IBD/RPC gating tests that **match `upstream/master` behaviour** (early IBD rejects, post-IBD accepts for template/submit/UTXO, etc.) – logic unchanged, just codified.
-   - [ ] Mixed v8/v9 interop with relay metadata.
+   - [x] Mixed v8/v9 interop with relay metadata.
    - [ ] DCUtR/helper harness behind a feature (kept for review/repro).
    - [x] Multiaddr robustness: malformed inputs do not panic and end up accounted in `unknown` bucket.
 
