@@ -97,6 +97,7 @@ If you believe a change in one of these directories is absolutely required, you 
    - [x] Synthetic address stable per PeerId (relay-agnostic); store relay metadata separately. Synthetic address is identity accounting only (not a reachable address).
    - [x] Add stream-based P2P entrypoints with libp2p-tuned h2 settings (`connect_with_stream`/`serve_with_incoming`) to support adapter dial/listen.
    - [x] Wire libp2p outbound connector to a stream provider hook (placeholder for now) so adapter can hand libp2p streams into the transport seam.
+   - [x] Allow inbound connections to provide precomputed transport metadata (for libp2p streams) via connect info, with synthetic addressing fallback.
 
 4. **Protocol / Metadata**
 

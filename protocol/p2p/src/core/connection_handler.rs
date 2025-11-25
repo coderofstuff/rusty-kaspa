@@ -97,6 +97,19 @@ impl OutboundConnector for TcpConnector {
     }
 }
 
+/// Optional precomputed metadata to be attached to inbound connections.
+#[derive(Clone, Debug)]
+pub struct MetadataConnectInfo {
+    pub socket_addr: Option<SocketAddr>,
+    pub metadata: TransportMetadata,
+}
+
+impl MetadataConnectInfo {
+    pub fn new(socket_addr: Option<SocketAddr>, metadata: TransportMetadata) -> Self {
+        Self { socket_addr, metadata }
+    }
+}
+
 impl ConnectionHandler {
     pub(crate) fn new(
         hub_sender: MpscSender<HubEvent>,
@@ -338,19 +351,27 @@ impl ProtoP2p for ConnectionHandler {
         &self,
         request: Request<Streaming<KaspadMessage>>,
     ) -> Result<Response<Self::MessageStreamStream>, TonicStatus> {
-        let Some(remote_address) = request.remote_addr() else {
-            return Err(TonicStatus::new(tonic::Code::InvalidArgument, "Incoming connection opening request has no remote address"));
+        let (socket_address, metadata) = if let Some(info) = request.extensions().get::<MetadataConnectInfo>().cloned() {
+            let socket_address = info
+                .socket_addr
+                .or_else(|| info.metadata.synthetic_socket_addr())
+                .ok_or_else(|| TonicStatus::new(tonic::Code::InvalidArgument, "Incoming connection opening request has no address"))?;
+            (socket_address, info.metadata)
+        } else {
+            let remote_address = request.remote_addr().ok_or_else(|| {
+                TonicStatus::new(tonic::Code::InvalidArgument, "Incoming connection opening request has no remote address")
+            })?;
+
+            let reported_ip: IpAddress = remote_address.ip().into();
+            (remote_address, self.metadata_factory.for_inbound(reported_ip))
         };
 
         // Build the in/out pipes
         let (outgoing_route, outgoing_receiver) = mpsc_channel(Self::outgoing_network_channel_size());
         let incoming_stream = request.into_inner();
 
-        let reported_ip: IpAddress = remote_address.ip().into();
-        let metadata = self.metadata_factory.for_inbound(reported_ip);
-
         // Build the router object
-        let router = Router::new(remote_address, false, metadata, self.hub_sender.clone(), incoming_stream, outgoing_route).await;
+        let router = Router::new(socket_address, false, metadata, self.hub_sender.clone(), incoming_stream, outgoing_route).await;
 
         // Notify the central Hub about the new peer
         self.hub_sender.send(HubEvent::NewPeer(router)).await.expect("hub receiver should never drop before senders");
@@ -542,6 +563,87 @@ mod tests {
         let router = handler.connect_with_stream(client_half, metadata).await.expect("connect via stream");
         assert_eq!(router.net_address(), expected_addr);
         assert_eq!(router.metadata().libp2p_peer_id.as_deref(), Some("peer-stream-test"));
+
+        router.close().await;
+    }
+
+    struct MetaServerIo {
+        stream: tokio::io::DuplexStream,
+        info: MetadataConnectInfo,
+    }
+
+    impl MetaServerIo {
+        fn new(stream: tokio::io::DuplexStream, info: MetadataConnectInfo) -> Self {
+            Self { stream, info }
+        }
+    }
+
+    impl Connected for MetaServerIo {
+        type ConnectInfo = MetadataConnectInfo;
+
+        fn connect_info(&self) -> Self::ConnectInfo {
+            self.info.clone()
+        }
+    }
+
+    impl AsyncRead for MetaServerIo {
+        fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for MetaServerIo {
+        fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_with_incoming_accepts_metadata_connect_info() {
+        kaspa_core::log::try_init_logger("info");
+
+        let initializer = Arc::new(TestInitializer);
+        let counters = Arc::new(TowerConnectionCounters::default());
+        let hub = Hub::new();
+        let (hub_tx, hub_rx) = mpsc::channel(Adaptor::hub_channel_size());
+        hub.clone().start_event_loop(hub_rx, initializer.clone());
+        let handler = ConnectionHandler::new(
+            hub_tx,
+            initializer.clone(),
+            counters,
+            Arc::new(DirectMetadataFactory::default()),
+            Arc::new(TcpConnector),
+        );
+
+        let metadata = TransportMetadata {
+            libp2p_peer_id: Some("peer-meta-test".to_string()),
+            peer_id: None,
+            reported_ip: None,
+            path: PathKind::Relay { relay_id: Some("relay-x".into()) },
+            capabilities: Capabilities { libp2p: true },
+        };
+        let expected_addr = metadata.synthetic_socket_addr().expect("synthetic address");
+
+        let (client_half, server_half) = duplex(8 * 1024);
+
+        let (incoming_tx, incoming_rx) = mpsc::channel(1);
+        let info = MetadataConnectInfo::new(None, metadata.clone());
+        incoming_tx.send(MetaServerIo::new(server_half, info)).await.expect("send server stream");
+        drop(incoming_tx);
+        let incoming_stream = ReceiverStream::new(incoming_rx).map(|io| Ok::<_, std::io::Error>(io));
+        handler.serve_with_incoming(incoming_stream);
+
+        let router = handler.connect_with_stream(client_half, metadata.clone()).await.expect("connect via stream");
+        assert_eq!(router.net_address(), expected_addr);
+        assert_eq!(router.metadata().libp2p_peer_id.as_deref(), Some("peer-meta-test"));
 
         router.close().await;
     }
