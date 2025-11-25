@@ -26,7 +26,7 @@ impl Libp2pConnector {
 
 impl TransportConnector for Libp2pConnector {
     type Error = Libp2pError;
-    type Future<'a> = BoxFuture<'a, Result<(Arc<Router>, PeerKey), Self::Error>>;
+    type Future<'a> = BoxFuture<'a, Result<(Arc<Router>, TransportMetadata, PeerKey), Self::Error>>;
 
     fn connect<'a>(&'a self, _address: NetAddress) -> Self::Future<'a> {
         let _metadata = TransportMetadata::default();
