@@ -3,6 +3,7 @@ use futures_util::future::BoxFuture;
 use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
 use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
+use log::info;
 use log::warn;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -45,6 +46,7 @@ impl TransportConnector for Libp2pConnector {
 
         // TODO: integrate real libp2p dial and wrap in Router, returning metadata and PeerKey.
         Box::pin(async move {
+            info!("libp2p connector stub invoked; dial not implemented");
             let _ = metadata;
             Err(Libp2pError::NotImplemented)
         })
