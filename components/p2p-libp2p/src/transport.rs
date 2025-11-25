@@ -3,7 +3,9 @@ use futures_util::future::BoxFuture;
 use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
 use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
+use log::warn;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Libp2pError {
@@ -70,7 +72,9 @@ impl OutboundConnector for Libp2pOutboundConnector {
             return self.fallback.connect(address, metadata, handler);
         }
 
-        // TODO: implement libp2p dial here.
+        static WARN_ONCE: OnceLock<()> = OnceLock::new();
+        WARN_ONCE.get_or_init(|| warn!("libp2p mode enabled but libp2p connector is not implemented; falling back to TCP"));
+
         self.fallback.connect(address, metadata, handler)
     }
 }

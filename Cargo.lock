@@ -3045,6 +3045,7 @@ dependencies = [
  "futures-util",
  "kaspa-p2p-lib",
  "kaspa-utils",
+ "log",
  "serde",
  "serde_with",
  "thiserror",
