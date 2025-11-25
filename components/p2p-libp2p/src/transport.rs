@@ -51,6 +51,21 @@ impl TransportConnector for Libp2pConnector {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use std::str::FromStr;
+
+    #[test]
+    fn libp2p_connect_disabled() {
+        let connector = Libp2pConnector::default();
+        let addr = kaspa_utils::networking::NetAddress::from_str("127.0.0.1:16110").unwrap();
+        let res = block_on(connector.connect(addr));
+        assert!(matches!(res, Err(Libp2pError::Disabled)));
+    }
+}
+
 /// Outbound connector that prefers libp2p when enabled, otherwise falls back to TCP.
 pub struct Libp2pOutboundConnector {
     config: Config,

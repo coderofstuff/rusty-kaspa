@@ -22,5 +22,8 @@ log.workspace = true
 default = []
 serde = ["dep:serde", "serde_with"]
 
+[dev-dependencies]
+futures = { workspace = true }
+
 [lints]
 workspace = true

@@ -3042,6 +3042,7 @@ dependencies = [
 name = "kaspa-p2p-libp2p"
 version = "1.0.1"
 dependencies = [
+ "futures",
  "futures-util",
  "kaspa-p2p-lib",
  "kaspa-utils",
