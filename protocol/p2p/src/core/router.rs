@@ -1,8 +1,9 @@
 use crate::core::hub::HubEvent;
 use crate::pb::RejectMessage;
-use crate::pb::{KaspadMessage, kaspad_message::Payload as KaspadMessagePayload};
-use crate::{KaspadMessagePayloadType, common::ProtocolError};
-use crate::{Peer, make_message};
+use crate::pb::{kaspad_message::Payload as KaspadMessagePayload, KaspadMessage};
+use crate::transport::TransportMetadata;
+use crate::{common::ProtocolError, KaspadMessagePayloadType};
+use crate::{make_message, Peer};
 use kaspa_core::{debug, error, info, trace, warn};
 use kaspa_utils::networking::PeerId;
 use parking_lot::{Mutex, RwLock};
@@ -126,6 +127,9 @@ pub struct Router {
     /// Time of creation of this object and the connection it holds
     connection_started: Instant,
 
+    /// Transport metadata attached to this connection
+    metadata: TransportMetadata,
+
     /// Routing map for mapping messages to subscribed flows
     routing_map_by_type: RwLock<HashMap<KaspadMessagePayloadType, MpscSender<KaspadMessage>>>,
 
@@ -176,6 +180,7 @@ impl Router {
     pub(crate) async fn new(
         net_address: SocketAddr,
         is_outbound: bool,
+        metadata: TransportMetadata,
         hub_sender: MpscSender<HubEvent>,
         mut incoming_stream: Streaming<KaspadMessage>,
         outgoing_route: MpscSender<KaspadMessage>,
@@ -188,6 +193,7 @@ impl Router {
             net_address,
             is_outbound,
             connection_started: Instant::now(),
+            metadata,
             routing_map_by_type: RwLock::new(HashMap::new()),
             routing_map_by_id: RwLock::new(HashMap::new()),
             outgoing_route,
@@ -292,6 +298,10 @@ impl Router {
 
     pub fn last_ping_duration(&self) -> u64 {
         self.mutable_state.lock().last_ping_duration
+    }
+
+    pub fn metadata(&self) -> &TransportMetadata {
+        &self.metadata
     }
 
     pub fn incoming_flow_baseline_channel_size() -> usize {

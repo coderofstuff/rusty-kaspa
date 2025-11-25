@@ -3,10 +3,11 @@ use crate::core::hub::HubEvent;
 use crate::pb::{
     KaspadMessage, p2p_client::P2pClient as ProtoP2pClient, p2p_server::P2p as ProtoP2p, p2p_server::P2pServer as ProtoP2pServer,
 };
+use crate::transport::{Capabilities, PathKind, TransportMetadata};
 use crate::{ConnectionInitializer, Router};
 use futures::FutureExt;
 use kaspa_core::{debug, info};
-use kaspa_utils::networking::NetAddress;
+use kaspa_utils::networking::{IpAddress, NetAddress};
 use kaspa_utils_tower::{
     counters::TowerConnectionCounters,
     middleware::{BodyExt, CountBytesBody, MapRequestBodyLayer, MapResponseBodyLayer, ServiceBuilder},
@@ -120,7 +121,15 @@ impl ConnectionHandler {
         let (outgoing_route, outgoing_receiver) = mpsc_channel(Self::outgoing_network_channel_size());
         let incoming_stream = client.message_stream(ReceiverStream::new(outgoing_receiver)).await?.into_inner();
 
-        let router = Router::new(socket_address, true, self.hub_sender.clone(), incoming_stream, outgoing_route).await;
+        let reported_ip: IpAddress = socket_address.ip().into();
+        let metadata = TransportMetadata {
+            peer_id: None,
+            reported_ip: Some(reported_ip),
+            path: PathKind::Direct,
+            capabilities: Capabilities::default(),
+        };
+
+        let router = Router::new(socket_address, true, metadata, self.hub_sender.clone(), incoming_stream, outgoing_route).await;
 
         // For outbound peers, we perform the initialization as part of the connect logic
         match self.initializer.initialize_connection(router.clone()).await {
@@ -211,8 +220,16 @@ impl ProtoP2p for ConnectionHandler {
         let (outgoing_route, outgoing_receiver) = mpsc_channel(Self::outgoing_network_channel_size());
         let incoming_stream = request.into_inner();
 
+        let reported_ip: IpAddress = remote_address.ip().into();
+        let metadata = TransportMetadata {
+            peer_id: None,
+            reported_ip: Some(reported_ip),
+            path: PathKind::Direct,
+            capabilities: Capabilities::default(),
+        };
+
         // Build the router object
-        let router = Router::new(remote_address, false, self.hub_sender.clone(), incoming_stream, outgoing_route).await;
+        let router = Router::new(remote_address, false, metadata, self.hub_sender.clone(), incoming_stream, outgoing_route).await;
 
         // Notify the central Hub about the new peer
         self.hub_sender.send(HubEvent::NewPeer(router)).await.expect("hub receiver should never drop before senders");
