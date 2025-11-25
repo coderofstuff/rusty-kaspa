@@ -26,7 +26,7 @@ use kaspa_utils::sysinfo::SystemInfo;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
 
 #[cfg(feature = "libp2p")]
-use crate::libp2p::Libp2pConfig;
+use crate::libp2p::libp2p_config_from_args;
 use kaspa_addressmanager::AddressManager;
 use kaspa_consensus::{
     consensus::factory::MultiConsensusManagementStore, model::stores::headers::DbHeadersStore, pipeline::monitor::ConsensusMonitor,
@@ -325,7 +325,7 @@ pub fn create_core_with_runtime(runtime: &Runtime, args: &Args, fd_total_budget:
 
     let app_dir = get_app_dir_from_args(args);
     #[cfg(feature = "libp2p")]
-    let _libp2p_config = Libp2pConfig::from_args(&args.libp2p, &app_dir);
+    let _libp2p_config = libp2p_config_from_args(&args.libp2p, &app_dir);
     let db_dir = app_dir.join(network.to_prefixed()).join(DEFAULT_DATA_DIR);
 
     // Print package name and version

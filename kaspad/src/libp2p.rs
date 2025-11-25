@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use kaspa_p2p_libp2p::{Config as AdapterConfig, Identity as AdapterIdentity, Mode as AdapterMode};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::{
@@ -16,28 +17,13 @@ pub enum Libp2pMode {
     Helper,
 }
 
-impl Libp2pMode {
-    pub fn effective(self) -> Self {
-        match self {
-            Self::Helper => Self::Full,
-            mode => mode,
+impl From<Libp2pMode> for AdapterMode {
+    fn from(value: Libp2pMode) -> Self {
+        match value {
+            Libp2pMode::Off => AdapterMode::Off,
+            Libp2pMode::Full => AdapterMode::Full,
+            Libp2pMode::Helper => AdapterMode::Helper,
         }
-    }
-
-    pub fn is_enabled(self) -> bool {
-        !matches!(self.effective(), Self::Off)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IdentitySource {
-    Ephemeral,
-    Persisted(PathBuf),
-}
-
-impl Default for IdentitySource {
-    fn default() -> Self {
-        IdentitySource::Ephemeral
     }
 }
 
@@ -59,34 +45,16 @@ impl Default for Libp2pArgs {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Libp2pConfig {
-    pub mode: Libp2pMode,
-    pub identity: IdentitySource,
-    pub helper_listen: Option<SocketAddr>,
-}
+/// Translate CLI/config args into the adapter config.
+pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path) -> AdapterConfig {
+    let identity = args
+        .libp2p_identity_path
+        .as_ref()
+        .map(|path| resolve_identity_path(path, app_dir))
+        .map(AdapterIdentity::Persisted)
+        .unwrap_or(AdapterIdentity::Ephemeral);
 
-impl Default for Libp2pConfig {
-    fn default() -> Self {
-        Self { mode: Libp2pMode::Off, identity: IdentitySource::Ephemeral, helper_listen: None }
-    }
-}
-
-impl Libp2pConfig {
-    pub fn from_args(args: &Libp2pArgs, app_dir: &Path) -> Self {
-        let identity = args
-            .libp2p_identity_path
-            .as_ref()
-            .map(|path| resolve_identity_path(path, app_dir))
-            .map(IdentitySource::Persisted)
-            .unwrap_or_default();
-
-        Self { mode: args.libp2p_mode.effective(), identity, helper_listen: args.libp2p_helper_listen }
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.mode.is_enabled()
-    }
+    AdapterConfig { mode: AdapterMode::from(args.libp2p_mode).effective(), identity, helper_listen: args.libp2p_helper_listen }
 }
 
 fn resolve_identity_path(path: &Path, app_dir: &Path) -> PathBuf {

@@ -4,6 +4,10 @@
 //! wiring lives here to keep the core kaspad build free from libp2p deps
 //! unless explicitly requested.
 
-/// Marker type for future libp2p components.
-#[derive(Debug, Default, Clone)]
-pub struct Libp2pAdapter;
+pub mod config;
+pub mod helper_api;
+pub mod metadata;
+pub mod reservations;
+pub mod transport;
+
+pub use config::{Config, Identity, Mode};
