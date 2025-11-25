@@ -699,7 +699,7 @@ impl FlowContext {
 impl MetadataFactory for FlowContext {
     fn for_outbound(&self, reported_ip: IpAddress) -> TransportMetadata {
         TransportMetadata {
-            peer_id: Some(self.node_id),
+            peer_id: None,
             reported_ip: Some(reported_ip),
             path: PathKind::Direct,
             capabilities: Capabilities::default(),
@@ -708,7 +708,7 @@ impl MetadataFactory for FlowContext {
 
     fn for_inbound(&self, reported_ip: IpAddress) -> TransportMetadata {
         TransportMetadata {
-            peer_id: Some(self.node_id),
+            peer_id: None,
             reported_ip: Some(reported_ip),
             path: PathKind::Direct,
             capabilities: Capabilities::default(),
