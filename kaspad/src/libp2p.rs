@@ -80,32 +80,34 @@ pub fn libp2p_status_from_config(config: &AdapterConfig, peer_id: Option<String>
 pub struct Libp2pRuntime {
     pub outbound: Arc<dyn OutboundConnector>,
     pub peer_id: Option<String>,
+    pub identity: Option<kaspa_p2p_libp2p::Libp2pIdentity>,
 }
 
 pub fn libp2p_runtime_from_config(config: &AdapterConfig) -> Libp2pRuntime {
     if config.mode.is_enabled() {
-        let (provider, peer_id) = match kaspa_p2p_libp2p::Libp2pIdentity::from_config(config) {
+        let (provider, peer_id, identity) = match kaspa_p2p_libp2p::Libp2pIdentity::from_config(config) {
             Ok(identity) => {
                 let provider = kaspa_p2p_libp2p::PlaceholderStreamProvider::new(config.clone(), identity.peer_id);
-                (provider, Some(identity.peer_id_string()))
+                let peer_id = identity.peer_id_string();
+                (provider, Some(peer_id), Some(identity))
             }
             Err(err) => {
                 log::warn!("libp2p identity setup failed: {err}; falling back to TCP only");
                 let random_peer = Libp2pPeerId::random();
                 let provider = kaspa_p2p_libp2p::PlaceholderStreamProvider::new(config.clone(), random_peer);
-                (provider, None)
+                (provider, None, None)
             }
         };
         let outbound = Arc::new(Libp2pOutboundConnector::with_provider(config.clone(), Arc::new(TcpConnector), Arc::new(provider)));
-        Libp2pRuntime { outbound, peer_id }
+        Libp2pRuntime { outbound, peer_id, identity }
     } else {
-        Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None }
+        Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None }
     }
 }
 
 #[cfg(not(feature = "libp2p"))]
 pub fn libp2p_runtime_from_config(_config: &AdapterConfig) -> Libp2pRuntime {
-    Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None }
+    Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None }
 }
 
 fn resolve_identity_path(path: &Path, app_dir: &Path) -> PathBuf {

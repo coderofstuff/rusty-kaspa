@@ -72,6 +72,7 @@ mod tests {
     use super::*;
     use futures::executor::block_on;
     use std::str::FromStr;
+    use tempfile::tempdir;
 
     #[test]
     fn libp2p_connect_disabled() {
@@ -89,6 +90,34 @@ mod tests {
         let addr = kaspa_utils::networking::NetAddress::from_str("127.0.0.1:16110").unwrap();
         let res = block_on(connector.connect(addr));
         assert!(matches!(res, Err(Libp2pError::NotImplemented)));
+    }
+
+    #[test]
+    fn to_multiaddr_ipv4_and_ipv6() {
+        let ipv4 = NetAddress::from_str("192.0.2.1:1234").unwrap();
+        let m4 = to_multiaddr(ipv4).unwrap();
+        assert_eq!(m4.to_string(), "/ip4/192.0.2.1/tcp/1234");
+
+        let ipv6 = NetAddress::from_str("[2001:db8::1]:5678").unwrap();
+        let m6 = to_multiaddr(ipv6).unwrap();
+        assert_eq!(m6.to_string(), "/ip6/2001:db8::1/tcp/5678");
+    }
+
+    #[test]
+    fn identity_ephemeral_and_persisted() {
+        let cfg = Config::default();
+        let id = Libp2pIdentity::from_config(&cfg).expect("ephemeral identity");
+        assert!(id.persisted_path.is_none());
+        assert!(!id.peer_id.to_string().is_empty());
+
+        let dir = tempdir().unwrap();
+        let key_path = dir.path().join("id.key");
+        let mut cfg = Config::default();
+        cfg.identity = crate::Identity::Persisted(key_path.clone());
+        let id1 = Libp2pIdentity::from_config(&cfg).expect("persisted identity");
+        let id2 = Libp2pIdentity::from_config(&cfg).expect("persisted identity reload");
+        assert_eq!(id1.peer_id, id2.peer_id);
+        assert_eq!(id1.persisted_path.as_deref(), Some(key_path.as_path()));
     }
 }
 
@@ -268,4 +297,38 @@ pub fn to_multiaddr(address: NetAddress) -> Result<Multiaddr, Libp2pError> {
     }
     .map_err(|e: libp2p::multiaddr::Error| Libp2pError::Multiaddr(e.to_string()))?;
     Ok(multiaddr)
+}
+
+/// Skeleton libp2p stream provider that will eventually wrap a libp2p swarm.
+/// Currently returns `NotImplemented` for both dial and listen.
+pub struct SwarmStreamProvider {
+    pub identity: Libp2pIdentity,
+}
+
+impl SwarmStreamProvider {
+    pub fn new(identity: Libp2pIdentity) -> Self {
+        Self { identity }
+    }
+}
+
+impl Libp2pStreamProvider for SwarmStreamProvider {
+    fn dial<'a>(&'a self, _address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+        let peer_id = self.identity.peer_id.to_string();
+        Box::pin(async move {
+            let mut md = TransportMetadata::default();
+            md.capabilities.libp2p = true;
+            md.libp2p_peer_id = Some(peer_id);
+            Err(Libp2pError::NotImplemented)
+        })
+    }
+
+    fn listen<'a>(&'a self) -> BoxFuture<'a, Result<(TransportMetadata, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
+        let peer_id = self.identity.peer_id.to_string();
+        Box::pin(async move {
+            let mut md = TransportMetadata::default();
+            md.capabilities.libp2p = true;
+            md.libp2p_peer_id = Some(peer_id);
+            Err(Libp2pError::NotImplemented)
+        })
+    }
 }
