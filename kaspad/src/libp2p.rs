@@ -1,10 +1,8 @@
 use clap::ValueEnum;
 use kaspa_p2p_lib::{OutboundConnector, TcpConnector};
 use kaspa_p2p_libp2p::Libp2pIdentity;
-use kaspa_p2p_libp2p::{
-    build_base_swarm, Config as AdapterConfig, Identity as AdapterIdentity, Libp2pOutboundConnector, Mode as AdapterMode,
-};
-use kaspa_p2p_libp2p::{PlaceholderStreamProvider, SwarmStreamProvider};
+use kaspa_p2p_libp2p::PlaceholderStreamProvider;
+use kaspa_p2p_libp2p::{Config as AdapterConfig, Identity as AdapterIdentity, Libp2pOutboundConnector, Mode as AdapterMode};
 use kaspa_rpc_core::{GetLibp2pStatusResponse, RpcLibp2pIdentity, RpcLibp2pMode};
 use libp2p::PeerId as Libp2pPeerId;
 use serde::Deserialize;
@@ -89,27 +87,19 @@ pub struct Libp2pRuntime {
 pub fn libp2p_runtime_from_config(config: &AdapterConfig) -> Libp2pRuntime {
     if config.mode.is_enabled() {
         let (provider, peer_id, identity) = match kaspa_p2p_libp2p::Libp2pIdentity::from_config(config) {
-            Ok(identity) => match build_base_swarm(&identity) {
-                Ok(swarm) => {
-                    let provider = SwarmStreamProvider::new(identity.clone(), Arc::new(Mutex::new(swarm)));
-                    let peer_id = identity.peer_id_string();
-                    (provider, Some(peer_id), Some(identity))
-                }
-                Err(err) => {
-                    log::warn!("libp2p swarm build failed: {err}; falling back to TCP only");
-                    let random_peer = Libp2pPeerId::random();
-                    let provider = PlaceholderStreamProvider::new(config.clone(), random_peer);
-                    (provider, None, None)
-                }
-            },
+            Ok(identity) => {
+                let provider = Arc::new(PlaceholderStreamProvider::new(config.clone(), identity.peer_id));
+                let peer_id = identity.peer_id_string();
+                (provider, Some(peer_id), Some(identity))
+            }
             Err(err) => {
                 log::warn!("libp2p identity setup failed: {err}; falling back to TCP only");
                 let random_peer = Libp2pPeerId::random();
-                let provider = PlaceholderStreamProvider::new(config.clone(), random_peer);
+                let provider = Arc::new(PlaceholderStreamProvider::new(config.clone(), random_peer));
                 (provider, None, None)
             }
         };
-        let outbound = Arc::new(Libp2pOutboundConnector::with_provider(config.clone(), Arc::new(TcpConnector), Arc::new(provider)));
+        let outbound = Arc::new(Libp2pOutboundConnector::with_provider(config.clone(), Arc::new(TcpConnector), provider));
         Libp2pRuntime { outbound, peer_id, identity }
     } else {
         Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None }
