@@ -11,3 +11,4 @@ pub mod reservations;
 pub mod transport;
 
 pub use config::{Config, Identity, Mode};
+pub use transport::{Libp2pConnector, Libp2pError};

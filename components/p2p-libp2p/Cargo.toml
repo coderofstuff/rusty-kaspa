@@ -13,6 +13,9 @@ repository.workspace = true
 kaspa-utils.workspace = true
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_with = { workspace = true, optional = true }
+kaspa-p2p-lib.workspace = true
+futures-util = { workspace = true, default-features = false, features = ["alloc"] }
+thiserror.workspace = true
 
 [features]
 default = []

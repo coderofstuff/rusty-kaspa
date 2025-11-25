@@ -1,18 +1,35 @@
-use crate::metadata::TransportMetadata;
+use crate::{config::Config, metadata::TransportMetadata};
+use futures_util::future::BoxFuture;
+use kaspa_p2p_lib::{PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
-use std::future::Future;
+use std::sync::Arc;
 
-/// Abstraction for establishing a transport connection.
-///
-/// This trait allows bridging different transports (TCP, libp2p relay/DCUtR, etc.)
-/// into a common Router constructor without baking transport specifics into
-/// the connection handler.
-pub trait TransportConnector: Send + Sync {
-    type Output;
-    type Error;
-    type Future<'a>: Future<Output = Result<(Self::Output, TransportMetadata), Self::Error>> + Send
-    where
-        Self: 'a;
+#[derive(Debug, thiserror::Error)]
+pub enum Libp2pError {
+    #[error("libp2p connector not implemented yet")]
+    NotImplemented,
+    #[error("libp2p not enabled")]
+    Disabled,
+}
 
-    fn connect<'a>(&'a self, address: NetAddress) -> Self::Future<'a>;
+/// Placeholder libp2p transport connector. Will be expanded with real libp2p dial/listen logic.
+#[derive(Clone)]
+pub struct Libp2pConnector {
+    pub config: Config,
+}
+
+impl Libp2pConnector {
+    pub fn new(config: Config) -> Self {
+        Self { config }
+    }
+}
+
+impl TransportConnector for Libp2pConnector {
+    type Error = Libp2pError;
+    type Future<'a> = BoxFuture<'a, Result<(Arc<Router>, PeerKey), Self::Error>>;
+
+    fn connect<'a>(&'a self, _address: NetAddress) -> Self::Future<'a> {
+        let _metadata = TransportMetadata::default();
+        Box::pin(async { Err(Libp2pError::NotImplemented) })
+    }
 }
