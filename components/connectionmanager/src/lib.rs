@@ -465,6 +465,21 @@ mod tests {
         assert_eq!(dropped.len(), 1, "unknown relay bucket should drop overflow");
         assert!(matches!(dropped[0].metadata().path, PathKind::Relay { relay_id: None }));
     }
+
+    #[test]
+    fn libp2p_classification_detects_capability_and_relay_path() {
+        // Direct path + libp2p capability => libp2p
+        let direct_libp2p = make_peer(PathKind::Direct, Ipv4Addr::new(10, 0, 2, 1), Some(Capabilities { libp2p: true }));
+        assert!(ConnectionManager::is_libp2p_peer(&direct_libp2p));
+
+        // Relay path without capability still counts as libp2p for accounting.
+        let relay_path = make_peer(PathKind::Relay { relay_id: None }, Ipv4Addr::new(10, 0, 2, 2), None);
+        assert!(ConnectionManager::is_libp2p_peer(&relay_path));
+
+        // Direct path with no capability => non-libp2p.
+        let direct_plain = make_peer(PathKind::Direct, Ipv4Addr::new(10, 0, 2, 3), None);
+        assert!(!ConnectionManager::is_libp2p_peer(&direct_plain));
+    }
 }
 #[cfg(test)]
 mod tests {
