@@ -70,7 +70,6 @@ impl OutboundConnector for Libp2pOutboundConnector {
         metadata: CoreTransportMetadata,
         handler: &'a kaspa_p2p_lib::ConnectionHandler,
     ) -> BoxFuture<'a, Result<Arc<Router>, ConnectionError>> {
-        // Placeholder: fall back to TCP until libp2p dial is implemented.
         let mut metadata = metadata;
         metadata.capabilities.libp2p = true;
         metadata.path = kaspa_p2p_lib::PathKind::Unknown;
@@ -81,6 +80,8 @@ impl OutboundConnector for Libp2pOutboundConnector {
         static WARN_ONCE: OnceLock<()> = OnceLock::new();
         WARN_ONCE.get_or_init(|| warn!("libp2p mode enabled but libp2p connector is not implemented; falling back to TCP"));
 
-        self.fallback.connect(address, metadata, handler)
+        Box::pin(async move {
+            Err(ConnectionError::ProtocolError(kaspa_p2p_lib::common::ProtocolError::Other("libp2p outbound connector unimplemented")))
+        })
     }
 }
