@@ -91,6 +91,8 @@ impl AsyncService for P2pService {
             p2p_adaptor.clone(),
             self.outbound_target,
             self.inbound_limit,
+            self.flow_context.libp2p_relay_inbound_cap(),
+            self.flow_context.libp2p_relay_inbound_unknown_cap(),
             self.dns_seeders,
             self.default_port,
             self.flow_context.address_manager.clone(),

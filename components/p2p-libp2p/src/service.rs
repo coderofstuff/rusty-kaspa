@@ -1,24 +1,44 @@
-use crate::transport::{BoxedLibp2pStream, Libp2pStreamProvider};
+use crate::reservations::ReservationManager;
+use crate::transport::{multiaddr_to_metadata, BoxedLibp2pStream, Libp2pStreamProvider};
 use crate::{config::Config, transport::Libp2pError};
-use kaspa_p2p_lib::{ConnectionHandler, MetadataConnectInfo};
+use kaspa_p2p_lib::{ConnectionHandler, MetadataConnectInfo, PathKind};
+use kaspa_utils::networking::NetAddress;
+use libp2p::Multiaddr;
+use log::{debug, warn};
+use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
+use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_stream::once;
+use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
+use tokio_stream::wrappers::ReceiverStream;
 
 /// Placeholder libp2p service that will eventually own dial/listen/reservation logic.
 #[derive(Clone)]
 pub struct Libp2pService {
     config: Config,
     provider: Option<std::sync::Arc<dyn Libp2pStreamProvider>>,
+    reservations: ReservationManager,
 }
+
+const RESERVATION_REFRESH_INTERVAL: Duration = Duration::from_secs(20 * 60);
+const RESERVATION_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const RESERVATION_BASE_BACKOFF: Duration = Duration::from_secs(5);
+const RESERVATION_MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 impl Libp2pService {
     pub fn new(config: Config) -> Self {
-        Self { config, provider: None }
+        Self { config, provider: None, reservations: ReservationManager::new(RESERVATION_BASE_BACKOFF, RESERVATION_MAX_BACKOFF) }
     }
 
     pub fn with_provider(config: Config, provider: Arc<dyn Libp2pStreamProvider>) -> Self {
-        Self { config, provider: Some(provider) }
+        Self {
+            config,
+            provider: Some(provider),
+            reservations: ReservationManager::new(RESERVATION_BASE_BACKOFF, RESERVATION_MAX_BACKOFF),
+        }
     }
 
     /// Start the libp2p service. Currently returns `NotImplemented` when enabled.
@@ -27,10 +47,15 @@ impl Libp2pService {
             return Err(Libp2pError::Disabled);
         }
 
-        let _provider = self.provider.as_ref().ok_or(Libp2pError::NotImplemented)?;
+        let provider = self.provider.as_ref().ok_or(Libp2pError::NotImplemented)?.clone();
 
-        // In a full implementation, this would spawn dial/listen/reservation loops.
-        Err(Libp2pError::NotImplemented)
+        if !self.config.reservations.is_empty() {
+            let reservations = self.config.reservations.clone();
+            let state = ReservationState::new(self.reservations.clone(), RESERVATION_REFRESH_INTERVAL);
+            tokio::spawn(async move { reservation_worker(provider, reservations, state).await });
+        }
+
+        Ok(())
     }
 
     /// Start an inbound listener using the provided stream provider and connection handler.
@@ -41,13 +66,151 @@ impl Libp2pService {
         }
 
         let provider = self.provider.as_ref().ok_or(Libp2pError::NotImplemented)?.clone();
-        let (metadata, _close, stream) = provider.listen().await?;
-        let info = MetadataConnectInfo::new(None, metadata);
+        let (tx, rx) = mpsc::channel(8);
 
-        let connected = MetaConnectedStream::new(stream, info);
-        handler.serve_with_incoming(once(Result::<_, std::io::Error>::Ok(connected)));
+        tokio::spawn(async move {
+            loop {
+                match provider.listen().await {
+                    Ok((metadata, _close, stream)) => {
+                        let info = MetadataConnectInfo::new(None, metadata);
+                        let connected = MetaConnectedStream::new(stream, info);
+                        if tx.send(Ok(connected)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Err(io::Error::new(io::ErrorKind::Other, err.to_string()))).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        let incoming_stream = ReceiverStream::new(rx);
+        handler.serve_with_incoming(incoming_stream);
 
         Ok(())
+    }
+}
+
+async fn reservation_worker(provider: Arc<dyn Libp2pStreamProvider>, reservations: Vec<String>, mut state: ReservationState) {
+    if reservations.is_empty() {
+        return;
+    }
+
+    loop {
+        let now = Instant::now();
+        refresh_reservations(provider.as_ref(), &reservations, &mut state, now).await;
+        sleep(RESERVATION_POLL_INTERVAL).await;
+    }
+}
+
+struct ReservationState {
+    backoff: ReservationManager,
+    active: HashMap<String, ActiveReservation>,
+    refresh_interval: Duration,
+}
+
+impl ReservationState {
+    fn new(backoff: ReservationManager, refresh_interval: Duration) -> Self {
+        Self { backoff, active: HashMap::new(), refresh_interval }
+    }
+}
+
+struct ActiveReservation {
+    refresh_at: Instant,
+    handle: ReservationHandle,
+}
+
+struct ReservationHandle {
+    stream: Option<BoxedLibp2pStream>,
+}
+
+impl ReservationHandle {
+    fn release(self) {
+        drop(self.stream);
+    }
+}
+
+async fn refresh_reservations(
+    provider: &dyn Libp2pStreamProvider,
+    reservations: &[String],
+    state: &mut ReservationState,
+    now: Instant,
+) {
+    for raw in reservations {
+        let parsed = match ParsedReservation::parse(raw) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                warn!("invalid reservation target {raw}: {err}");
+                state.backoff.record_failure(raw, now);
+                continue;
+            }
+        };
+
+        let key = parsed.key.clone();
+
+        let refresh_due = match state.active.get(&key) {
+            Some(active) => now >= active.refresh_at,
+            None => true,
+        };
+
+        if !refresh_due {
+            continue;
+        }
+
+        if !state.backoff.should_attempt(&key, now) {
+            continue;
+        }
+
+        if let Some(active) = state.active.remove(&key) {
+            active.handle.release();
+        }
+
+        match attempt_reservation(provider, &parsed).await {
+            Ok(handle) => {
+                state.backoff.record_success(&key);
+                let refresh_at = now + state.refresh_interval;
+                state.active.insert(key, ActiveReservation { refresh_at, handle });
+            }
+            Err(err) => {
+                warn!("libp2p reservation attempt to {raw} failed: {err}");
+                state.backoff.record_failure(&key, now);
+            }
+        }
+    }
+}
+
+async fn attempt_reservation(
+    provider: &dyn Libp2pStreamProvider,
+    target: &ParsedReservation,
+) -> Result<ReservationHandle, Libp2pError> {
+    let (metadata, stream) = provider.dial(target.net_address.clone()).await?;
+    debug!("libp2p reservation attempt to {} over path {:?} (libp2p peer {:?})", target.raw, metadata.path, metadata.libp2p_peer_id);
+    Ok(ReservationHandle { stream: Some(stream) })
+}
+
+#[derive(Clone)]
+struct ParsedReservation {
+    raw: String,
+    key: String,
+    net_address: NetAddress,
+}
+
+impl ParsedReservation {
+    fn parse(raw: &str) -> Result<Self, Libp2pError> {
+        let multiaddr: Multiaddr = Multiaddr::from_str(raw).map_err(|e| Libp2pError::Multiaddr(e.to_string()))?;
+        let (net, path) = multiaddr_to_metadata(&multiaddr);
+        let net_address = net.ok_or_else(|| Libp2pError::Multiaddr("reservation multiaddr missing IP or port".into()))?;
+        if net_address.port == 0 {
+            return Err(Libp2pError::Multiaddr("reservation multiaddr missing TCP port".into()));
+        }
+        let key = match path {
+            PathKind::Relay { relay_id: Some(id) } => id,
+            _ => raw.to_string(),
+        };
+
+        Ok(Self { raw: raw.to_string(), key, net_address })
     }
 }
 
@@ -101,11 +264,146 @@ impl AsyncWrite for MetaConnectedStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::TransportMetadata;
+    use futures_util::future::BoxFuture;
+    use libp2p::PeerId;
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::duplex;
+    use tokio::time::Duration;
 
     #[tokio::test]
     async fn start_disabled_returns_disabled() {
         let svc = Libp2pService::new(Config::default());
         let res = svc.start().await;
         assert!(matches!(res, Err(Libp2pError::Disabled)));
+    }
+
+    #[tokio::test]
+    async fn reservation_backoff_advances() {
+        let mut mgr = ReservationManager::new(Duration::from_secs(1), Duration::from_secs(4));
+        let now = Instant::now();
+        assert!(mgr.should_attempt("relay1", now));
+        mgr.record_failure("relay1", now);
+        assert!(!mgr.should_attempt("relay1", now));
+        assert!(mgr.should_attempt("relay1", now + Duration::from_secs(1)));
+    }
+
+    #[tokio::test]
+    async fn reservation_refresh_respects_backoff_and_releases() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::with_responses(
+            VecDeque::from([Err(Libp2pError::NotImplemented), Ok(make_stream(drops.clone())), Ok(make_stream(drops.clone()))]),
+            drops.clone(),
+        ));
+
+        let mut state = ReservationState::new(
+            ReservationManager::new(Duration::from_millis(50), Duration::from_millis(200)),
+            Duration::from_millis(100),
+        );
+        let relay = PeerId::random();
+        let reservations = vec![format!("/ip4/203.0.113.1/tcp/4001/p2p/{relay}")];
+
+        let now = Instant::now();
+        refresh_reservations(provider.as_ref(), &reservations, &mut state, now).await;
+        assert_eq!(provider.attempts(), 1, "first attempt should occur immediately");
+
+        refresh_reservations(provider.as_ref(), &reservations, &mut state, now + Duration::from_millis(20)).await;
+        assert_eq!(provider.attempts(), 1, "backoff should skip early retry");
+
+        refresh_reservations(provider.as_ref(), &reservations, &mut state, now + Duration::from_millis(60)).await;
+        assert_eq!(provider.attempts(), 2, "second attempt after backoff");
+        assert_eq!(state.active.len(), 1, "successful attempt should register active reservation");
+
+        refresh_reservations(provider.as_ref(), &reservations, &mut state, now + Duration::from_millis(120)).await;
+        assert_eq!(provider.attempts(), 2, "no refresh until interval passes");
+
+        refresh_reservations(provider.as_ref(), &reservations, &mut state, now + Duration::from_millis(200)).await;
+        assert_eq!(provider.attempts(), 3, "refresh after interval should re-attempt");
+        assert_eq!(drops.load(Ordering::SeqCst), 1, "old reservation should be released on refresh");
+    }
+
+    fn make_stream(drops: Arc<AtomicUsize>) -> BoxedLibp2pStream {
+        let (client, _server) = duplex(64);
+        Box::new(DropStream { inner: client, drops })
+    }
+
+    struct DropStream {
+        inner: tokio::io::DuplexStream,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for DropStream {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl AsyncRead for DropStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for DropStream {
+        fn poll_write(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        }
+    }
+
+    struct MockProvider {
+        responses: StdMutex<VecDeque<Result<BoxedLibp2pStream, Libp2pError>>>,
+        attempts: AtomicUsize,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl MockProvider {
+        fn with_responses(responses: VecDeque<Result<BoxedLibp2pStream, Libp2pError>>, drops: Arc<AtomicUsize>) -> Self {
+            Self { responses: StdMutex::new(responses), attempts: AtomicUsize::new(0), drops }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Libp2pStreamProvider for MockProvider {
+        fn dial<'a>(&'a self, _address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+            Box::pin(async move {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                let mut guard = self.responses.lock().expect("responses");
+                let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::NotImplemented));
+                match resp {
+                    Ok(stream) => Ok((TransportMetadata::default(), stream)),
+                    Err(err) => Err(err),
+                }
+            })
+        }
+
+        fn listen<'a>(
+            &'a self,
+        ) -> BoxFuture<'a, Result<(TransportMetadata, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
+            let drops = self.drops.clone();
+            Box::pin(async move {
+                let (client, _server) = duplex(64);
+                let stream: BoxedLibp2pStream = Box::new(DropStream { inner: client, drops });
+                let closer: Box<dyn FnOnce() + Send> = Box::new(|| {});
+                Ok((TransportMetadata::default(), closer, stream))
+            })
+        }
     }
 }

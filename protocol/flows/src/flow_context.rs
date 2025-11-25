@@ -210,6 +210,10 @@ pub struct FlowContextInner {
     pub node_id: PeerId,
     pub consensus_manager: Arc<ConsensusManager>,
     pub config: Arc<Config>,
+    pub libp2p_services: u64,
+    pub libp2p_relay_port: Option<u16>,
+    pub libp2p_relay_inbound_cap: Option<usize>,
+    pub libp2p_relay_inbound_unknown_cap: Option<usize>,
     hub: Hub,
     orphans_pool: AsyncRwLock<OrphanBlocksPool>,
     shared_block_requests: Arc<Mutex<HashMap<Hash, RequestScopeMetadata>>>,
@@ -311,6 +315,10 @@ impl FlowContext {
         hub: Hub,
         mining_rule_engine: Arc<MiningRuleEngine>,
         outbound_connector: Arc<dyn OutboundConnector>,
+        libp2p_services: u64,
+        libp2p_relay_port: Option<u16>,
+        libp2p_relay_inbound_cap: Option<usize>,
+        libp2p_relay_inbound_unknown_cap: Option<usize>,
     ) -> Self {
         let bps = config.bps() as usize;
         let orphan_resolution_range = BASELINE_ORPHAN_RESOLUTION_RANGE + (bps as f64).log2().ceil() as u32;
@@ -341,6 +349,10 @@ impl FlowContext {
                 config,
                 mining_rule_engine,
                 outbound_connector,
+                libp2p_services,
+                libp2p_relay_port,
+                libp2p_relay_inbound_cap,
+                libp2p_relay_inbound_unknown_cap,
             }),
         }
     }
@@ -377,6 +389,14 @@ impl FlowContext {
 
     pub fn outbound_connector(&self) -> Arc<dyn OutboundConnector> {
         self.outbound_connector.clone()
+    }
+
+    pub fn libp2p_relay_inbound_cap(&self) -> Option<usize> {
+        self.libp2p_relay_inbound_cap
+    }
+
+    pub fn libp2p_relay_inbound_unknown_cap(&self) -> Option<usize> {
+        self.libp2p_relay_inbound_unknown_cap
     }
 
     pub fn consensus(&self) -> ConsensusInstance {
@@ -730,7 +750,10 @@ impl MetadataFactory for FlowContext {
 impl ConnectionInitializer for FlowContext {
     async fn initialize_connection(&self, router: Arc<Router>) -> Result<(), ProtocolError> {
         // Build the handshake object and subscribe to handshake messages
-        let mut handshake = KaspadHandshake::new(&router);
+        let libp2p_peer = router.metadata().capabilities.libp2p || matches!(router.metadata().path, PathKind::Relay { .. });
+        let version_timeout = if libp2p_peer { Duration::from_secs(8) } else { Duration::from_secs(4) };
+        let ready_timeout = if libp2p_peer { Duration::from_secs(12) } else { Duration::from_secs(8) };
+        let mut handshake = KaspadHandshake::new(&router, version_timeout, ready_timeout);
 
         // We start the router receive loop only after we registered to handshake routes
         router.start();
@@ -743,7 +766,15 @@ impl ConnectionInitializer for FlowContext {
         // Subnets are not currently supported
         let mut self_version_message = Version::new(local_address, self.node_id, network_name.clone(), None, PROTOCOL_VERSION);
         self_version_message.add_user_agent(name(), version(), &self.config.user_agent_comments);
-        // TODO: get number of live services
+        self_version_message.services = self.libp2p_services;
+        if let Some(mut address) = self_version_message.address.take() {
+            if let Some(port) = self.libp2p_relay_port {
+                address.relay_port = Some(port);
+            }
+            address.services |= self.libp2p_services;
+            self_version_message.address = Some(address);
+        }
+        // TODO: get number of live services (non-libp2p)
         // TODO: disable_relay_tx from config/cmd
 
         // Perform the handshake

@@ -14,8 +14,10 @@ message AddressesMessage{
 
 message NetAddress{
   int64 timestamp = 1;
+  uint64 services = 2;
   bytes ip = 3;
   uint32 port = 4;
+  uint32 relayPort = 5;
 }
 
 message SubnetworkId{

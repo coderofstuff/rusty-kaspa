@@ -50,7 +50,6 @@ members = [
     "protocol/flows",
     "components/addressmanager",
     "components/connectionmanager",
-    "components/p2p-libp2p",
     "components/consensusmanager",
     "database",
     "crypto/txscript",

@@ -12,6 +12,7 @@ repository.workspace = true
 [features]
 wasm32-sdk = ["kaspa-wrpc-client/wasm32-sdk"]
 default = []
+libp2p = []
 
 [lib]
 crate-type = ["cdylib", "lib"]

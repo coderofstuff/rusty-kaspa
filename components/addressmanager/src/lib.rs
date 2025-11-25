@@ -217,7 +217,10 @@ impl AddressManager {
             let port =
                 gateway.add_any_port(igd::PortMappingProtocol::TCP, local_addr, UPNP_DEADLINE_SEC as u32, UPNP_REGISTRATION_NAME)?;
             info!("[UPnP] Added port mapping to random external port: {ip}:{port}");
-            return Ok(Some((NetAddress { ip, port }, ExtendHelper { gateway, local_addr, external_port: port })));
+            return Ok(Some((
+                NetAddress { ip, port, services: 0, relay_port: None },
+                ExtendHelper { gateway, local_addr, external_port: port },
+            )));
         }
 
         match gateway.add_port(
@@ -230,7 +233,7 @@ impl AddressManager {
             Ok(_) => {
                 info!("[UPnP] Added port mapping to default external port: {ip}:{desired_external_port}");
                 Ok(Some((
-                    NetAddress { ip, port: desired_external_port },
+                    NetAddress { ip, port: desired_external_port, services: 0, relay_port: None },
                     ExtendHelper { gateway, local_addr, external_port: desired_external_port },
                 )))
             }
@@ -242,7 +245,10 @@ impl AddressManager {
                     UPNP_REGISTRATION_NAME,
                 )?;
                 info!("[UPnP] Added port mapping to random external port: {ip}:{port}");
-                Ok(Some((NetAddress { ip, port }, ExtendHelper { gateway, local_addr, external_port: port })))
+                Ok(Some((
+                    NetAddress { ip, port, services: 0, relay_port: None },
+                    ExtendHelper { gateway, local_addr, external_port: port },
+                )))
             }
             Err(err) => Err(err.into()),
         }
@@ -265,6 +271,7 @@ impl AddressManager {
         }
 
         if self.address_store.has(address) {
+            self.address_store.merge_metadata(address);
             return;
         }
 
@@ -385,12 +392,24 @@ mod address_store_with_cache {
 
         pub fn set(&mut self, address: NetAddress, connection_failed_count: u64) {
             let entry = match self.addresses.get(&address.into()) {
-                Some(entry) => Entry { connection_failed_count, address: entry.address },
+                Some(entry) => {
+                    let mut merged_address = entry.address;
+                    merged_address.merge_metadata(&address);
+                    Entry { connection_failed_count, address: merged_address }
+                }
                 None => Entry { connection_failed_count, address },
             };
             self.db_store.set(address.into(), entry).unwrap();
             self.addresses.insert(address.into(), entry);
             self.keep_limit();
+        }
+
+        pub fn merge_metadata(&mut self, address: NetAddress) {
+            if let Some(mut entry) = self.addresses.get(&address.into()).copied() {
+                entry.address.merge_metadata(&address);
+                self.db_store.set(address.into(), entry).unwrap();
+                self.addresses.insert(address.into(), entry);
+            }
         }
 
         fn keep_limit(&mut self) {
@@ -532,6 +551,24 @@ mod address_store_with_cache {
         use kaspa_utils::networking::IpAddress;
         use rv::{dist::Uniform, misc::ks_test as one_way_ks_test, traits::Cdf};
         use std::net::{IpAddr, Ipv6Addr};
+
+        #[test]
+        fn merges_metadata_for_existing_address() {
+            let db = create_temp_db!(ConnBuilder::default().with_files_limit(1));
+            let config = Config::new(SIMNET_PARAMS);
+            let (am, _) = AddressManager::new(Arc::new(config), db.1, Arc::new(TickService::default()));
+            let mut am_guard = am.lock();
+
+            let base = NetAddress::new(IpAddress::from_str("1.2.3.4").unwrap(), 1111).with_services(0b01);
+            let updated = NetAddress::new(base.ip, base.port).with_services(0b10).with_relay_port(Some(1818));
+
+            am_guard.add_address(base);
+            am_guard.add_address(updated);
+
+            let stored = am_guard.iterate_addresses().next().unwrap();
+            assert_eq!(stored.services, 0b11);
+            assert_eq!(stored.relay_port, Some(1818));
+        }
 
         #[test]
         fn test_weighted_iterator() {

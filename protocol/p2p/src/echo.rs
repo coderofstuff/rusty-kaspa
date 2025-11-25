@@ -7,6 +7,7 @@ use crate::{
 };
 use kaspa_core::{debug, time::unix_now, trace, warn};
 use std::sync::Arc;
+use std::time::Duration;
 use tonic::async_trait;
 use uuid::Uuid;
 
@@ -118,7 +119,7 @@ impl ConnectionInitializer for EchoFlowInitializer {
         //
 
         // Build the handshake object and subscribe to handshake messages
-        let mut handshake = KaspadHandshake::new(&router);
+        let mut handshake = KaspadHandshake::new(&router, Duration::from_secs(4), Duration::from_secs(8));
 
         // We start the router receive loop only after we registered to handshake routes
         router.start();

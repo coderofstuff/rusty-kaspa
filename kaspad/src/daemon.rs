@@ -23,6 +23,8 @@ use kaspa_rpc_service::service::RpcCoreService;
 use kaspa_txscript::caches::TxScriptCacheCounters;
 use kaspa_utils::git;
 use kaspa_utils::networking::ContextualNetAddress;
+#[cfg(feature = "libp2p")]
+use kaspa_utils::networking::NET_ADDRESS_SERVICE_LIBP2P_RELAY;
 use kaspa_utils::sysinfo::SystemInfo;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
 
@@ -339,11 +341,22 @@ pub fn create_core_with_runtime(runtime: &Runtime, args: &Args, fd_total_budget:
     #[cfg(feature = "libp2p")]
     if libp2p_config.mode.is_enabled() {
         info!("libp2p mode enabled; transport is currently unimplemented and outbound connections will return NotImplemented");
+        if args.override_params_file.is_some() {
+            warn!("override-params is set; consensus overrides are unsupported in libp2p mode and may be ignored");
+        }
     }
+    #[cfg(feature = "libp2p")]
+    let (libp2p_services, libp2p_relay_port, libp2p_relay_inbound_cap, libp2p_relay_inbound_unknown_cap) = {
+        let services = if libp2p_config.mode.is_enabled() { NET_ADDRESS_SERVICE_LIBP2P_RELAY } else { 0 };
+        let relay_port = libp2p_config.helper_listen.map(|addr| addr.port());
+        (services, relay_port, libp2p_config.relay_inbound_cap, libp2p_config.relay_inbound_unknown_cap)
+    };
     #[cfg(not(feature = "libp2p"))]
     let libp2p_status: GetLibp2pStatusResponse = GetLibp2pStatusResponse::disabled();
     #[cfg(not(feature = "libp2p"))]
     let outbound_connector: Arc<dyn kaspa_p2p_lib::OutboundConnector> = Arc::new(kaspa_p2p_lib::TcpConnector);
+    #[cfg(not(feature = "libp2p"))]
+    let (libp2p_services, libp2p_relay_port, libp2p_relay_inbound_cap, libp2p_relay_inbound_unknown_cap) = (0, None, None, None);
     let db_dir = app_dir.join(network.to_prefixed()).join(DEFAULT_DATA_DIR);
 
     // Print package name and version
@@ -676,6 +689,10 @@ Do you confirm? (y/n)";
         hub.clone(),
         mining_rule_engine.clone(),
         outbound_connector.clone(),
+        libp2p_services,
+        libp2p_relay_port,
+        libp2p_relay_inbound_cap,
+        libp2p_relay_inbound_unknown_cap,
     ));
     let p2p_service = Arc::new(P2pService::new(
         flow_context.clone(),

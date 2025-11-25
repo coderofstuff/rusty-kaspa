@@ -11,7 +11,7 @@ use futures_util::future::{join_all, try_join_all};
 use itertools::Itertools;
 use kaspa_addressmanager::{AddressManager, NetAddress};
 use kaspa_core::{debug, info, warn};
-use kaspa_p2p_lib::{ConnectionError, Peer, common::ProtocolError};
+use kaspa_p2p_lib::{common::ProtocolError, ConnectionError, PathKind, Peer};
 use kaspa_utils::triggers::SingleTrigger;
 use parking_lot::Mutex as ParkingLotMutex;
 use rand::{seq::SliceRandom, thread_rng};
@@ -28,6 +28,10 @@ pub struct ConnectionManager {
     p2p_adaptor: Arc<kaspa_p2p_lib::Adaptor>,
     outbound_target: usize,
     inbound_limit: usize,
+    /// Soft cap per relay identity for inbound libp2p connections.
+    relay_inbound_cap: usize,
+    /// Soft cap for inbound libp2p connections without a parsed relay id.
+    relay_inbound_unknown_cap: usize,
     dns_seeders: &'static [&'static str],
     default_port: u16,
     address_manager: Arc<ParkingLotMutex<AddressManager>>,
@@ -54,6 +58,8 @@ impl ConnectionManager {
         p2p_adaptor: Arc<kaspa_p2p_lib::Adaptor>,
         outbound_target: usize,
         inbound_limit: usize,
+        relay_inbound_cap: Option<usize>,
+        relay_inbound_unknown_cap: Option<usize>,
         dns_seeders: &'static [&'static str],
         default_port: u16,
         address_manager: Arc<ParkingLotMutex<AddressManager>>,
@@ -63,6 +69,8 @@ impl ConnectionManager {
             p2p_adaptor,
             outbound_target,
             inbound_limit,
+            relay_inbound_cap: relay_inbound_cap.unwrap_or(4),
+            relay_inbound_unknown_cap: relay_inbound_unknown_cap.unwrap_or(8),
             address_manager,
             connection_requests: Default::default(),
             force_next_iteration: tx,
@@ -237,18 +245,88 @@ impl ConnectionManager {
     }
 
     async fn handle_inbound_connections(self: &Arc<Self>, peer_by_address: &HashMap<SocketAddr, Peer>) {
-        let active_inbound = peer_by_address.values().filter(|peer| !peer.is_outbound()).collect_vec();
-        let active_inbound_len = active_inbound.len();
-        if self.inbound_limit >= active_inbound_len {
+        let inbound: Vec<&Peer> = peer_by_address.values().filter(|peer| !peer.is_outbound()).collect();
+        let inbound_len = inbound.len();
+        if self.inbound_limit == 0 {
+            let futures = inbound.iter().map(|peer| self.p2p_adaptor.terminate(peer.key()));
+            join_all(futures).await;
+            return;
+        }
+        if self.inbound_limit >= inbound_len {
             return;
         }
 
-        let mut futures = Vec::with_capacity(active_inbound_len - self.inbound_limit);
-        for peer in active_inbound.choose_multiple(&mut thread_rng(), active_inbound_len - self.inbound_limit) {
-            debug!("Disconnecting from {} because we're above the inbound limit", peer.net_address());
-            futures.push(self.p2p_adaptor.terminate(peer.key()));
+        let mut libp2p_peers: Vec<&Peer> = inbound.iter().copied().filter(|p| Self::is_libp2p_peer(p)).collect();
+        let direct_peers: Vec<&Peer> = inbound.into_iter().filter(|p| !Self::is_libp2p_peer(p)).collect();
+
+        // Enforce per-relay buckets before global caps.
+        let to_drop_relay = Self::relay_overflow(&libp2p_peers, self.relay_inbound_cap, self.relay_inbound_unknown_cap);
+        if !to_drop_relay.is_empty() {
+            let keep: HashSet<_> = to_drop_relay.iter().map(|p| p.key()).collect();
+            Self::terminate_peers(&self.p2p_adaptor, &to_drop_relay).await;
+            libp2p_peers.retain(|p| !keep.contains(&p.key()));
         }
+
+        let libp2p_cap = (self.inbound_limit / 2).max(1);
+        if libp2p_peers.len() > libp2p_cap {
+            let drop_count = libp2p_peers.len() - libp2p_cap;
+            let to_drop = libp2p_peers.choose_multiple(&mut thread_rng(), drop_count).cloned().collect_vec();
+            Self::terminate_peers(&self.p2p_adaptor, &to_drop).await;
+            libp2p_peers.retain(|p| !to_drop.iter().any(|d| d.key() == p.key()));
+        }
+
+        let total = libp2p_peers.len() + direct_peers.len();
+        if total > self.inbound_limit {
+            let mut remaining_to_drop = total - self.inbound_limit;
+            let mut futures = Vec::new();
+
+            if remaining_to_drop > 0 && !libp2p_peers.is_empty() {
+                let drop =
+                    libp2p_peers.choose_multiple(&mut thread_rng(), remaining_to_drop.min(libp2p_peers.len())).cloned().collect_vec();
+                futures.extend(drop.iter().map(|peer| self.p2p_adaptor.terminate(peer.key())));
+                libp2p_peers.retain(|p| !drop.iter().any(|d| d.key() == p.key()));
+                remaining_to_drop = libp2p_peers.len() + direct_peers.len() - self.inbound_limit;
+            }
+
+            if remaining_to_drop > 0 {
+                let drop =
+                    direct_peers.choose_multiple(&mut thread_rng(), remaining_to_drop.min(direct_peers.len())).cloned().collect_vec();
+                futures.extend(drop.iter().map(|peer| self.p2p_adaptor.terminate(peer.key())));
+            }
+
+            join_all(futures).await;
+        }
+    }
+
+    fn is_libp2p_peer(peer: &Peer) -> bool {
+        let md = peer.metadata();
+        md.capabilities.libp2p || matches!(md.path, PathKind::Relay { .. })
+    }
+
+    async fn terminate_peers(adaptor: &kaspa_p2p_lib::Adaptor, peers: &[&Peer]) {
+        let futures = peers.iter().map(|peer| adaptor.terminate(peer.key()));
         join_all(futures).await;
+    }
+
+    fn relay_overflow<'a>(peers: &'a [&Peer], per_relay_cap: usize, unknown_cap: usize) -> Vec<&'a Peer> {
+        let mut buckets: HashMap<Option<String>, Vec<&Peer>> = HashMap::new();
+        for peer in peers {
+            let relay_id = match &peer.metadata().path {
+                PathKind::Relay { relay_id } => relay_id.clone(),
+                _ => None,
+            };
+            buckets.entry(relay_id).or_default().push(*peer);
+        }
+
+        let mut to_drop = Vec::new();
+        for (relay_id, peers) in buckets {
+            let cap = if relay_id.is_some() { per_relay_cap } else { unknown_cap };
+            if peers.len() > cap {
+                let drop = peers.choose_multiple(&mut thread_rng(), peers.len() - cap).cloned().collect_vec();
+                to_drop.extend(drop);
+            }
+        }
+        to_drop
     }
 
     /// Queries DNS seeders in random order, one after the other, until obtaining `min_addresses_to_fetch` addresses
@@ -334,5 +412,55 @@ impl ConnectionManager {
     /// Returns whether the given IP has some permanent request.
     pub async fn ip_has_permanent_connection(&self, ip: IpAddr) -> bool {
         self.connection_requests.lock().await.iter().any(|(address, request)| request.is_permanent && address.ip() == ip)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kaspa_p2p_lib::{transport::TransportMetadata, Capabilities, PathKind};
+    use std::time::Instant;
+
+    fn make_peer(relay_id: Option<&str>) -> Peer {
+        let metadata = TransportMetadata {
+            path: relay_id.map(|id| PathKind::Relay { relay_id: Some(id.to_string()) }).unwrap_or(PathKind::Unknown),
+            capabilities: Capabilities { libp2p: true },
+            ..Default::default()
+        };
+        Peer::new(
+            Uuid::new_v4().into(),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            false,
+            Instant::now(),
+            Arc::new(PeerProperties::default()),
+            0,
+            metadata,
+        )
+    }
+
+    #[test]
+    fn relay_overflow_drops_expected_counts() {
+        let r1 = vec![make_peer(Some("r1")), make_peer(Some("r1")), make_peer(Some("r1"))]; // overflow by 1 when cap=2
+        let r2 = vec![make_peer(Some("r2")), make_peer(Some("r2"))]; // fits cap
+        let unknown = vec![make_peer(None), make_peer(None)]; // overflow by 1 when cap=1
+
+        let mut all = Vec::new();
+        all.extend(r1.iter());
+        all.extend(r2.iter());
+        all.extend(unknown.iter());
+
+        let to_drop = ConnectionManager::relay_overflow(&all, 2, 1);
+        let mut counts: HashMap<Option<String>, usize> = HashMap::new();
+        for peer in to_drop {
+            let relay = match &peer.metadata().path {
+                PathKind::Relay { relay_id } => relay_id.clone(),
+                _ => None,
+            };
+            *counts.entry(relay).or_default() += 1;
+        }
+
+        assert_eq!(counts.get(&Some("r1".to_string())), Some(&1));
+        assert_eq!(counts.get(&Some("r2".to_string())), None);
+        assert_eq!(counts.get(&None), Some(&1));
     }
 }

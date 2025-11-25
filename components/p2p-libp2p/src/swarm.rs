@@ -1,12 +1,22 @@
 use crate::transport::{Libp2pError, Libp2pIdentity};
-use libp2p::core::upgrade;
+use futures_util::future;
+use libp2p::core::upgrade::{self, InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 use libp2p::noise;
 use libp2p::ping;
-use libp2p::swarm::NetworkBehaviour;
+use libp2p::swarm::behaviour::ToSwarm;
+use libp2p::swarm::handler::OneShotHandler;
+use libp2p::swarm::THandlerInEvent;
+use libp2p::swarm::{ConnectionId, NetworkBehaviour, NotifyHandler, Stream, StreamProtocol, SubstreamProtocol};
 use libp2p::tcp::tokio::Transport as TcpTransport;
 use libp2p::yamux;
-use libp2p::{identity, Swarm, Transport};
+use libp2p::{identity, swarm, Swarm, Transport};
 use log::info;
+use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
+use std::iter;
+use std::task::{Context, Poll};
+
+type BoxedTransport = libp2p::core::transport::Boxed<(libp2p::PeerId, libp2p::core::muxing::StreamMuxerBox)>;
 
 /// Minimal libp2p behaviour (Ping only) to validate swarm construction.
 #[derive(NetworkBehaviour)]
@@ -15,22 +25,75 @@ pub struct BaseBehaviour {
     pub ping: ping::Behaviour,
 }
 
-#[allow(clippy::large_enum_variant)]
+#[allow(dead_code)]
 pub enum PingEvent {
-    Ping(ping::Event),
+    Ping,
 }
 
 impl From<ping::Event> for PingEvent {
-    fn from(event: ping::Event) -> Self {
-        PingEvent::Ping(event)
+    fn from(_: ping::Event) -> Self {
+        PingEvent::Ping
     }
 }
 
 /// Build a baseline libp2p swarm (TCP + Noise + Yamux + Ping).
 pub fn build_base_swarm(identity: &Libp2pIdentity) -> Result<Swarm<BaseBehaviour>, Libp2pError> {
-    let local_key: identity::Keypair = identity.keypair.clone();
     let peer_id = identity.peer_id;
+    let (transport, cfg) = build_transport(identity)?;
 
+    info!("libp2p base swarm peer id: {}", peer_id);
+
+    Ok(Swarm::new(transport, BaseBehaviour { ping: ping::Behaviour::default() }, peer_id, cfg))
+}
+
+/// Libp2p behaviour that includes ping and a raw stream channel for kaspad.
+#[derive(NetworkBehaviour)]
+#[behaviour(to_swarm = "Libp2pEvent")]
+pub(crate) struct Libp2pBehaviour {
+    pub ping: ping::Behaviour,
+    pub streams: StreamBehaviour,
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum Libp2pEvent {
+    Ping(PingEvent),
+    Stream(StreamEvent),
+}
+
+impl From<PingEvent> for Libp2pEvent {
+    fn from(event: PingEvent) -> Self {
+        Libp2pEvent::Ping(event)
+    }
+}
+
+impl From<ping::Event> for Libp2pEvent {
+    fn from(event: ping::Event) -> Self {
+        Libp2pEvent::Ping(PingEvent::from(event))
+    }
+}
+
+impl From<StreamEvent> for Libp2pEvent {
+    fn from(event: StreamEvent) -> Self {
+        Libp2pEvent::Stream(event)
+    }
+}
+
+/// Build a libp2p swarm with ping + raw stream support.
+pub(crate) fn build_streaming_swarm(
+    identity: &Libp2pIdentity,
+    protocol: StreamProtocol,
+) -> Result<Swarm<Libp2pBehaviour>, Libp2pError> {
+    let peer_id = identity.peer_id;
+    let (transport, cfg) = build_transport(identity)?;
+
+    info!("libp2p streaming swarm peer id: {}", peer_id);
+
+    let behaviour = Libp2pBehaviour { ping: ping::Behaviour::default(), streams: StreamBehaviour::new(protocol) };
+    Ok(Swarm::new(transport, behaviour, peer_id, cfg))
+}
+
+fn build_transport(identity: &Libp2pIdentity) -> Result<(BoxedTransport, swarm::Config), Libp2pError> {
+    let local_key: identity::Keypair = identity.keypair.clone();
     let noise_keys = noise::Config::new(&local_key).map_err(|e| Libp2pError::Identity(e.to_string()))?;
 
     let transport = TcpTransport::new(libp2p::tcp::Config::default().nodelay(true))
@@ -39,10 +102,204 @@ pub fn build_base_swarm(identity: &Libp2pIdentity) -> Result<Swarm<BaseBehaviour
         .multiplex(yamux::Config::default())
         .boxed();
 
-    info!("libp2p base swarm peer id: {}", peer_id);
-
     let cfg = libp2p::swarm::Config::with_tokio_executor();
-    Ok(Swarm::new(transport, BaseBehaviour { ping: ping::Behaviour::default() }, peer_id, cfg))
+    Ok((transport, cfg))
+}
+
+/// Unique identifier used to correlate outbound stream requests.
+pub(crate) type StreamRequestId = ConnectionId;
+
+/// Event emitted by the stream behaviour when a substream is negotiated.
+#[derive(Debug)]
+pub(crate) enum StreamEvent {
+    Inbound {
+        peer_id: libp2p::PeerId,
+        _connection_id: ConnectionId,
+        endpoint: libp2p::core::ConnectedPoint,
+        stream: Stream,
+    },
+    Outbound {
+        peer_id: libp2p::PeerId,
+        _connection_id: ConnectionId,
+        request_id: StreamRequestId,
+        endpoint: libp2p::core::ConnectedPoint,
+        stream: Stream,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct StreamBehaviour {
+    protocol: StreamProtocol,
+    pending_events: VecDeque<StreamEvent>,
+    pending_requests: VecDeque<StreamBehaviourAction>,
+    connections: HashMap<ConnectionId, libp2p::core::ConnectedPoint>,
+}
+
+#[derive(Debug)]
+struct StreamBehaviourAction {
+    peer_id: libp2p::PeerId,
+    connection_id: ConnectionId,
+    request_id: StreamRequestId,
+}
+
+impl StreamBehaviour {
+    pub fn new(protocol: StreamProtocol) -> Self {
+        Self { protocol, pending_events: VecDeque::new(), pending_requests: VecDeque::new(), connections: HashMap::new() }
+    }
+
+    pub fn request_stream(&mut self, peer_id: libp2p::PeerId, connection_id: ConnectionId, request_id: StreamRequestId) {
+        self.pending_requests.push_back(StreamBehaviourAction { peer_id, connection_id, request_id });
+    }
+
+    fn new_handler(&self) -> StreamHandler {
+        let inbound = StreamInboundUpgrade { protocol: self.protocol.clone() };
+        OneShotHandler::new(SubstreamProtocol::new(inbound, ()), Default::default())
+    }
+}
+
+impl NetworkBehaviour for StreamBehaviour {
+    type ConnectionHandler = StreamHandler;
+    type ToSwarm = StreamEvent;
+
+    fn handle_established_inbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        _peer: libp2p::PeerId,
+        local_addr: &libp2p::Multiaddr,
+        remote_addr: &libp2p::Multiaddr,
+    ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
+        let handler = self.new_handler();
+        self.connections.insert(
+            connection_id,
+            libp2p::core::ConnectedPoint::Listener { local_addr: local_addr.clone(), send_back_addr: remote_addr.clone() },
+        );
+        Ok(handler)
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        _peer: libp2p::PeerId,
+        addr: &libp2p::Multiaddr,
+        role_override: libp2p::core::Endpoint,
+    ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
+        let handler = self.new_handler();
+        let endpoint = libp2p::core::ConnectedPoint::Dialer { address: addr.clone(), role_override };
+        self.connections.insert(connection_id, endpoint);
+        Ok(handler)
+    }
+
+    fn on_swarm_event(&mut self, event: swarm::behaviour::FromSwarm<Self::ConnectionHandler>) {
+        match event {
+            swarm::behaviour::FromSwarm::ConnectionEstablished(event) => {
+                self.connections.insert(event.connection_id, event.endpoint.clone());
+            }
+            swarm::behaviour::FromSwarm::AddressChange(event) => {
+                self.connections.insert(event.connection_id, event.new.clone());
+            }
+            swarm::behaviour::FromSwarm::ConnectionClosed(event) => {
+                self.connections.remove(&event.connection_id);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_connection_handler_event(&mut self, peer_id: libp2p::PeerId, connection_id: ConnectionId, event: StreamHandlerEvent) {
+        let Some(endpoint) = self.connections.get(&connection_id).cloned() else { return };
+
+        match event {
+            StreamHandlerEvent::Inbound(stream) => {
+                self.pending_events.push_back(StreamEvent::Inbound { peer_id, _connection_id: connection_id, endpoint, stream });
+            }
+            StreamHandlerEvent::Outbound { request_id, stream } => {
+                self.pending_events.push_back(StreamEvent::Outbound {
+                    peer_id,
+                    _connection_id: connection_id,
+                    request_id,
+                    endpoint,
+                    stream,
+                });
+            }
+        }
+    }
+
+    fn poll(
+        &mut self,
+        _cx: &mut Context<'_>,
+        _params: &mut impl swarm::PollParameters,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Poll::Ready(ToSwarm::GenerateEvent(event));
+        }
+
+        if let Some(req) = self.pending_requests.pop_front() {
+            let upgrade = StreamOutboundUpgrade { protocol: self.protocol.clone(), request_id: req.request_id };
+            return Poll::Ready(ToSwarm::NotifyHandler {
+                peer_id: req.peer_id,
+                handler: NotifyHandler::One(req.connection_id),
+                event: upgrade,
+            });
+        }
+
+        Poll::Pending
+    }
+}
+
+pub(crate) type StreamHandler = OneShotHandler<StreamInboundUpgrade, StreamOutboundUpgrade, StreamHandlerEvent>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct StreamInboundUpgrade {
+    protocol: StreamProtocol,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StreamOutboundUpgrade {
+    protocol: StreamProtocol,
+    request_id: StreamRequestId,
+}
+
+#[derive(Debug)]
+pub(crate) enum StreamHandlerEvent {
+    Inbound(Stream),
+    Outbound { request_id: StreamRequestId, stream: Stream },
+}
+
+impl UpgradeInfo for StreamInboundUpgrade {
+    type Info = StreamProtocol;
+    type InfoIter = iter::Once<StreamProtocol>;
+
+    fn protocol_info(&self) -> Self::InfoIter {
+        iter::once(self.protocol.clone())
+    }
+}
+
+impl UpgradeInfo for StreamOutboundUpgrade {
+    type Info = StreamProtocol;
+    type InfoIter = iter::Once<StreamProtocol>;
+
+    fn protocol_info(&self) -> Self::InfoIter {
+        iter::once(self.protocol.clone())
+    }
+}
+
+impl InboundUpgrade<Stream> for StreamInboundUpgrade {
+    type Output = StreamHandlerEvent;
+    type Error = Infallible;
+    type Future = future::Ready<Result<Self::Output, Self::Error>>;
+
+    fn upgrade_inbound(self, stream: Stream, _: Self::Info) -> Self::Future {
+        future::ready(Ok(StreamHandlerEvent::Inbound(stream)))
+    }
+}
+
+impl OutboundUpgrade<Stream> for StreamOutboundUpgrade {
+    type Output = StreamHandlerEvent;
+    type Error = Infallible;
+    type Future = future::Ready<Result<Self::Output, Self::Error>>;
+
+    fn upgrade_outbound(self, stream: Stream, _: Self::Info) -> Self::Future {
+        future::ready(Ok(StreamHandlerEvent::Outbound { request_id: self.request_id, stream }))
+    }
 }
 
 #[cfg(test)]

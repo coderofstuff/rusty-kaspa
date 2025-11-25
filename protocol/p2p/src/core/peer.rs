@@ -1,3 +1,4 @@
+use crate::transport::TransportMetadata;
 use kaspa_consensus_core::subnets::SubnetworkId;
 use kaspa_utils::networking::{IpAddress, PeerId};
 use std::{fmt::Display, net::SocketAddr, sync::Arc, time::Instant};
@@ -21,6 +22,7 @@ pub struct Peer {
     connection_started: Instant,
     properties: Arc<PeerProperties>,
     last_ping_duration: u64,
+    metadata: TransportMetadata,
 }
 
 impl Peer {
@@ -31,8 +33,9 @@ impl Peer {
         connection_started: Instant,
         properties: Arc<PeerProperties>,
         last_ping_duration: u64,
+        metadata: TransportMetadata,
     ) -> Self {
-        Self { identity, net_address, is_outbound, connection_started, properties, last_ping_duration }
+        Self { identity, net_address, is_outbound, connection_started, properties, last_ping_duration, metadata }
     }
 
     /// Internal identity of this peer
@@ -64,6 +67,10 @@ impl Peer {
 
     pub fn last_ping_duration(&self) -> u64 {
         self.last_ping_duration
+    }
+
+    pub fn metadata(&self) -> &TransportMetadata {
+        &self.metadata
     }
 }
 

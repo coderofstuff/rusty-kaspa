@@ -464,6 +464,8 @@ where
 mod tests {
     use super::*;
     use crate::core::{adaptor::Adaptor, hub::Hub};
+    use crate::handshake::KaspadHandshake;
+    use crate::pb::VersionMessage;
     use crate::transport::Capabilities;
     use crate::{DirectMetadataFactory, PathKind};
     use kaspa_utils::networking::PeerId;
@@ -481,6 +483,34 @@ mod tests {
     impl ConnectionInitializer for TestInitializer {
         async fn initialize_connection(&self, router: Arc<Router>) -> Result<(), ProtocolError> {
             router.set_identity(PeerId::new(Uuid::new_v4()));
+            router.start();
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct TimeoutHandshakeInitializer {
+        version_timeout: std::time::Duration,
+        ready_timeout: std::time::Duration,
+    }
+
+    #[tonic::async_trait]
+    impl ConnectionInitializer for TimeoutHandshakeInitializer {
+        async fn initialize_connection(&self, router: Arc<Router>) -> Result<(), ProtocolError> {
+            let mut handshake = KaspadHandshake::new(&router, self.version_timeout, self.ready_timeout);
+            router.start();
+            let self_version_message = build_test_version_message();
+            handshake.handshake(self_version_message).await?;
+            handshake.exchange_ready_messages().await
+        }
+    }
+
+    #[derive(Clone)]
+    struct SilentInitializer;
+
+    #[tonic::async_trait]
+    impl ConnectionInitializer for SilentInitializer {
+        async fn initialize_connection(&self, router: Arc<Router>) -> Result<(), ProtocolError> {
             router.start();
             Ok(())
         }
@@ -646,5 +676,81 @@ mod tests {
         assert_eq!(router.metadata().libp2p_peer_id.as_deref(), Some("peer-meta-test"));
 
         router.close().await;
+    }
+
+    fn build_test_version_message() -> VersionMessage {
+        VersionMessage {
+            protocol_version: 5,
+            services: 0,
+            timestamp: kaspa_core::time::unix_now() as i64,
+            address: None,
+            id: Vec::from(Uuid::new_v4().as_bytes()),
+            user_agent: String::new(),
+            disable_relay_tx: false,
+            subnetwork_id: None,
+            network: "kaspa-mainnet".to_string(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handshake_times_out_when_peer_silent() {
+        kaspa_core::log::try_init_logger("info");
+
+        let client_initializer = Arc::new(TimeoutHandshakeInitializer {
+            version_timeout: std::time::Duration::from_millis(100),
+            ready_timeout: std::time::Duration::from_millis(100),
+        });
+        let server_initializer = Arc::new(SilentInitializer);
+
+        let counters = Arc::new(TowerConnectionCounters::default());
+
+        let server_hub = Hub::new();
+        let (server_tx, server_rx) = mpsc::channel(Adaptor::hub_channel_size());
+        server_hub.clone().start_event_loop(server_rx, server_initializer.clone());
+        let server_handler = ConnectionHandler::new(
+            server_tx,
+            server_initializer.clone(),
+            counters.clone(),
+            Arc::new(DirectMetadataFactory::default()),
+            Arc::new(TcpConnector),
+        );
+
+        let client_hub = Hub::new();
+        let (client_tx, client_rx) = mpsc::channel(Adaptor::hub_channel_size());
+        client_hub.clone().start_event_loop(client_rx, client_initializer.clone());
+        let client_handler = ConnectionHandler::new(
+            client_tx,
+            client_initializer,
+            counters,
+            Arc::new(DirectMetadataFactory::default()),
+            Arc::new(TcpConnector),
+        );
+
+        let (client_half, server_half) = duplex(8 * 1024);
+        let metadata = TransportMetadata {
+            libp2p_peer_id: Some("handshake-timeout-peer".to_string()),
+            peer_id: None,
+            reported_ip: None,
+            path: PathKind::Direct,
+            capabilities: Capabilities::default(),
+        };
+        let info = MetadataConnectInfo::new(None, metadata.clone());
+
+        let (incoming_tx, incoming_rx) = mpsc::channel(1);
+        incoming_tx.send(MetaServerIo::new(server_half, info)).await.expect("send server stream");
+        drop(incoming_tx);
+        let incoming_stream = ReceiverStream::new(incoming_rx).map(|io| Ok::<_, std::io::Error>(io));
+        server_handler.serve_with_incoming(incoming_stream);
+
+        let start = std::time::Instant::now();
+        let res = client_handler.connect_with_stream(client_half, metadata).await;
+        let elapsed = start.elapsed();
+        let err = res.expect_err("handshake should fail fast");
+        match err {
+            ConnectionError::ProtocolError(ProtocolError::Timeout(_))
+            | ConnectionError::ProtocolError(ProtocolError::ConnectionClosed) => {}
+            other => panic!("expected timeout/close, got {other:?}"),
+        }
+        assert!(elapsed < std::time::Duration::from_secs(1), "handshake timeout should fire quickly (elapsed: {:?})", elapsed);
     }
 }

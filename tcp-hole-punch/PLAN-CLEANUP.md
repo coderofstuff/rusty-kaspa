@@ -90,7 +90,7 @@ If you believe a change in one of these directories is absolutely required, you 
 
 3. **Adapter / Injection Boundary**
 
-   - [ ] Create `components/p2p-libp2p` (feature-gated) owning: libp2p spawn/dial/listen/reserve, helper JSON API, H2 tuning, multiaddr parsing, synthetic addressing, reservation refresh/backoff.
+   - [x] Create `components/p2p-libp2p` (feature-gated) owning: libp2p spawn/dial/listen/reserve, helper JSON API, H2 tuning, multiaddr parsing, synthetic addressing, reservation refresh/backoff.
    - [x] Add libp2p service skeleton to host dial/listen/reservation start-up (currently stubbed/unimplemented).
    - [x] Structure adapter crate into submodules (e.g., `helper_api`, `reservations`, `transport`, `metadata`) to avoid a god module.
    - [x] Make `ConnectionHandler` transport-agnostic: accept `AsyncRead/AsyncWrite` + metadata. Metadata separates identity (PeerId/IP), path (relay/origin), capabilities—document this boundary.
@@ -100,35 +100,35 @@ If you believe a change in one of these directories is absolutely required, you 
    - [x] Allow inbound connections to provide precomputed transport metadata (for libp2p streams) via connect info, with synthetic addressing fallback.
    - [x] Stub libp2p service/provider listen bridge using tonic `Connected` metadata; full libp2p dial/listen to be implemented on this seam.
    - [x] Libp2p identity loader (ephemeral or persisted key) and runtime hook for outbound connector/status reporting; placeholder provider now carries peer_id/libp2p capability.
-   - [ ] Implement swarm-based `Libp2pStreamProvider` (dial/listen) and wire into libp2p service/runtime; populate real metadata.
+   - [x] Implement swarm-based `Libp2pStreamProvider` (dial/listen) and wire into libp2p service/runtime; populate real metadata.
 
 4. **Protocol / Metadata**
 
-   - [ ] No protocol version bump. Signal libp2p/DCUtR via service/capability flag + `relay_port`; ensure v8 peers ignore safely.
-   - [ ] NetAddress: keep IP:port equality/hash; on re-add merge services (bitwise OR) and upgrade `relay_port` if provided. Migration (if any) has a version marker, rewrites idempotently, and logs once.
-   - [ ] Proper multiaddr parsing for relay IDs; malformed/unknown go to an `unknown` bucket (still limited). Guarantee: no connection bypasses accounting.
+   - [x] No protocol version bump. Signal libp2p/DCUtR via service/capability flag + `relay_port`; ensure v8 peers ignore safely.
+   - [x] NetAddress: keep IP:port equality/hash; on re-add merge services (bitwise OR) and upgrade `relay_port` if provided. Migration (if any) has a version marker, rewrites idempotently, and logs once.
+   - [x] Proper multiaddr parsing for relay IDs; malformed/unknown go to an `unknown` bucket (still limited). Guarantee: no connection bypasses accounting.
 
 5. **Behaviour & Limits**
 
-   - [ ] Split inbound budgets: TCP inbound vs libp2p inbound; private-node heuristics only affect libp2p pool.
-   - [ ] Per-relay limits: bucket by parsed relay ID; unknown bucket exists; predictable drop policy (documented LRU or similar). Consider a global hard cap as a maximum safeguard.
-   - [ ] Reservation refresh releases old reservations and uses backoff on failure to avoid relay spam.
-   - [ ] Handshake timeout configurable; raise default for relay/DCUtR (e.g., 5–10s) with an overall deadline to avoid zombie connections.
+   - [x] Split inbound budgets: TCP inbound vs libp2p inbound; private-node heuristics only affect libp2p pool.
+   - [x] Per-relay limits: bucket by parsed relay ID; unknown bucket exists; predictable drop policy (documented LRU or similar). Consider a global hard cap as a maximum safeguard.
+   - [x] Reservation refresh releases old reservations and uses backoff on failure to avoid relay spam.
+   - [x] Handshake timeout configurable; raise default for relay/DCUtR (e.g., 5–10s) with an overall deadline to avoid zombie connections.
 
 6. **Config Surface**
 
-   - [ ] Central libp2p config builder: ports, helper addr, reservations, external addrs, advertised IPs, role. CLI/env parsing here; daemon consumes.
-   - [ ] Restore env-var support for key flags (ports, identity path, helper, mode, reservations, inbound caps).
-   - [ ] Decide `override-params`: restore or explicit deprecation with clear error message.
-   - [ ] Layered approach: CLI/env → plain struct → libp2p config; consistent env naming (e.g., `KASPAD_LIBP2P_*`); document precedence (CLI > env > file > default).
+   - [x] Central libp2p config builder: ports, helper addr, reservations, external addrs, advertised IPs, role. CLI/env parsing here; daemon consumes.
+   - [x] Restore env-var support for key flags (ports, identity path, helper, mode, reservations, inbound caps).
+   - [x] Decide `override-params`: restore or explicit deprecation with clear error message.
+   - [x] Layered approach: CLI/env → plain struct → libp2p config; consistent env naming (e.g., `KASPAD_LIBP2P_*`); document precedence (CLI > env > file > default).
 
 7. **Testing (add during each step)**
 
-   - [ ] Unit/property: NetAddress metadata merge semantics.
-   - [ ] Helper JSON API: valid/malformed requests; reservation refresh/backoff; error paths.
-   - [ ] Per-relay limits incl. malformed multiaddrs; `unknown` bucket enforced.
-   - [ ] Synthetic address stability across relays.
-   - [ ] Handshake timeout behaviour (slow path terminates within configured window).
+   - [x] Unit/property: NetAddress metadata merge semantics.
+   - [x] Helper JSON API: valid/malformed requests; reservation refresh/backoff; error paths.
+   - [x] Per-relay limits incl. malformed multiaddrs; `unknown` bucket enforced.
+   - [x] Synthetic address stability across relays.
+   - [x] Handshake timeout behaviour (slow path terminates within configured window).
    - [ ] IBD/RPC gating tests that **match `upstream/master` behaviour** (early IBD rejects, post-IBD accepts for template/submit/UTXO, etc.) – logic unchanged, just codified.
    - [ ] Mixed v8/v9 interop with relay metadata.
    - [ ] DCUtR/helper harness behind a feature (kept for review/repro).
@@ -136,17 +136,17 @@ If you believe a change in one of these directories is absolutely required, you 
 
 8. **Docs / UX**
 
-   - [ ] Feature matrix: modes (off/helper/full), what runs, ports, identity behaviour, inbound caps, how to disable entirely (compile-time + runtime).
-   - [ ] Privacy note on identity persistence vs ephemeral.
-   - [ ] Operational expectations for public vs private nodes; how to opt into stable IDs and helper control.
-   - [ ] Examples: plain TCP public node (libp2p off); private relay with ephemeral ID; public relay with persistent ID.
-   - [ ] Explicit “disable libp2p” instructions: build (`--no-default-features`/no libp2p members) and run (`mode=off`, no helper control).
+   - [x] Feature matrix: modes (off/helper/full), what runs, ports, identity behaviour, inbound caps, how to disable entirely (compile-time + runtime).
+   - [x] Privacy note on identity persistence vs ephemeral.
+   - [x] Operational expectations for public vs private nodes; how to opt into stable IDs and helper control.
+   - [x] Examples: plain TCP public node (libp2p off); private relay with ephemeral ID; public relay with persistent ID.
+   - [x] Explicit “disable libp2p” instructions: build (`--no-default-features`/no libp2p members) and run (`mode=off`, no helper control).
 
 9. **CI / Workspace Hygiene**
 
-   - [ ] Add CI job for `--no-default-features` to ensure non-libp2p build stays healthy.
-   - [ ] Ensure libp2p crates are opt-in via features/default-members.
-   - [ ] Add CI job with libp2p/all-features enabled so tests run in that mode. Optional: check default build’s dependency tree excludes libp2p.
+   - [x] Add CI job for `--no-default-features` to ensure non-libp2p build stays healthy.
+   - [x] Ensure libp2p crates are opt-in via features/default-members.
+   - [x] Add CI job with libp2p/all-features enabled so tests run in that mode. Optional: check default build’s dependency tree excludes libp2p.
 
 ## Notes for New Engineers
 

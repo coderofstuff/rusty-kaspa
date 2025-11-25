@@ -32,6 +32,13 @@ use workflow_wasm::callback;
 use workflow_wasm::extensions::ObjectExtension;
 pub use workflow_wasm::serde::to_value;
 
+// When libp2p is not compiled in, provide dummy request/response types so the
+// generated interface still compiles under `--no-default-features`.
+#[cfg(not(feature = "libp2p"))]
+type IGetLibp2pStatusRequest = ();
+#[cfg(not(feature = "libp2p"))]
+type IGetLibp2pStatusResponse = ();
+
 declare! {
     IRpcConfig,
     r#"
@@ -915,6 +922,7 @@ build_wrpc_wasm_bindgen_subscriptions!([
 // do not have arguments and the second one is for
 // functions that have a single argument (request).
 
+#[cfg(feature = "libp2p")]
 build_wrpc_wasm_bindgen_interface!(
     [
         // functions with optional arguments
@@ -1064,5 +1072,54 @@ build_wrpc_wasm_bindgen_interface!(
         /// Returned information: Virtual chain information. (Version 2)
         /// May be used to get fully populated transactions
         GetVirtualChainFromBlockV2
+    ]
+);
+
+#[cfg(not(feature = "libp2p"))]
+build_wrpc_wasm_bindgen_interface!(
+    [
+        // functions with optional arguments
+        GetBlockCount,
+        GetBlockDagInfo,
+        GetCoinSupply,
+        GetConnectedPeerInfo,
+        GetInfo,
+        GetPeerAddresses,
+        GetMetrics,
+        GetConnections,
+        GetSink,
+        GetSinkBlueScore,
+        Ping,
+        Shutdown,
+        GetServerInfo,
+        GetSyncStatus,
+        GetFeeEstimate,
+        GetCurrentNetwork,
+    ],
+    [
+        AddPeer,
+        Ban,
+        EstimateNetworkHashesPerSecond,
+        GetBalanceByAddress,
+        GetBalancesByAddresses,
+        GetBlock,
+        GetBlocks,
+        GetBlockTemplate,
+        GetCurrentBlockColor,
+        GetDaaScoreTimestampEstimate,
+        GetFeeEstimateExperimental,
+        GetHeaders,
+        GetMempoolEntries,
+        GetMempoolEntriesByAddresses,
+        GetMempoolEntry,
+        GetSubnetwork,
+        GetUtxosByAddresses,
+        GetVirtualChainFromBlock,
+        ResolveFinalityConflict,
+        SubmitBlock,
+        SubmitTransaction,
+        SubmitTransactionReplacement,
+        Unban,
+        GetUtxoReturnAddress
     ]
 );

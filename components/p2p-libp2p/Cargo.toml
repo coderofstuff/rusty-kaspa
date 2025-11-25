@@ -11,8 +11,9 @@ repository.workspace = true
 
 [dependencies]
 kaspa-utils.workspace = true
-serde = { workspace = true, features = ["derive"], optional = true }
-serde_with = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_with = { workspace = true }
+serde_json = { workspace = true }
 kaspa-p2p-lib.workspace = true
 futures-util = { workspace = true, default-features = false, features = ["alloc"] }
 thiserror.workspace = true
@@ -21,11 +22,11 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
 libp2p = { version = "0.52.4", default-features = false, features = ["tokio", "tcp", "dns", "noise", "yamux", "macros", "ping"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 tempfile = "3.12.0"
 
 [features]
 default = []
-serde = ["dep:serde", "serde_with"]
 
 [dev-dependencies]
 futures = { workspace = true }

@@ -166,6 +166,7 @@ impl From<&Router> for Peer {
             router.connection_started,
             router.properties(),
             router.last_ping_duration(),
+            router.metadata.clone(),
         )
     }
 }
