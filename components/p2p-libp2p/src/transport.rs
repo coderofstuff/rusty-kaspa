@@ -178,6 +178,8 @@ impl Libp2pStreamProvider for PlaceholderStreamProvider {
             if !enabled {
                 return Err(Libp2pError::Disabled);
             }
+            let mut md = TransportMetadata::default();
+            md.capabilities.libp2p = true;
             Err(Libp2pError::NotImplemented)
         })
     }
@@ -188,6 +190,8 @@ impl Libp2pStreamProvider for PlaceholderStreamProvider {
             if !enabled {
                 return Err(Libp2pError::Disabled);
             }
+            let mut md = TransportMetadata::default();
+            md.capabilities.libp2p = true;
             Err(Libp2pError::NotImplemented)
         })
     }

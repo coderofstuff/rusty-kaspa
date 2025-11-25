@@ -26,6 +26,11 @@ impl Libp2pService {
             return Err(Libp2pError::Disabled);
         }
 
+        if self.provider.is_none() {
+            return Err(Libp2pError::NotImplemented);
+        }
+
+        // In a full implementation, this would spawn dial/listen/reservation loops.
         Err(Libp2pError::NotImplemented)
     }
 
