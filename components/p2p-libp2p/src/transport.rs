@@ -66,6 +66,11 @@ impl OutboundConnector for Libp2pOutboundConnector {
         let mut metadata = metadata;
         metadata.capabilities.libp2p = true;
         metadata.path = kaspa_p2p_lib::PathKind::Unknown;
+        if !self.config.mode.is_enabled() {
+            return self.fallback.connect(address, metadata, handler);
+        }
+
+        // TODO: implement libp2p dial here.
         self.fallback.connect(address, metadata, handler)
     }
 }
