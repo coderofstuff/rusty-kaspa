@@ -84,7 +84,7 @@ If you believe a change in one of these directories is absolutely required, you 
 
    - [x] Add `libp2p` feature flag (off by default); guard all libp2p/bridge/helper code with `#[cfg(feature = "libp2p")]`.
    - [x] Remove libp2p crates from default workspace members so the default build has no libp2p dependency.
-   - [x] Runtime modes: `off`, `full`; `helper-only` may exist as alias to `full` until a real need. Helper control port requires explicit flag (no default bind).
+t as alias to `full` until a real need. Helper control port requires explicit flag (no default bind).
    - [x] Default identity ephemeral (in-memory). Provide a single canonical flag (e.g., `--libp2p-identity-path`; alias optional) as the only way to persist.
    - [x] Expose current PeerId in `getLibpStatus` plus whether it is ephemeral or persisted (and path if persisted); document privacy trade-offs.
 
@@ -132,7 +132,7 @@ If you believe a change in one of these directories is absolutely required, you 
    - [ ] IBD/RPC gating tests that **match `upstream/master` behaviour** (early IBD rejects, post-IBD accepts for template/submit/UTXO, etc.) – logic unchanged, just codified.
    - [ ] Mixed v8/v9 interop with relay metadata.
    - [ ] DCUtR/helper harness behind a feature (kept for review/repro).
-   - [ ] Multiaddr robustness: malformed inputs do not panic and end up accounted in `unknown` bucket.
+   - [x] Multiaddr robustness: malformed inputs do not panic and end up accounted in `unknown` bucket.
 
 8. **Docs / UX**
 

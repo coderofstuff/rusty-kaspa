@@ -167,6 +167,32 @@ mod tests {
         assert!(net.is_none());
         assert!(matches!(path, kaspa_p2p_lib::PathKind::Relay { relay_id: None }));
     }
+
+    #[test]
+    fn multiaddr_relay_without_tcp_port_defaults_to_zero() {
+        let relay = PeerId::random();
+        let addr: Multiaddr = format!("/p2p/{relay}/p2p-circuit/ip4/10.0.0.1").parse().unwrap();
+        let (net, path) = multiaddr_to_metadata(&addr);
+
+        let net = net.expect("ip should be captured even without tcp port");
+        assert_eq!(net.port, 0, "missing tcp component should default port to 0");
+        match path {
+            kaspa_p2p_lib::PathKind::Relay { relay_id } => assert_eq!(relay_id.as_deref(), Some(relay.to_string().as_str())),
+            other => panic!("expected relay path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multiaddr_circuit_without_ip_keeps_relay_bucket() {
+        let relay = PeerId::random();
+        let addr: Multiaddr = format!("/p2p/{relay}/p2p-circuit").parse().unwrap();
+        let (net, path) = multiaddr_to_metadata(&addr);
+        assert!(net.is_none());
+        match path {
+            kaspa_p2p_lib::PathKind::Relay { relay_id } => assert_eq!(relay_id.as_deref(), Some(relay.to_string().as_str())),
+            other => panic!("expected relay path, got {other:?}"),
+        }
+    }
 }
 
 /// Outbound connector that prefers libp2p when enabled, otherwise falls back to TCP.
