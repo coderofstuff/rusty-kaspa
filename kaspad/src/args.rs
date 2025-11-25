@@ -574,6 +574,11 @@ impl Args {
                     .get_one::<SocketAddr>("libp2p-helper-listen")
                     .copied()
                     .or(defaults.libp2p.libp2p_helper_listen),
+                libp2p_relay_inbound_cap: defaults.libp2p.libp2p_relay_inbound_cap,
+                libp2p_relay_inbound_unknown_cap: defaults.libp2p.libp2p_relay_inbound_unknown_cap,
+                libp2p_reservations: defaults.libp2p.libp2p_reservations,
+                libp2p_external_multiaddrs: defaults.libp2p.libp2p_external_multiaddrs,
+                libp2p_advertise_addresses: defaults.libp2p.libp2p_advertise_addresses,
             },
 
             #[cfg(feature = "devnet-prealloc")]

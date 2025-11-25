@@ -8,7 +8,7 @@ use kaspa_consensus_core::{
     mining_rules::MiningRules,
 };
 use kaspa_consensus_notify::{root::ConsensusNotificationRoot, service::NotifyService};
-use kaspa_core::{core::Core, debug, info};
+use kaspa_core::{core::Core, debug, info, trace, warn};
 use kaspa_core::{kaspad_env::version, task::tick::TickService};
 use kaspa_database::{
     prelude::{CachePolicy, DbWriter, DirectDbWriter, RocksDbPreset},
@@ -49,6 +49,7 @@ use kaspa_mining::{
 };
 use kaspa_p2p_flows::{flow_context::FlowContext, service::P2pService};
 
+use itertools::Itertools;
 use kaspa_perf_monitor::{builder::Builder as PerfMonitorBuilder, counters::CountersSnapshot};
 use kaspa_utxoindex::{UtxoIndex, api::UtxoIndexProxy};
 use kaspa_wrpc_server::service::{Options as WrpcServerOptions, WebSocketCounters as WrpcServerCounters, WrpcEncoding, WrpcService};
@@ -667,8 +668,13 @@ Do you confirm? (y/n)";
         config.block_template_cache_lifetime,
         mining_counters.clone(),
     )));
-    let mining_monitor =
-        Arc::new(MiningMonitor::new(mining_manager.clone(), mining_counters, tx_script_cache_counters.clone(), tick_service.clone()));
+    let mining_monitor = Arc::new(MiningMonitor::new(
+        mining_manager.clone(),
+        consensus_manager.clone(),
+        mining_counters,
+        tx_script_cache_counters.clone(),
+        tick_service.clone(),
+    ));
 
     let hub = Hub::new();
     let mining_rule_engine = Arc::new(MiningRuleEngine::new(

@@ -1,6 +1,5 @@
 use clap::ValueEnum;
 use kaspa_p2p_lib::{OutboundConnector, TcpConnector};
-use kaspa_p2p_libp2p::Libp2pIdentity;
 use kaspa_p2p_libp2p::SwarmStreamProvider;
 use kaspa_p2p_libp2p::{
     Config as AdapterConfig, ConfigBuilder as AdapterConfigBuilder, Identity as AdapterIdentity, Libp2pOutboundConnector,
@@ -229,7 +228,8 @@ mod tests {
         args.libp2p_mode = Libp2pMode::Helper;
 
         let cfg = libp2p_config_from_args(&args, Path::new("/tmp/app"));
-        assert_eq!(cfg.mode, AdapterMode::Helper);
+        // Helper aliases to Full in the adapter config (effective mode).
+        assert_eq!(cfg.mode, AdapterMode::Full);
 
         env::remove_var("KASPAD_LIBP2P_MODE");
     }

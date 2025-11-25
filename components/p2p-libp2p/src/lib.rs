@@ -12,7 +12,7 @@ pub mod service;
 pub mod swarm;
 pub mod transport;
 
-pub use config::{Config, Identity, Mode};
+pub use config::{Config, ConfigBuilder, Identity, Mode};
 pub use service::Libp2pService;
 pub use swarm::{build_base_swarm, BaseBehaviour};
 pub use transport::{
