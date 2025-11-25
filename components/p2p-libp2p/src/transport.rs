@@ -18,6 +18,8 @@ pub enum Libp2pError {
     Disabled,
     #[error("libp2p dial failed: {0}")]
     DialFailed(String),
+    #[error("libp2p listen failed: {0}")]
+    ListenFailed(String),
 }
 
 /// Placeholder libp2p transport connector. Will be expanded with real libp2p dial/listen logic.
@@ -153,6 +155,9 @@ pub type BoxedLibp2pStream = Box<dyn Libp2pStream>;
 /// will bridge to the libp2p swarm and return a stream plus transport metadata.
 pub trait Libp2pStreamProvider: Send + Sync {
     fn dial<'a>(&'a self, address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
+    fn listen<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<(TransportMetadata, Box<dyn FnOnce() + Send + 'a>, BoxedLibp2pStream), Libp2pError>>;
 }
 
 /// Placeholder libp2p stream provider. Returns Disabled/NotImplemented until
@@ -170,6 +175,18 @@ impl PlaceholderStreamProvider {
 
 impl Libp2pStreamProvider for PlaceholderStreamProvider {
     fn dial<'a>(&'a self, _address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+        let enabled = self.config.mode.is_enabled();
+        Box::pin(async move {
+            if !enabled {
+                return Err(Libp2pError::Disabled);
+            }
+            Err(Libp2pError::NotImplemented)
+        })
+    }
+
+    fn listen<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<(TransportMetadata, Box<dyn FnOnce() + Send + 'a>, BoxedLibp2pStream), Libp2pError>> {
         let enabled = self.config.mode.is_enabled();
         Box::pin(async move {
             if !enabled {
