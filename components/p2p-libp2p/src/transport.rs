@@ -32,10 +32,14 @@ impl TransportConnector for Libp2pConnector {
     fn connect<'a>(&'a self, _address: NetAddress) -> Self::Future<'a> {
         let metadata = TransportMetadata::default();
         // TODO: integrate real libp2p dial and wrap in Router.
-        Box::pin(async move {
-            let _ = metadata;
-            Err(Libp2pError::NotImplemented)
-        })
+        if !self.config.mode.is_enabled() {
+            Box::pin(async move { Err(Libp2pError::Disabled) })
+        } else {
+            Box::pin(async move {
+                let _ = metadata;
+                Err(Libp2pError::NotImplemented)
+            })
+        }
     }
 }
 
@@ -59,6 +63,9 @@ impl OutboundConnector for Libp2pOutboundConnector {
         handler: &'a kaspa_p2p_lib::ConnectionHandler,
     ) -> BoxFuture<'a, Result<Arc<Router>, ConnectionError>> {
         // Placeholder: fall back to TCP until libp2p dial is implemented.
+        let mut metadata = metadata;
+        metadata.capabilities.libp2p = true;
+        metadata.path = kaspa_p2p_lib::PathKind::Unknown;
         self.fallback.connect(address, metadata, handler)
     }
 }
