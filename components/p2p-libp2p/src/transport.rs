@@ -4,10 +4,14 @@ use kaspa_p2p_lib::common::ProtocolError;
 use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
 use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
+use libp2p::identity::Keypair;
+use libp2p::multiaddr::Multiaddr;
+use libp2p::{identity, PeerId};
 use log::info;
 use log::warn;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
+use std::{fs, io, path::Path};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +24,10 @@ pub enum Libp2pError {
     DialFailed(String),
     #[error("libp2p listen failed: {0}")]
     ListenFailed(String),
+    #[error("libp2p identity error: {0}")]
+    Identity(String),
+    #[error("invalid multiaddr: {0}")]
+    Multiaddr(String),
 }
 
 /// Placeholder libp2p transport connector. Will be expanded with real libp2p dial/listen logic.
@@ -163,11 +171,12 @@ pub trait Libp2pStreamProvider: Send + Sync {
 #[derive(Clone)]
 pub struct PlaceholderStreamProvider {
     config: Config,
+    peer_id: PeerId,
 }
 
 impl PlaceholderStreamProvider {
-    pub fn new(config: Config) -> Self {
-        Self { config }
+    pub fn new(config: Config, peer_id: PeerId) -> Self {
+        Self { config, peer_id }
     }
 }
 
@@ -180,6 +189,7 @@ impl Libp2pStreamProvider for PlaceholderStreamProvider {
             }
             let mut md = TransportMetadata::default();
             md.capabilities.libp2p = true;
+            md.libp2p_peer_id = Some(self.peer_id.to_string());
             Err(Libp2pError::NotImplemented)
         })
     }
@@ -192,7 +202,70 @@ impl Libp2pStreamProvider for PlaceholderStreamProvider {
             }
             let mut md = TransportMetadata::default();
             md.capabilities.libp2p = true;
+            md.libp2p_peer_id = Some(self.peer_id.to_string());
             Err(Libp2pError::NotImplemented)
         })
     }
+}
+
+/// Libp2p identity wrapper (ed25519).
+#[derive(Clone)]
+pub struct Libp2pIdentity {
+    pub keypair: Keypair,
+    pub peer_id: PeerId,
+    pub persisted_path: Option<std::path::PathBuf>,
+}
+
+impl Libp2pIdentity {
+    pub fn from_config(config: &Config) -> Result<Self, Libp2pError> {
+        match &config.identity {
+            crate::Identity::Ephemeral => {
+                let keypair = identity::Keypair::generate_ed25519();
+                let peer_id = PeerId::from(keypair.public());
+                Ok(Self { keypair, peer_id, persisted_path: None })
+            }
+            crate::Identity::Persisted(path) => {
+                let keypair = load_or_generate_key(path).map_err(|e| Libp2pError::Identity(e.to_string()))?;
+                let peer_id = PeerId::from(keypair.public());
+                Ok(Self { keypair, peer_id, persisted_path: Some(path.clone()) })
+            }
+        }
+    }
+
+    pub fn peer_id_string(&self) -> String {
+        self.peer_id.to_string()
+    }
+}
+
+fn load_or_generate_key(path: &Path) -> io::Result<Keypair> {
+    if let Ok(bytes) = fs::read(path) {
+        return Keypair::from_protobuf_encoding(&bytes).map_err(map_identity_err);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let keypair = identity::Keypair::generate_ed25519();
+    let bytes = keypair.to_protobuf_encoding().map_err(map_identity_err)?;
+    fs::write(path, bytes)?;
+    Ok(keypair)
+}
+
+fn map_identity_err(err: impl ToString) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, err.to_string())
+}
+
+/// Translate a NetAddress (ip:port) into a libp2p multiaddr.
+pub fn to_multiaddr(address: NetAddress) -> Result<Multiaddr, Libp2pError> {
+    let multiaddr: Multiaddr = match address.ip {
+        kaspa_utils::networking::IpAddress(std::net::IpAddr::V4(v4)) => {
+            format!("/ip4/{}/tcp/{}", v4, address.port).parse::<Multiaddr>()
+        }
+        kaspa_utils::networking::IpAddress(std::net::IpAddr::V6(v6)) => {
+            format!("/ip6/{}/tcp/{}", v6, address.port).parse::<Multiaddr>()
+        }
+    }
+    .map_err(|e: libp2p::multiaddr::Error| Libp2pError::Multiaddr(e.to_string()))?;
+    Ok(multiaddr)
 }

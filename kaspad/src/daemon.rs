@@ -332,9 +332,9 @@ pub fn create_core_with_runtime(runtime: &Runtime, args: &Args, fd_total_budget:
         Arc<dyn kaspa_p2p_lib::OutboundConnector>,
     ) = {
         let cfg = libp2p_config_from_args(&args.libp2p, &app_dir);
-        let status = crate::libp2p::libp2p_status_from_config(&cfg, None);
-        let connector = crate::libp2p::outbound_connector_from_config(&cfg);
-        (cfg, status, connector)
+        let runtime = crate::libp2p::libp2p_runtime_from_config(&cfg);
+        let status = crate::libp2p::libp2p_status_from_config(&cfg, runtime.peer_id.clone());
+        (cfg, status, runtime.outbound)
     };
     #[cfg(feature = "libp2p")]
     if libp2p_config.mode.is_enabled() {

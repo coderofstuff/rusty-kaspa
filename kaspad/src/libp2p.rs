@@ -1,8 +1,9 @@
 use clap::ValueEnum;
 use kaspa_p2p_lib::{OutboundConnector, TcpConnector};
+use kaspa_p2p_libp2p::Libp2pIdentity;
 use kaspa_p2p_libp2p::{Config as AdapterConfig, Identity as AdapterIdentity, Libp2pOutboundConnector, Mode as AdapterMode};
 use kaspa_rpc_core::{GetLibp2pStatusResponse, RpcLibp2pIdentity, RpcLibp2pMode};
-use kaspa_utils::networking::PeerId;
+use libp2p::PeerId as Libp2pPeerId;
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::sync::Arc;
@@ -61,9 +62,7 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path) -> AdapterConf
     AdapterConfig { mode: AdapterMode::from(args.libp2p_mode).effective(), identity, helper_listen: args.libp2p_helper_listen }
 }
 
-pub fn libp2p_status_from_config(config: &AdapterConfig, peer_id: Option<PeerId>) -> GetLibp2pStatusResponse {
-    let peer_id = peer_id.map(|id| id.to_string());
-
+pub fn libp2p_status_from_config(config: &AdapterConfig, peer_id: Option<String>) -> GetLibp2pStatusResponse {
     let identity = match &config.identity {
         AdapterIdentity::Ephemeral => RpcLibp2pIdentity::Ephemeral,
         AdapterIdentity::Persisted(path) => RpcLibp2pIdentity::Persisted { path: path.display().to_string() },
@@ -78,18 +77,35 @@ pub fn libp2p_status_from_config(config: &AdapterConfig, peer_id: Option<PeerId>
     GetLibp2pStatusResponse { mode, peer_id, identity }
 }
 
-pub fn outbound_connector_from_config(config: &AdapterConfig) -> Arc<dyn OutboundConnector> {
+pub struct Libp2pRuntime {
+    pub outbound: Arc<dyn OutboundConnector>,
+    pub peer_id: Option<String>,
+}
+
+pub fn libp2p_runtime_from_config(config: &AdapterConfig) -> Libp2pRuntime {
     if config.mode.is_enabled() {
-        let provider = Arc::new(kaspa_p2p_libp2p::PlaceholderStreamProvider::new(config.clone()));
-        Arc::new(Libp2pOutboundConnector::with_provider(config.clone(), Arc::new(TcpConnector), provider))
+        let (provider, peer_id) = match kaspa_p2p_libp2p::Libp2pIdentity::from_config(config) {
+            Ok(identity) => {
+                let provider = kaspa_p2p_libp2p::PlaceholderStreamProvider::new(config.clone(), identity.peer_id);
+                (provider, Some(identity.peer_id_string()))
+            }
+            Err(err) => {
+                log::warn!("libp2p identity setup failed: {err}; falling back to TCP only");
+                let random_peer = Libp2pPeerId::random();
+                let provider = kaspa_p2p_libp2p::PlaceholderStreamProvider::new(config.clone(), random_peer);
+                (provider, None)
+            }
+        };
+        let outbound = Arc::new(Libp2pOutboundConnector::with_provider(config.clone(), Arc::new(TcpConnector), Arc::new(provider)));
+        Libp2pRuntime { outbound, peer_id }
     } else {
-        Arc::new(TcpConnector)
+        Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None }
     }
 }
 
 #[cfg(not(feature = "libp2p"))]
-pub fn outbound_connector_from_config(_config: &AdapterConfig) -> Arc<dyn OutboundConnector> {
-    Arc::new(TcpConnector)
+pub fn libp2p_runtime_from_config(_config: &AdapterConfig) -> Libp2pRuntime {
+    Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None }
 }
 
 fn resolve_identity_path(path: &Path, app_dir: &Path) -> PathBuf {

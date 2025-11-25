@@ -20,6 +20,7 @@ log.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
+libp2p = { version = "0.52.4", default-features = false, features = ["tokio", "tcp", "dns", "noise", "yamux", "macros"] }
 
 [features]
 default = []
