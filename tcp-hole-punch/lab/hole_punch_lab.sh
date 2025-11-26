@@ -3,8 +3,6 @@ set -euo pipefail
 
 # Minimal lab harness for the Proxmox NAT setup.
 # It starts/stops the three kaspad nodes with libp2p full mode enabled.
-# Note: current branch logs "libp2p mode enabled; transport is currently unimplemented..."
-# so reservations/dcutr are not active yet. This script simply codifies the commands used.
 
 SSH_JUMP=${SSH_JUMP:-root@10.0.3.11}
 SSH_OPTS="-o StrictHostKeyChecking=no"
@@ -19,6 +17,7 @@ NODE_C=${NODE_C:-ubuntu@10.0.3.50}
 REPO_PATH=${REPO_PATH:-~/rusty-kaspa}
 BIN_PATH=${BIN_PATH:-${REPO_PATH}/target/release/kaspad}
 P2P_PORT=${P2P_PORT:-16111}
+LIBP2P_PORT=${LIBP2P_PORT:-$((P2P_PORT + 1))}
 RPC_PORT=${RPC_PORT:-17110}
 HELPER_PORT=${HELPER_PORT:-38080}
 LOGLEVEL=${LOGLEVEL:-debug}
@@ -50,6 +49,7 @@ mkdir -p ${APPDIR_C}
 LOG=${APPDIR_C}/kaspad.log
 : > "\${LOG}"
 RUST_LOG=${RUST_LOG} \\
+KASPAD_LIBP2P_LISTEN_PORT=${LIBP2P_PORT} \\
 nohup ${BIN_PATH} \\
   --simnet \\
   --appdir=${APPDIR_C} \\
@@ -59,6 +59,7 @@ nohup ${BIN_PATH} \\
   --listen=0.0.0.0:${P2P_PORT} \\
   --rpclisten=0.0.0.0:${RPC_PORT} \\
   --libp2p-mode=full \\
+  --libp2p-listen-port=${LIBP2P_PORT} \\
   --libp2p-helper-listen=0.0.0.0:${HELPER_PORT} \\
   --libp2p-identity-path=${APPDIR_C}/libp2p.id \\
   >>"\${LOG}" 2>&1 < /dev/null & echo \$! > ${APPDIR_C}/kaspad.pid
@@ -76,7 +77,7 @@ start_private_node() {
     echo "C_PEER_ID is required to start ${host}. Set it from Node C getLibp2pStatus." >&2
     exit 1
   fi
-  local reservations="/ip4/${C_PUBLIC_IP}/tcp/${P2P_PORT}/p2p/${C_PEER_ID}"
+  local reservations="/ip4/${C_PUBLIC_IP}/tcp/${LIBP2P_PORT}/p2p/${C_PEER_ID}"
   local script
   script=$(cat <<EOF
 set -e
@@ -85,7 +86,8 @@ mkdir -p ${appdir}
 LOG=${appdir}/kaspad.log
 : > "\${LOG}"
 KASPAD_LIBP2P_RESERVATIONS=${reservations} \\
-KASPAD_LIBP2P_EXTERNAL_MULTIADDRS=/ip4/${external_ip}/tcp/${P2P_PORT} \\
+KASPAD_LIBP2P_EXTERNAL_MULTIADDRS=/ip4/${external_ip}/tcp/${LIBP2P_PORT} \\
+KASPAD_LIBP2P_LISTEN_PORT=${LIBP2P_PORT} \\
 RUST_LOG=${RUST_LOG} \\
 nohup ${BIN_PATH} \\
   --simnet \\
@@ -96,6 +98,7 @@ nohup ${BIN_PATH} \\
   --listen=0.0.0.0:${P2P_PORT} \\
   --rpclisten=0.0.0.0:${RPC_PORT} \\
   --libp2p-mode=full \\
+  --libp2p-listen-port=${LIBP2P_PORT} \\
   --libp2p-helper-listen=${helper_listen} \\
   --libp2p-identity-path=${appdir}/libp2p.id \\
   >>"\${LOG}" 2>&1 < /dev/null & echo \$! > ${appdir}/kaspad.pid
