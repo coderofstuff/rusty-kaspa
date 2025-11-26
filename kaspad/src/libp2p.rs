@@ -1,5 +1,7 @@
 use clap::ValueEnum;
 use kaspa_core::task::service::{AsyncService, AsyncServiceError, AsyncServiceFuture};
+#[cfg(feature = "libp2p")]
+use kaspa_p2p_flows::flow_context::FlowContext;
 use kaspa_p2p_lib::{OutboundConnector, TcpConnector};
 use kaspa_p2p_libp2p::SwarmStreamProvider;
 use kaspa_p2p_libp2p::{
@@ -7,6 +9,8 @@ use kaspa_p2p_libp2p::{
     Mode as AdapterMode,
 };
 use kaspa_rpc_core::{GetLibp2pStatusResponse, RpcLibp2pIdentity, RpcLibp2pMode};
+#[cfg(feature = "libp2p")]
+use kaspa_utils::triggers::SingleTrigger;
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::{
@@ -16,6 +20,8 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::OnceCell;
+#[cfg(feature = "libp2p")]
+use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -137,6 +143,7 @@ pub struct Libp2pRuntime {
     pub peer_id: Option<String>,
     pub identity: Option<kaspa_p2p_libp2p::Libp2pIdentity>,
     pub(crate) init_service: Option<Arc<Libp2pInitService>>,
+    pub(crate) provider_cell: Option<Arc<OnceCell<Arc<dyn kaspa_p2p_libp2p::Libp2pStreamProvider>>>>,
 }
 
 pub fn libp2p_runtime_from_config(config: &AdapterConfig) -> Libp2pRuntime {
@@ -150,23 +157,32 @@ pub fn libp2p_runtime_from_config(config: &AdapterConfig) -> Libp2pRuntime {
                     Arc::new(TcpConnector),
                     provider_cell.clone(),
                 ));
-                let init_service =
-                    Some(Arc::new(Libp2pInitService { config: config.clone(), identity: identity.clone(), provider_cell }));
-                Libp2pRuntime { outbound, peer_id, identity: Some(identity), init_service }
+                let init_service = Some(Arc::new(Libp2pInitService {
+                    config: config.clone(),
+                    identity: identity.clone(),
+                    provider_cell: provider_cell.clone(),
+                }));
+                Libp2pRuntime { outbound, peer_id, identity: Some(identity), init_service, provider_cell: Some(provider_cell.clone()) }
             }
             Err(err) => {
                 log::warn!("libp2p identity setup failed: {err}; falling back to TCP only");
-                Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None, init_service: None }
+                Libp2pRuntime {
+                    outbound: Arc::new(TcpConnector),
+                    peer_id: None,
+                    identity: None,
+                    init_service: None,
+                    provider_cell: None,
+                }
             }
         }
     } else {
-        Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None, init_service: None }
+        Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None, init_service: None, provider_cell: None }
     }
 }
 
 #[cfg(not(feature = "libp2p"))]
 pub fn libp2p_runtime_from_config(_config: &AdapterConfig) -> Libp2pRuntime {
-    Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None, init_service: None }
+    Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None, init_service: None, provider_cell: None }
 }
 
 fn resolve_identity_path(path: &Path, app_dir: &Path) -> PathBuf {
@@ -218,6 +234,69 @@ impl AsyncService for Libp2pInitService {
     }
 
     fn signal_exit(self: Arc<Self>) {}
+
+    fn stop(self: Arc<Self>) -> AsyncServiceFuture {
+        Box::pin(async move { Ok(()) })
+    }
+}
+
+#[cfg(feature = "libp2p")]
+pub struct Libp2pNodeService {
+    config: AdapterConfig,
+    provider_cell: Arc<OnceCell<Arc<dyn kaspa_p2p_libp2p::Libp2pStreamProvider>>>,
+    flow_context: Arc<FlowContext>,
+    shutdown: SingleTrigger,
+}
+
+#[cfg(feature = "libp2p")]
+impl Libp2pNodeService {
+    pub fn new(
+        config: AdapterConfig,
+        provider_cell: Arc<OnceCell<Arc<dyn kaspa_p2p_libp2p::Libp2pStreamProvider>>>,
+        flow_context: Arc<FlowContext>,
+    ) -> Self {
+        Self { config, provider_cell, flow_context, shutdown: SingleTrigger::new() }
+    }
+}
+
+#[cfg(feature = "libp2p")]
+impl AsyncService for Libp2pNodeService {
+    fn ident(self: Arc<Self>) -> &'static str {
+        "libp2p-node"
+    }
+
+    fn start(self: Arc<Self>) -> AsyncServiceFuture {
+        Box::pin(async move {
+            if !self.config.mode.is_enabled() {
+                return Ok(());
+            }
+
+            let provider = loop {
+                if let Some(provider) = self.provider_cell.get() {
+                    break provider.clone();
+                }
+                sleep(Duration::from_millis(50)).await;
+            };
+
+            let handler = loop {
+                if let Some(handler) = self.flow_context.connection_handler() {
+                    break handler;
+                }
+                sleep(Duration::from_millis(50)).await;
+            };
+
+            let svc = kaspa_p2p_libp2p::Libp2pService::with_provider(self.config.clone(), provider);
+            svc.start().await.map_err(|e| AsyncServiceError::Service(e.to_string()))?;
+            svc.start_inbound(Arc::new(handler)).await.map_err(|e| AsyncServiceError::Service(e.to_string()))?;
+
+            self.shutdown.listener.clone().await;
+            Ok(())
+        })
+    }
+
+    fn signal_exit(self: Arc<Self>) {
+        self.shutdown.trigger.trigger();
+    }
 
     fn stop(self: Arc<Self>) -> AsyncServiceFuture {
         Box::pin(async move { Ok(()) })

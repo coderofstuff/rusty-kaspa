@@ -2,7 +2,6 @@ use crate::reservations::ReservationManager;
 use crate::transport::{multiaddr_to_metadata, BoxedLibp2pStream, Libp2pStreamProvider};
 use crate::{config::Config, transport::Libp2pError};
 use kaspa_p2p_lib::{ConnectionHandler, MetadataConnectInfo, PathKind};
-use kaspa_utils::networking::NetAddress;
 use libp2p::Multiaddr;
 use log::{debug, warn};
 use std::collections::HashMap;
@@ -122,14 +121,10 @@ struct ActiveReservation {
     handle: ReservationHandle,
 }
 
-struct ReservationHandle {
-    stream: Option<BoxedLibp2pStream>,
-}
+struct ReservationHandle {}
 
 impl ReservationHandle {
-    fn release(self) {
-        drop(self.stream);
-    }
+    fn release(self) {}
 }
 
 async fn refresh_reservations(
@@ -185,32 +180,28 @@ async fn attempt_reservation(
     provider: &dyn Libp2pStreamProvider,
     target: &ParsedReservation,
 ) -> Result<ReservationHandle, Libp2pError> {
-    let (metadata, stream) = provider.dial(target.net_address.clone()).await?;
-    debug!("libp2p reservation attempt to {} over path {:?} (libp2p peer {:?})", target.raw, metadata.path, metadata.libp2p_peer_id);
-    Ok(ReservationHandle { stream: Some(stream) })
+    provider.reserve(target.multiaddr.clone()).await?;
+    debug!("libp2p reservation attempt to {} via relay {:?}", target.raw, target.key);
+    Ok(ReservationHandle {})
 }
 
 #[derive(Clone)]
 struct ParsedReservation {
     raw: String,
     key: String,
-    net_address: NetAddress,
+    multiaddr: Multiaddr,
 }
 
 impl ParsedReservation {
     fn parse(raw: &str) -> Result<Self, Libp2pError> {
         let multiaddr: Multiaddr = Multiaddr::from_str(raw).map_err(|e| Libp2pError::Multiaddr(e.to_string()))?;
-        let (net, path) = multiaddr_to_metadata(&multiaddr);
-        let net_address = net.ok_or_else(|| Libp2pError::Multiaddr("reservation multiaddr missing IP or port".into()))?;
-        if net_address.port == 0 {
-            return Err(Libp2pError::Multiaddr("reservation multiaddr missing TCP port".into()));
-        }
+        let (_net, path) = multiaddr_to_metadata(&multiaddr);
         let key = match path {
             PathKind::Relay { relay_id: Some(id) } => id,
             _ => raw.to_string(),
         };
 
-        Ok(Self { raw: raw.to_string(), key, net_address })
+        Ok(Self { raw: raw.to_string(), key, multiaddr })
     }
 }
 
@@ -266,6 +257,7 @@ mod tests {
     use super::*;
     use crate::metadata::TransportMetadata;
     use futures_util::future::BoxFuture;
+    use kaspa_utils::networking::NetAddress;
     use libp2p::PeerId;
     use std::collections::VecDeque;
     use std::pin::Pin;
@@ -404,6 +396,10 @@ mod tests {
                 let closer: Box<dyn FnOnce() + Send> = Box::new(|| {});
                 Ok((TransportMetadata::default(), closer, stream))
             })
+        }
+
+        fn reserve<'a>(&'a self, _target: Multiaddr) -> BoxFuture<'a, Result<(), Libp2pError>> {
+            Box::pin(async { Ok(()) })
         }
     }
 }

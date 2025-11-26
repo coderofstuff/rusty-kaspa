@@ -29,8 +29,8 @@ use kaspa_mining::mempool::tx::{Orphan, Priority};
 use kaspa_mining::{manager::MiningManagerProxy, mempool::tx::RbfPolicy};
 use kaspa_notify::notifier::Notify;
 use kaspa_p2p_lib::{
-    Capabilities, ConnectionInitializer, Hub, KaspadHandshake, MetadataFactory, OutboundConnector, PathKind, PeerKey, PeerProperties,
-    Router, TransportMetadata,
+    Adaptor, Capabilities, ConnectionHandler, ConnectionInitializer, Hub, KaspadHandshake, MetadataFactory, OutboundConnector,
+    PathKind, PeerKey, PeerProperties, Router, TransportMetadata,
     common::ProtocolError,
     convert::model::version::Version,
     make_message,
@@ -223,6 +223,7 @@ pub struct FlowContextInner {
     ibd_metadata: Arc<RwLock<Option<IbdMetadata>>>,
     pub address_manager: Arc<Mutex<AddressManager>>,
     connection_manager: RwLock<Option<Arc<ConnectionManager>>>,
+    p2p_adaptor: RwLock<Option<Arc<Adaptor>>>,
     mining_manager: MiningManagerProxy,
     pub(crate) tick_service: Arc<TickService>,
     notification_root: Arc<ConsensusNotificationRoot>,
@@ -339,6 +340,7 @@ impl FlowContext {
                 hub,
                 address_manager,
                 connection_manager: Default::default(),
+                p2p_adaptor: Default::default(),
                 mining_manager,
                 tick_service,
                 notification_root,
@@ -385,6 +387,18 @@ impl FlowContext {
 
     pub fn connection_manager(&self) -> Option<Arc<ConnectionManager>> {
         self.connection_manager.read().clone()
+    }
+
+    pub fn set_p2p_adaptor(&self, adaptor: Arc<Adaptor>) {
+        self.p2p_adaptor.write().replace(adaptor);
+    }
+
+    pub fn p2p_adaptor(&self) -> Option<Arc<Adaptor>> {
+        self.p2p_adaptor.read().clone()
+    }
+
+    pub fn connection_handler(&self) -> Option<ConnectionHandler> {
+        self.p2p_adaptor().map(|a| a.connection_handler())
     }
 
     pub fn outbound_connector(&self) -> Arc<dyn OutboundConnector> {

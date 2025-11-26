@@ -126,6 +126,10 @@ impl Adaptor {
         self.terminate_all_peers().await;
     }
 
+    pub fn connection_handler(&self) -> ConnectionHandler {
+        self.connection_handler.clone()
+    }
+
     pub fn hub_channel_size() -> usize {
         512
     }

@@ -11,7 +11,7 @@ use libp2p::multiaddr::Multiaddr;
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{identity, PeerId};
+use libp2p::{identity, relay, PeerId};
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -33,6 +33,8 @@ pub enum Libp2pError {
     DialFailed(String),
     #[error("libp2p listen failed: {0}")]
     ListenFailed(String),
+    #[error("libp2p reservation failed: {0}")]
+    ReservationFailed(String),
     #[error("libp2p identity error: {0}")]
     Identity(String),
     #[error("invalid multiaddr: {0}")]
@@ -62,17 +64,11 @@ impl TransportConnector for Libp2pConnector {
     type Future<'a> = BoxFuture<'a, Result<(Arc<Router>, TransportMetadata, PeerKey), Self::Error>>;
 
     fn connect<'a>(&'a self, _address: NetAddress) -> Self::Future<'a> {
-        let metadata = TransportMetadata::default();
+        let _metadata = TransportMetadata::default();
         if !self.config.mode.is_enabled() {
             return Box::pin(async move { Err(Libp2pError::Disabled) });
         }
-
-        // TODO: integrate real libp2p dial and wrap in Router, returning metadata and PeerKey.
-        Box::pin(async move {
-            info!("libp2p connector stub invoked; dial not implemented");
-            let _ = metadata;
-            Err(Libp2pError::NotImplemented)
-        })
+        Box::pin(async move { Err(Libp2pError::DialFailed("libp2p connector requires runtime provider".into())) })
     }
 }
 
@@ -98,7 +94,7 @@ mod tests {
         let connector = Libp2pConnector::new(cfg);
         let addr = kaspa_utils::networking::NetAddress::from_str("127.0.0.1:16110").unwrap();
         let res = block_on(connector.connect(addr));
-        assert!(matches!(res, Err(Libp2pError::NotImplemented)));
+        assert!(matches!(res, Err(Libp2pError::DialFailed(_))));
     }
 
     #[test]
@@ -319,48 +315,7 @@ pub type BoxedLibp2pStream = Box<dyn Libp2pStream>;
 pub trait Libp2pStreamProvider: Send + Sync {
     fn dial<'a>(&'a self, address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
     fn listen<'a>(&'a self) -> BoxFuture<'a, Result<(TransportMetadata, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>>;
-}
-
-/// Placeholder libp2p stream provider. Returns Disabled/NotImplemented until
-/// the real libp2p bridge is wired in.
-#[derive(Clone)]
-pub struct PlaceholderStreamProvider {
-    config: Config,
-    peer_id: PeerId,
-}
-
-impl PlaceholderStreamProvider {
-    pub fn new(config: Config, peer_id: PeerId) -> Self {
-        Self { config, peer_id }
-    }
-}
-
-impl Libp2pStreamProvider for PlaceholderStreamProvider {
-    fn dial<'a>(&'a self, _address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
-        let enabled = self.config.mode.is_enabled();
-        Box::pin(async move {
-            if !enabled {
-                return Err(Libp2pError::Disabled);
-            }
-            let mut md = TransportMetadata::default();
-            md.capabilities.libp2p = true;
-            md.libp2p_peer_id = Some(self.peer_id.to_string());
-            Err(Libp2pError::NotImplemented)
-        })
-    }
-
-    fn listen<'a>(&'a self) -> BoxFuture<'a, Result<(TransportMetadata, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
-        let enabled = self.config.mode.is_enabled();
-        Box::pin(async move {
-            if !enabled {
-                return Err(Libp2pError::Disabled);
-            }
-            let mut md = TransportMetadata::default();
-            md.capabilities.libp2p = true;
-            md.libp2p_peer_id = Some(self.peer_id.to_string());
-            Err(Libp2pError::NotImplemented)
-        })
-    }
+    fn reserve<'a>(&'a self, target: Multiaddr) -> BoxFuture<'a, Result<(), Libp2pError>>;
 }
 
 /// Libp2p identity wrapper (ed25519).
@@ -444,7 +399,35 @@ impl SwarmStreamProvider {
         let (incoming_tx, incoming_rx) = mpsc::channel(32);
         let protocol = default_stream_protocol();
         let swarm = build_streaming_swarm(&identity, protocol.clone())?;
-        let task = handle.spawn(SwarmDriver::new(swarm, command_rx, incoming_tx).run());
+
+        let listen_multiaddrs = if config.listen_addresses.is_empty() {
+            vec![default_listen_addr()]
+        } else {
+            config
+                .listen_addresses
+                .iter()
+                .filter_map(|addr| match to_multiaddr(NetAddress::new((*addr).ip().into(), addr.port())) {
+                    Ok(ma) => Some(ma),
+                    Err(err) => {
+                        warn!("invalid libp2p listen address {}: {err}", addr);
+                        None
+                    }
+                })
+                .collect()
+        };
+        let mut external_multiaddrs = parse_multiaddrs(&config.external_multiaddrs)?;
+        external_multiaddrs.extend(config.advertise_addresses.iter().filter_map(|addr| {
+            match to_multiaddr(NetAddress::new((*addr).ip().into(), addr.port())) {
+                Ok(ma) => Some(ma),
+                Err(err) => {
+                    warn!("invalid libp2p advertise address {}: {err}", addr);
+                    None
+                }
+            }
+        }));
+        let reservations = parse_reservation_targets(&config.reservations)?;
+        let task =
+            handle.spawn(SwarmDriver::new(swarm, command_rx, incoming_tx, listen_multiaddrs, external_multiaddrs, reservations).run());
 
         Ok(Self { config, command_tx, incoming: Mutex::new(incoming_rx), _task: task })
     }
@@ -500,6 +483,23 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
             }
         })
     }
+
+    fn reserve<'a>(&'a self, target: Multiaddr) -> BoxFuture<'a, Result<(), Libp2pError>> {
+        let enabled = self.config.mode.is_enabled();
+        let tx = self.command_tx.clone();
+        Box::pin(async move {
+            if !enabled {
+                return Err(Libp2pError::Disabled);
+            }
+
+            let (respond_to, rx) = oneshot::channel();
+            tx.send(SwarmCommand::Reserve { target, respond_to })
+                .await
+                .map_err(|_| Libp2pError::ReservationFailed("libp2p driver stopped".into()))?;
+
+            rx.await.unwrap_or_else(|_| Err(Libp2pError::ReservationFailed("libp2p reservation cancelled".into())))
+        })
+    }
 }
 
 struct IncomingStream {
@@ -507,9 +507,17 @@ struct IncomingStream {
     stream: BoxedLibp2pStream,
 }
 
+#[derive(Clone)]
+#[allow(dead_code)]
+struct ReservationTarget {
+    multiaddr: Multiaddr,
+    peer_id: PeerId,
+}
+
 enum SwarmCommand {
     Dial { address: Multiaddr, respond_to: oneshot::Sender<Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> },
     EnsureListening { respond_to: oneshot::Sender<Result<(), Libp2pError>> },
+    Reserve { target: Multiaddr, respond_to: oneshot::Sender<Result<(), Libp2pError>> },
 }
 
 struct DialRequest {
@@ -521,19 +529,32 @@ struct SwarmDriver {
     command_rx: mpsc::Receiver<SwarmCommand>,
     incoming_tx: mpsc::Sender<IncomingStream>,
     pending_dials: HashMap<StreamRequestId, DialRequest>,
+    listen_addrs: Vec<Multiaddr>,
+    external_addrs: Vec<Multiaddr>,
     listening: bool,
 }
 
 impl SwarmDriver {
+    fn bootstrap(&mut self) {
+        for addr in self.external_addrs.clone() {
+            self.swarm.add_external_address(addr);
+        }
+        let _ = self.start_listening();
+    }
+
     fn new(
         swarm: libp2p::Swarm<Libp2pBehaviour>,
         command_rx: mpsc::Receiver<SwarmCommand>,
         incoming_tx: mpsc::Sender<IncomingStream>,
+        listen_addrs: Vec<Multiaddr>,
+        external_addrs: Vec<Multiaddr>,
+        _reservations: Vec<ReservationTarget>,
     ) -> Self {
-        Self { swarm, command_rx, incoming_tx, pending_dials: HashMap::new(), listening: false }
+        Self { swarm, command_rx, incoming_tx, pending_dials: HashMap::new(), listen_addrs, external_addrs, listening: false }
     }
 
     async fn run(mut self) {
+        self.bootstrap();
         loop {
             tokio::select! {
                 cmd = self.command_rx.recv() => {
@@ -568,18 +589,18 @@ impl SwarmDriver {
                 }
             }
             SwarmCommand::EnsureListening { respond_to } => {
-                if self.listening {
-                    let _ = respond_to.send(Ok(()));
-                    return;
+                let _ = respond_to.send(self.start_listening());
+            }
+            SwarmCommand::Reserve { mut target, respond_to } => {
+                if !target.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+                    target.push(Protocol::P2pCircuit);
                 }
-
-                match self.swarm.listen_on(default_listen_addr()) {
+                match self.swarm.listen_on(target) {
                     Ok(_) => {
-                        self.listening = true;
                         let _ = respond_to.send(Ok(()));
                     }
                     Err(err) => {
-                        let _ = respond_to.send(Err(Libp2pError::ListenFailed(err.to_string())));
+                        let _ = respond_to.send(Err(Libp2pError::ReservationFailed(err.to_string())));
                     }
                 }
             }
@@ -591,6 +612,28 @@ impl SwarmDriver {
             SwarmEvent::Behaviour(Libp2pEvent::Stream(event)) => self.handle_stream_event(event).await,
             SwarmEvent::Behaviour(Libp2pEvent::Ping(event)) => {
                 let _ = event;
+            }
+            SwarmEvent::Behaviour(Libp2pEvent::Identify(event)) => {
+                debug!("libp2p identify event: {:?}", event);
+            }
+            SwarmEvent::Behaviour(Libp2pEvent::Relay(event)) => match event {
+                relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
+                    info!("libp2p reservation accepted by {relay_peer_id}, renewal={renewal}");
+                }
+                relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
+                    info!("libp2p outbound circuit established via {relay_peer_id}");
+                }
+                relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
+                    info!("libp2p inbound circuit established from {src_peer_id}");
+                }
+                _ => {}
+            },
+            SwarmEvent::Behaviour(Libp2pEvent::Dcutr(event)) => {
+                debug!("libp2p dcutr event: {:?}", event);
+            }
+            SwarmEvent::NewListenAddr { address, .. } => {
+                debug!("libp2p listening on {address}");
+                self.listening = true;
             }
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, .. } => {
                 if self.pending_dials.contains_key(&connection_id) {
@@ -604,6 +647,23 @@ impl SwarmDriver {
             }
             _ => {}
         }
+    }
+
+    fn start_listening(&mut self) -> Result<(), Libp2pError> {
+        if self.listening {
+            return Ok(());
+        }
+
+        let addrs = if self.listen_addrs.is_empty() { vec![default_listen_addr()] } else { self.listen_addrs.clone() };
+
+        for addr in addrs {
+            if let Err(err) = self.swarm.listen_on(addr) {
+                return Err(Libp2pError::ListenFailed(err.to_string()));
+            }
+        }
+
+        self.listening = true;
+        Ok(())
     }
 
     async fn handle_stream_event(&mut self, event: StreamEvent) {
@@ -681,6 +741,24 @@ pub fn multiaddr_to_metadata(address: &Multiaddr) -> (Option<NetAddress>, kaspa_
     };
 
     (net, path)
+}
+
+fn parse_multiaddrs(addrs: &[String]) -> Result<Vec<Multiaddr>, Libp2pError> {
+    addrs.iter().map(|raw| Multiaddr::from_str(raw).map_err(|e| Libp2pError::Multiaddr(e.to_string()))).collect()
+}
+
+fn parse_reservation_targets(reservations: &[String]) -> Result<Vec<ReservationTarget>, Libp2pError> {
+    reservations
+        .iter()
+        .map(|raw| {
+            let multiaddr: Multiaddr = Multiaddr::from_str(raw).map_err(|e| Libp2pError::Multiaddr(e.to_string()))?;
+            let peer_id = multiaddr
+                .iter()
+                .find_map(|p| if let Protocol::P2p(peer_id) = p { Some(peer_id) } else { None })
+                .ok_or_else(|| Libp2pError::Multiaddr("reservation multiaddr missing peer id".into()))?;
+            Ok(ReservationTarget { multiaddr, peer_id })
+        })
+        .collect()
 }
 
 fn default_stream_protocol() -> libp2p::StreamProtocol {

@@ -6,6 +6,8 @@ pub struct Config {
     pub mode: Mode,
     pub identity: Identity,
     pub helper_listen: Option<SocketAddr>,
+    /// Socket addresses to bind libp2p listeners to.
+    pub listen_addresses: Vec<SocketAddr>,
     pub relay_inbound_cap: Option<usize>,
     pub relay_inbound_unknown_cap: Option<usize>,
     /// Optional list of relay reservation multiaddrs.
@@ -22,6 +24,7 @@ impl Default for Config {
             mode: Mode::Off,
             identity: Identity::Ephemeral,
             helper_listen: None,
+            listen_addresses: Vec::new(),
             relay_inbound_cap: None,
             relay_inbound_unknown_cap: None,
             reservations: Vec::new(),
@@ -61,6 +64,11 @@ impl ConfigBuilder {
 
     pub fn helper_listen(mut self, helper_listen: Option<SocketAddr>) -> Self {
         self.config.helper_listen = helper_listen;
+        self
+    }
+
+    pub fn listen_addresses(mut self, listen_addresses: Vec<SocketAddr>) -> Self {
+        self.config.listen_addresses = listen_addresses;
         self
     }
 

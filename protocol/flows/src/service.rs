@@ -87,6 +87,7 @@ impl AsyncService for P2pService {
             )
             .unwrap()
         };
+        self.flow_context.set_p2p_adaptor(p2p_adaptor.clone());
         let connection_manager = ConnectionManager::new(
             p2p_adaptor.clone(),
             self.outbound_target,

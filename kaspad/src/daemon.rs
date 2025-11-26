@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, process::exit, sync::Arc, time::Duration};
+use std::{fs, net::SocketAddr, path::PathBuf, process::exit, sync::Arc, time::Duration};
 
 use async_channel::unbounded;
 use kaspa_consensus_core::{
@@ -27,8 +27,6 @@ use kaspa_utils::networking::ContextualNetAddress;
 use kaspa_utils::networking::NET_ADDRESS_SERVICE_LIBP2P_RELAY;
 use kaspa_utils::sysinfo::SystemInfo;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
-#[cfg(feature = "libp2p")]
-use log::warn;
 
 #[cfg(feature = "libp2p")]
 use crate::libp2p::libp2p_config_from_args;
@@ -330,37 +328,6 @@ pub fn create_core_with_runtime(runtime: &Runtime, args: &Args, fd_total_budget:
     );
 
     let app_dir = get_app_dir_from_args(args);
-    #[cfg(feature = "libp2p")]
-    let (libp2p_config, libp2p_status, outbound_connector, libp2p_init_service): (
-        kaspa_p2p_libp2p::Config,
-        GetLibp2pStatusResponse,
-        Arc<dyn kaspa_p2p_lib::OutboundConnector>,
-        Option<Arc<crate::libp2p::Libp2pInitService>>,
-    ) = {
-        let cfg = libp2p_config_from_args(&args.libp2p, &app_dir);
-        let runtime = crate::libp2p::libp2p_runtime_from_config(&cfg);
-        let status = crate::libp2p::libp2p_status_from_config(&cfg, runtime.peer_id.clone());
-        (cfg, status, runtime.outbound, runtime.init_service)
-    };
-    #[cfg(feature = "libp2p")]
-    if libp2p_config.mode.is_enabled() {
-        info!("libp2p mode enabled; transport is currently unimplemented and outbound connections will return NotImplemented");
-        if args.override_params_file.is_some() {
-            warn!("override-params is set; consensus overrides are unsupported in libp2p mode and may be ignored");
-        }
-    }
-    #[cfg(feature = "libp2p")]
-    let (libp2p_services, libp2p_relay_port, libp2p_relay_inbound_cap, libp2p_relay_inbound_unknown_cap) = {
-        let services = if libp2p_config.mode.is_enabled() { NET_ADDRESS_SERVICE_LIBP2P_RELAY } else { 0 };
-        let relay_port = libp2p_config.helper_listen.map(|addr| addr.port());
-        (services, relay_port, libp2p_config.relay_inbound_cap, libp2p_config.relay_inbound_unknown_cap)
-    };
-    #[cfg(not(feature = "libp2p"))]
-    let libp2p_status: GetLibp2pStatusResponse = GetLibp2pStatusResponse::disabled();
-    #[cfg(not(feature = "libp2p"))]
-    let outbound_connector: Arc<dyn kaspa_p2p_lib::OutboundConnector> = Arc::new(kaspa_p2p_lib::TcpConnector);
-    #[cfg(not(feature = "libp2p"))]
-    let (libp2p_services, libp2p_relay_port, libp2p_relay_inbound_cap, libp2p_relay_inbound_unknown_cap) = (0, None, None, None);
     let db_dir = app_dir.join(network.to_prefixed()).join(DEFAULT_DATA_DIR);
 
     // Print package name and version
@@ -589,6 +556,27 @@ Do you confirm? (y/n)";
 
     let grpc_server_addr = args.rpclisten.unwrap_or(ContextualNetAddress::loopback()).normalize(config.default_rpc_port());
 
+    #[cfg(feature = "libp2p")]
+    let (libp2p_config, libp2p_status, outbound_connector, libp2p_init_service, libp2p_provider_cell) = {
+        let mut cfg = libp2p_config_from_args(&args.libp2p, &app_dir);
+        cfg.listen_addresses = vec![SocketAddr::new(p2p_server_addr.ip.into(), p2p_server_addr.port)];
+        let runtime = crate::libp2p::libp2p_runtime_from_config(&cfg);
+        let status: GetLibp2pStatusResponse = crate::libp2p::libp2p_status_from_config(&cfg, runtime.peer_id.clone());
+        (cfg, status, runtime.outbound, runtime.init_service, runtime.provider_cell)
+    };
+    #[cfg(feature = "libp2p")]
+    let (libp2p_services, libp2p_relay_port, libp2p_relay_inbound_cap, libp2p_relay_inbound_unknown_cap) = {
+        let services = if libp2p_config.mode.is_enabled() { NET_ADDRESS_SERVICE_LIBP2P_RELAY } else { 0 };
+        let relay_port = libp2p_config.helper_listen.map(|addr| addr.port());
+        (services, relay_port, libp2p_config.relay_inbound_cap, libp2p_config.relay_inbound_unknown_cap)
+    };
+    #[cfg(not(feature = "libp2p"))]
+    let libp2p_status: GetLibp2pStatusResponse = GetLibp2pStatusResponse::disabled();
+    #[cfg(not(feature = "libp2p"))]
+    let outbound_connector: Arc<dyn kaspa_p2p_lib::OutboundConnector> = Arc::new(kaspa_p2p_lib::TcpConnector);
+    #[cfg(not(feature = "libp2p"))]
+    let (libp2p_services, libp2p_relay_port, libp2p_relay_inbound_cap, libp2p_relay_inbound_unknown_cap) = (0, None, None, None);
+
     let core = Arc::new(Core::new());
 
     // ---
@@ -703,6 +691,14 @@ Do you confirm? (y/n)";
         libp2p_relay_inbound_cap,
         libp2p_relay_inbound_unknown_cap,
     ));
+    #[cfg(feature = "libp2p")]
+    let libp2p_node_service = if libp2p_config.mode.is_enabled() {
+        libp2p_provider_cell
+            .clone()
+            .and_then(|cell| Some(Arc::new(crate::libp2p::Libp2pNodeService::new(libp2p_config.clone(), cell, flow_context.clone()))))
+    } else {
+        None
+    };
     let p2p_service = Arc::new(P2pService::new(
         flow_context.clone(),
         connect_peers,
@@ -766,6 +762,10 @@ Do you confirm? (y/n)";
     #[cfg(feature = "libp2p")]
     if let Some(libp2p_init_service) = libp2p_init_service {
         async_runtime.register(libp2p_init_service);
+    }
+    #[cfg(feature = "libp2p")]
+    if let Some(libp2p_node_service) = libp2p_node_service {
+        async_runtime.register(libp2p_node_service);
     }
     async_runtime.register(p2p_service);
     async_runtime.register(consensus_monitor);

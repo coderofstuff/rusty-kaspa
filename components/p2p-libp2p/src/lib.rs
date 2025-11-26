@@ -17,5 +17,5 @@ pub use service::Libp2pService;
 pub use swarm::{build_base_swarm, BaseBehaviour};
 pub use transport::{
     BoxedLibp2pStream, Libp2pConnector, Libp2pError, Libp2pIdentity, Libp2pOutboundConnector, Libp2pStream, Libp2pStreamProvider,
-    PlaceholderStreamProvider, SwarmStreamProvider,
+    SwarmStreamProvider,
 };

@@ -482,6 +482,54 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .require_equals(true)
                 .value_parser(clap::value_parser!(SocketAddr))
                 .help("Enable the libp2p helper/control API on the specified socket address. Disabled unless set explicitly."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-inbound-cap")
+                .long("libp2p-relay-inbound-cap")
+                .env("KASPAD_LIBP2P_RELAY_INBOUND_CAP")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Soft cap per relay identity for inbound libp2p connections."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-inbound-unknown-cap")
+                .long("libp2p-relay-inbound-unknown-cap")
+                .env("KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Soft cap for inbound libp2p connections without parsed relay id."),
+        )
+        .arg(
+            Arg::new("libp2p-reservations")
+                .long("libp2p-reservations")
+                .env("KASPAD_LIBP2P_RESERVATIONS")
+                .value_name("MULTIADDRS")
+                .require_equals(true)
+                .use_value_delimiter(true)
+                .value_parser(clap::value_parser!(String))
+                .help("Comma-separated relay reservation multiaddrs."),
+        )
+        .arg(
+            Arg::new("libp2p-external-multiaddrs")
+                .long("libp2p-external-multiaddrs")
+                .env("KASPAD_LIBP2P_EXTERNAL_MULTIADDRS")
+                .value_name("MULTIADDRS")
+                .require_equals(true)
+                .use_value_delimiter(true)
+                .value_parser(clap::value_parser!(String))
+                .help("Comma-separated external multiaddrs to advertise via libp2p identify."),
+        )
+        .arg(
+            Arg::new("libp2p-advertise-addresses")
+                .long("libp2p-advertise-addresses")
+                .env("KASPAD_LIBP2P_ADVERTISE_ADDRESSES")
+                .value_name("IP:PORTS")
+                .require_equals(true)
+                .use_value_delimiter(true)
+                .value_parser(clap::value_parser!(SocketAddr))
+                .help("Comma-separated addresses to advertise for non-libp2p aware peers."),
         );
 
     #[cfg(feature = "devnet-prealloc")]
@@ -574,11 +622,26 @@ impl Args {
                     .get_one::<SocketAddr>("libp2p-helper-listen")
                     .copied()
                     .or(defaults.libp2p.libp2p_helper_listen),
-                libp2p_relay_inbound_cap: defaults.libp2p.libp2p_relay_inbound_cap,
-                libp2p_relay_inbound_unknown_cap: defaults.libp2p.libp2p_relay_inbound_unknown_cap,
-                libp2p_reservations: defaults.libp2p.libp2p_reservations,
-                libp2p_external_multiaddrs: defaults.libp2p.libp2p_external_multiaddrs,
-                libp2p_advertise_addresses: defaults.libp2p.libp2p_advertise_addresses,
+                libp2p_relay_inbound_cap: m
+                    .get_one::<usize>("libp2p-relay-inbound-cap")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_relay_inbound_cap),
+                libp2p_relay_inbound_unknown_cap: m
+                    .get_one::<usize>("libp2p-relay-inbound-unknown-cap")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_relay_inbound_unknown_cap),
+                libp2p_reservations: m
+                    .get_many::<String>("libp2p-reservations")
+                    .map(|vals| vals.cloned().collect())
+                    .unwrap_or(defaults.libp2p.libp2p_reservations),
+                libp2p_external_multiaddrs: m
+                    .get_many::<String>("libp2p-external-multiaddrs")
+                    .map(|vals| vals.cloned().collect())
+                    .unwrap_or(defaults.libp2p.libp2p_external_multiaddrs),
+                libp2p_advertise_addresses: m
+                    .get_many::<SocketAddr>("libp2p-advertise-addresses")
+                    .map(|vals| vals.copied().collect())
+                    .unwrap_or(defaults.libp2p.libp2p_advertise_addresses),
             },
 
             #[cfg(feature = "devnet-prealloc")]

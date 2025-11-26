@@ -1,8 +1,12 @@
 use crate::transport::{Libp2pError, Libp2pIdentity};
 use futures_util::future;
+use libp2p::core::transport::choice::OrTransport;
 use libp2p::core::upgrade::{self, InboundUpgrade, OutboundUpgrade, UpgradeInfo};
+use libp2p::dcutr;
+use libp2p::identify;
 use libp2p::noise;
 use libp2p::ping;
+use libp2p::relay;
 use libp2p::swarm::behaviour::ToSwarm;
 use libp2p::swarm::handler::OneShotHandler;
 use libp2p::swarm::THandlerInEvent;
@@ -39,7 +43,7 @@ impl From<ping::Event> for PingEvent {
 /// Build a baseline libp2p swarm (TCP + Noise + Yamux + Ping).
 pub fn build_base_swarm(identity: &Libp2pIdentity) -> Result<Swarm<BaseBehaviour>, Libp2pError> {
     let peer_id = identity.peer_id;
-    let (transport, cfg) = build_transport(identity)?;
+    let (transport, cfg) = build_transport(identity, None)?;
 
     info!("libp2p base swarm peer id: {}", peer_id);
 
@@ -51,18 +55,42 @@ pub fn build_base_swarm(identity: &Libp2pIdentity) -> Result<Swarm<BaseBehaviour
 #[behaviour(to_swarm = "Libp2pEvent")]
 pub(crate) struct Libp2pBehaviour {
     pub ping: ping::Behaviour,
+    pub identify: identify::Behaviour,
+    pub relay: relay::client::Behaviour,
+    pub dcutr: dcutr::Behaviour,
     pub streams: StreamBehaviour,
 }
 
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Libp2pEvent {
     Ping(PingEvent),
+    Identify(identify::Event),
+    Relay(relay::client::Event),
+    Dcutr(dcutr::Event),
     Stream(StreamEvent),
 }
 
 impl From<PingEvent> for Libp2pEvent {
     fn from(event: PingEvent) -> Self {
         Libp2pEvent::Ping(event)
+    }
+}
+
+impl From<identify::Event> for Libp2pEvent {
+    fn from(event: identify::Event) -> Self {
+        Libp2pEvent::Identify(event)
+    }
+}
+
+impl From<relay::client::Event> for Libp2pEvent {
+    fn from(event: relay::client::Event) -> Self {
+        Libp2pEvent::Relay(event)
+    }
+}
+
+impl From<dcutr::Event> for Libp2pEvent {
+    fn from(event: dcutr::Event) -> Self {
+        Libp2pEvent::Dcutr(event)
     }
 }
 
@@ -84,23 +112,40 @@ pub(crate) fn build_streaming_swarm(
     protocol: StreamProtocol,
 ) -> Result<Swarm<Libp2pBehaviour>, Libp2pError> {
     let peer_id = identity.peer_id;
-    let (transport, cfg) = build_transport(identity)?;
+    let (relay_transport, relay_behaviour) = relay::client::new(peer_id);
+    let (transport, cfg) = build_transport(identity, Some(relay_transport))?;
 
     info!("libp2p streaming swarm peer id: {}", peer_id);
 
-    let behaviour = Libp2pBehaviour { ping: ping::Behaviour::default(), streams: StreamBehaviour::new(protocol) };
+    let behaviour = Libp2pBehaviour {
+        ping: ping::Behaviour::default(),
+        identify: identify::Behaviour::new(identify::Config::new(
+            format!("/kaspad/libp2p/{}", env!("CARGO_PKG_VERSION")),
+            identity.keypair.public(),
+        )),
+        relay: relay_behaviour,
+        dcutr: dcutr::Behaviour::new(peer_id),
+        streams: StreamBehaviour::new(protocol),
+    };
     Ok(Swarm::new(transport, behaviour, peer_id, cfg))
 }
 
-fn build_transport(identity: &Libp2pIdentity) -> Result<(BoxedTransport, swarm::Config), Libp2pError> {
+fn build_transport(
+    identity: &Libp2pIdentity,
+    relay_transport: Option<relay::client::Transport>,
+) -> Result<(BoxedTransport, swarm::Config), Libp2pError> {
     let local_key: identity::Keypair = identity.keypair.clone();
     let noise_keys = noise::Config::new(&local_key).map_err(|e| Libp2pError::Identity(e.to_string()))?;
 
-    let transport = TcpTransport::new(libp2p::tcp::Config::default().nodelay(true))
-        .upgrade(upgrade::Version::V1Lazy)
-        .authenticate(noise_keys)
-        .multiplex(yamux::Config::default())
-        .boxed();
+    let tcp = TcpTransport::new(libp2p::tcp::Config::default().nodelay(true));
+    let transport = match relay_transport {
+        Some(relay_transport) => OrTransport::new(relay_transport, tcp)
+            .upgrade(upgrade::Version::V1Lazy)
+            .authenticate(noise_keys.clone())
+            .multiplex(yamux::Config::default())
+            .boxed(),
+        None => tcp.upgrade(upgrade::Version::V1Lazy).authenticate(noise_keys).multiplex(yamux::Config::default()).boxed(),
+    };
 
     let cfg = libp2p::swarm::Config::with_tokio_executor();
     Ok((transport, cfg))
