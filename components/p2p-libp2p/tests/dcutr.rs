@@ -81,8 +81,10 @@ fn build_relay_swarm(id: &Libp2pIdentity) -> Swarm<RelayBehaviour> {
     SwarmBuilder::with_tokio_executor(tcp, behaviour, id.peer_id).build()
 }
 
+// NOTE: Running this in CI currently panics inside libp2p-relay (priv_client) when the transport
+// channel closes unexpectedly. Keep ignored by default; run manually when debugging DCUtR wiring.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "relay client panics when transport drops in CI; run manually for DCUtR verification"]
+#[ignore = "libp2p-relay priv_client panics on drop in upstream; run manually for DCUtR verification"]
 async fn dcutr_hole_punches_locally_via_relay() {
     let cfg = ConfigBuilder::new().mode(Mode::Full).build();
     let relay_id = Libp2pIdentity::from_config(&cfg).expect("relay id");

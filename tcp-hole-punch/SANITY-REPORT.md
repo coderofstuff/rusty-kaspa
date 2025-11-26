@@ -40,6 +40,12 @@ Notes:
   - Node C logs `P2P Connected to incoming peer … (inbound: 1)`.
 - Key listeners: P2P on 40011/41011; libp2p on 40012/41012 (dedicated, not multiplexed with P2P).
 
+## Local DCUtR harness sanity
+
+- Command: `cargo test -p kaspa-p2p-libp2p --test dcutr -- --ignored --nocapture`
+- Result: panics inside `libp2p-relay::priv_client` (“Behaviour polled after transport channel closed”) when the upstream relay client drops its transport channel; this is an upstream libp2p issue.
+- Conclusion: DCUtR harness currently blocked by upstream relay client panic; test remains `#[ignore]` and should be run manually only for debugging once upstream fixes it.
+
 ## getLibp2pStatus (full mode)
 
 - Command: `KASPAD_GRPC_SERVER=grpc://127.0.0.1:27510 cargo run --example libp2p_status -p kaspa-grpc-client --quiet`
