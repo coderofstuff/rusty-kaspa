@@ -1,4 +1,4 @@
-use std::{fs, net::SocketAddr, path::PathBuf, process::exit, sync::Arc, time::Duration};
+use std::{fs, path::PathBuf, process::exit, sync::Arc, time::Duration};
 
 use async_channel::unbounded;
 use kaspa_consensus_core::{
@@ -27,6 +27,8 @@ use kaspa_utils::networking::ContextualNetAddress;
 use kaspa_utils::networking::NET_ADDRESS_SERVICE_LIBP2P_RELAY;
 use kaspa_utils::sysinfo::SystemInfo;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
+#[cfg(feature = "libp2p")]
+use std::net::SocketAddr;
 
 #[cfg(feature = "libp2p")]
 use crate::libp2p::libp2p_config_from_args;

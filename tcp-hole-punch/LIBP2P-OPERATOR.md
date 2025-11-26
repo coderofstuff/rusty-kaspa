@@ -3,7 +3,7 @@
 ## Modes and defaults
 - **off** (default): libp2p disabled; transport is plain TCP. No libp2p deps pulled in unless compiled with `--features libp2p`.
 - **full/helper**: libp2p stack enabled (helper == full for now). Requires explicit `--libp2p-mode full|helper`.
-- Helper control (relay/DCUtR) binds only when `--libp2p-helper-listen <addr>` is set (control plane currently stubbed; no listener binds yet).
+- Helper control (relay/DCUtR) binds only when `--libp2p-helper-listen <addr>` is set (**currently stubbed; no control-plane listener is started**).
 - Ports: helper listen is explicit; TCP P2P port stays unchanged (`--listen`/default p2p port).
 
 ## Identity & privacy
@@ -21,12 +21,20 @@
 - `--libp2p-mode`, `--libp2p-identity-path`, `--libp2p-helper-listen`
 - Reservations: `--libp2p-reservations` (comma-separated) or `KASPAD_LIBP2P_RESERVATIONS`
 - External announce: `--libp2p-external-multiaddrs`, `--libp2p-advertise-addresses`
+- Inbound caps: `--libp2p-relay-inbound-cap`, `--libp2p-relay-inbound-unknown-cap`
 - Env overrides all have `KASPAD_LIBP2P_*` prefix; **CLI > env > defaults** for precedence.
 
 ## Examples
 - Plain TCP public node (libp2p off): default build/run (no flags).
 - Private relay (ephemeral ID): `--features libp2p --libp2p-mode full --libp2p-helper-listen 0.0.0.0:38080`
-- Public relay with persistent ID: add `--libp2p-identity-path /var/lib/kaspad/libp2p.id`.
+- Public relay with persistent ID + advertised addresses:
+  ```
+  target/debug/kaspad --simnet --libp2p-mode=full --libp2p-helper-listen=0.0.0.0:38080 \
+    --libp2p-identity-path=/var/lib/kaspad/libp2p.id \
+    --libp2p-reservations=/ip4/203.0.113.10/tcp/16111/p2p/12D3KooWRelayPeer \
+    --libp2p-external-multiaddrs=/ip4/198.51.100.50/tcp/16111 \
+    --libp2p-advertise-addresses=198.51.100.50:16111
+  ```
 
 ## Disable libp2p
 - Build: omit `--features libp2p` (or use `--no-default-features` when libp2p is not a default member).

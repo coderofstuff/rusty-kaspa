@@ -25,8 +25,8 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Libp2pError {
-    #[error("libp2p connector not implemented yet")]
-    NotImplemented,
+    #[error("libp2p provider unavailable")]
+    ProviderUnavailable,
     #[error("libp2p not enabled")]
     Disabled,
     #[error("libp2p dial failed: {0}")]

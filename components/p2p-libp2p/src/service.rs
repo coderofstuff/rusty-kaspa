@@ -40,13 +40,12 @@ impl Libp2pService {
         }
     }
 
-    /// Start the libp2p service. Currently returns `NotImplemented` when enabled.
     pub async fn start(&self) -> Result<(), Libp2pError> {
         if !self.config.mode.is_enabled() {
             return Err(Libp2pError::Disabled);
         }
 
-        let provider = self.provider.as_ref().ok_or(Libp2pError::NotImplemented)?.clone();
+        let provider = self.provider.as_ref().ok_or(Libp2pError::ProviderUnavailable)?.clone();
 
         if !self.config.reservations.is_empty() {
             let reservations = self.config.reservations.clone();
@@ -64,7 +63,7 @@ impl Libp2pService {
             return Err(Libp2pError::Disabled);
         }
 
-        let provider = self.provider.as_ref().ok_or(Libp2pError::NotImplemented)?.clone();
+        let provider = self.provider.as_ref().ok_or(Libp2pError::ProviderUnavailable)?.clone();
         let (tx, rx) = mpsc::channel(8);
 
         tokio::spawn(async move {
@@ -287,7 +286,7 @@ mod tests {
     async fn reservation_refresh_respects_backoff_and_releases() {
         let drops = Arc::new(AtomicUsize::new(0));
         let provider = Arc::new(MockProvider::with_responses(
-            VecDeque::from([Err(Libp2pError::NotImplemented), Ok(make_stream(drops.clone())), Ok(make_stream(drops.clone()))]),
+            VecDeque::from([Err(Libp2pError::ProviderUnavailable), Ok(()), Ok(())]),
             drops.clone(),
         ));
 
@@ -314,7 +313,7 @@ mod tests {
 
         refresh_reservations(provider.as_ref(), &reservations, &mut state, now + Duration::from_millis(200)).await;
         assert_eq!(provider.attempts(), 3, "refresh after interval should re-attempt");
-        assert_eq!(drops.load(Ordering::SeqCst), 1, "old reservation should be released on refresh");
+        assert_eq!(drops.load(Ordering::SeqCst), 0, "no streams are held for reservations");
     }
 
     fn make_stream(drops: Arc<AtomicUsize>) -> BoxedLibp2pStream {
@@ -358,13 +357,13 @@ mod tests {
     }
 
     struct MockProvider {
-        responses: StdMutex<VecDeque<Result<BoxedLibp2pStream, Libp2pError>>>,
+        responses: StdMutex<VecDeque<Result<(), Libp2pError>>>,
         attempts: AtomicUsize,
         drops: Arc<AtomicUsize>,
     }
 
     impl MockProvider {
-        fn with_responses(responses: VecDeque<Result<BoxedLibp2pStream, Libp2pError>>, drops: Arc<AtomicUsize>) -> Self {
+        fn with_responses(responses: VecDeque<Result<(), Libp2pError>>, drops: Arc<AtomicUsize>) -> Self {
             Self { responses: StdMutex::new(responses), attempts: AtomicUsize::new(0), drops }
         }
 
@@ -378,11 +377,8 @@ mod tests {
             Box::pin(async move {
                 self.attempts.fetch_add(1, Ordering::SeqCst);
                 let mut guard = self.responses.lock().expect("responses");
-                let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::NotImplemented));
-                match resp {
-                    Ok(stream) => Ok((TransportMetadata::default(), stream)),
-                    Err(err) => Err(err),
-                }
+                let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+                resp.map(|_| (TransportMetadata::default(), make_stream(self.drops.clone())))
             })
         }
 
@@ -399,7 +395,12 @@ mod tests {
         }
 
         fn reserve<'a>(&'a self, _target: Multiaddr) -> BoxFuture<'a, Result<(), Libp2pError>> {
-            Box::pin(async { Ok(()) })
+            Box::pin(async move {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                let mut guard = self.responses.lock().expect("responses");
+                let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+                resp
+            })
         }
     }
 }

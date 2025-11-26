@@ -63,10 +63,10 @@ If you believe a change in one of these directories is absolutely required, you 
 
 ## Status audit (fresh eyes)
 
-- Done: feature gating/default-off stance; identity loader (ephemeral + persisted); transport seam in `ConnectionHandler` (`connect_with_stream`/`serve_with_incoming`); NetAddress relay_port merge; inbound caps/buckets in connection manager.
-- Incomplete/scaffolded: libp2p service/provider still stubbed (`Libp2pService::start` returns `NotImplemented`; `Libp2pConnector`/`PlaceholderStreamProvider` return `NotImplemented`; `SwarmStreamProvider` lacks relay/DCUtR/identify/external addr plumbing and is not wired to daemon); daemon still logs “transport unimplemented” and does not start any libp2p listener/helper/reservation loop; helper control plane remains a placeholder.
-- Config gaps: CLI flags for reservations/external multiaddrs/advertise-addresses/relay caps are not exposed (env/config only); helper listen flag parsed but no server binds.
-- Out of scope: none identified yet.
+- Done: feature gating/default-off stance; identity loader (ephemeral + persisted); transport seam in `ConnectionHandler` (`connect_with_stream`/`serve_with_incoming`); NetAddress relay_port merge; inbound caps/buckets in connection manager; libp2p stream provider now real (relay/identify/DCUtR, dial/listen/reserve); daemon/libp2p runtime wired with outbound connector handing streams into the P2P hub; CLI surface exposes reservations/external/advertise/relay caps.
+- Incomplete/by design: helper control plane still a placeholder (no listener bound yet); keep documented as TBD.
+- Out-of-scope diffs: none (checked against `upstream/master` for guarded directories).
+- Stub sweep: transport hot paths no longer emit `NotImplemented`; remaining TODOs are legacy (unrelated to libp2p) or helper-control stubs.
 
 ## Execution Order (checklist)
 
