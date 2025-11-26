@@ -61,6 +61,13 @@ If you believe a change in one of these directories is absolutely required, you 
 
 **Tests and docs** may be added anywhere they logically belong, as long as they do not alter runtime code.
 
+## Status audit (fresh eyes)
+
+- Done: feature gating/default-off stance; identity loader (ephemeral + persisted); transport seam in `ConnectionHandler` (`connect_with_stream`/`serve_with_incoming`); NetAddress relay_port merge; inbound caps/buckets in connection manager.
+- Incomplete/scaffolded: libp2p service/provider still stubbed (`Libp2pService::start` returns `NotImplemented`; `Libp2pConnector`/`PlaceholderStreamProvider` return `NotImplemented`; `SwarmStreamProvider` lacks relay/DCUtR/identify/external addr plumbing and is not wired to daemon); daemon still logs “transport unimplemented” and does not start any libp2p listener/helper/reservation loop; helper control plane remains a placeholder.
+- Config gaps: CLI flags for reservations/external multiaddrs/advertise-addresses/relay caps are not exposed (env/config only); helper listen flag parsed but no server binds.
+- Out of scope: none identified yet.
+
 ## Execution Order (checklist)
 
 0. **Branching & Safety Net**
