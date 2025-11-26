@@ -1,5 +1,5 @@
 use crate::reservations::ReservationManager;
-use crate::transport::{multiaddr_to_metadata, BoxedLibp2pStream, Libp2pStreamProvider};
+use crate::transport::{multiaddr_to_metadata, BoxedLibp2pStream, Libp2pStreamProvider, StreamDirection};
 use crate::{config::Config, transport::Libp2pError};
 use kaspa_p2p_lib::{ConnectionHandler, MetadataConnectInfo, PathKind};
 use libp2p::Multiaddr;
@@ -65,15 +65,31 @@ impl Libp2pService {
 
         let provider = self.provider.as_ref().ok_or(Libp2pError::ProviderUnavailable)?.clone();
         let (tx, rx) = mpsc::channel(8);
+        let handler_for_outbound = handler.clone();
 
         tokio::spawn(async move {
             loop {
                 match provider.listen().await {
-                    Ok((metadata, _close, stream)) => {
-                        let info = MetadataConnectInfo::new(None, metadata);
-                        let connected = MetaConnectedStream::new(stream, info);
-                        if tx.send(Ok(connected)).await.is_err() {
-                            break;
+                    Ok((metadata, direction, _close, stream)) => {
+                        match direction {
+                            StreamDirection::Outbound => {
+                                // For locally initiated streams, act as the client and connect directly.
+                                log::info!(
+                                    "libp2p_bridge: outbound stream ready for Kaspa connect_with_stream with metadata {:?}",
+                                    metadata
+                                );
+                                if let Err(err) = handler_for_outbound.connect_with_stream(stream, metadata).await {
+                                    log::warn!("libp2p_bridge: outbound connect_with_stream failed: {err}");
+                                }
+                            }
+                            StreamDirection::Inbound => {
+                                log::info!("libp2p_bridge: inbound stream ready for Kaspa with metadata {:?}", metadata);
+                                let info = MetadataConnectInfo::new(None, metadata);
+                                let connected = MetaConnectedStream::new(stream, info);
+                                if tx.send(Ok(connected)).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                     Err(err) => {
@@ -384,13 +400,13 @@ mod tests {
 
         fn listen<'a>(
             &'a self,
-        ) -> BoxFuture<'a, Result<(TransportMetadata, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
+        ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
             let drops = self.drops.clone();
             Box::pin(async move {
                 let (client, _server) = duplex(64);
                 let stream: BoxedLibp2pStream = Box::new(DropStream { inner: client, drops });
                 let closer: Box<dyn FnOnce() + Send> = Box::new(|| {});
-                Ok((TransportMetadata::default(), closer, stream))
+                Ok((TransportMetadata::default(), StreamDirection::Inbound, closer, stream))
             })
         }
 

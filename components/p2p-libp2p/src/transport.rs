@@ -21,6 +21,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::OnceCell;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
+use tokio::task::spawn;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 #[derive(Debug, thiserror::Error)]
@@ -314,7 +315,9 @@ pub type BoxedLibp2pStream = Box<dyn Libp2pStream>;
 /// will bridge to the libp2p swarm and return a stream plus transport metadata.
 pub trait Libp2pStreamProvider: Send + Sync {
     fn dial<'a>(&'a self, address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
-    fn listen<'a>(&'a self) -> BoxFuture<'a, Result<(TransportMetadata, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>>;
+    fn listen<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>>;
     fn reserve<'a>(&'a self, target: Multiaddr) -> BoxFuture<'a, Result<(), Libp2pError>>;
 }
 
@@ -463,7 +466,9 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
         })
     }
 
-    fn listen<'a>(&'a self) -> BoxFuture<'a, Result<(TransportMetadata, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
+    fn listen<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
         let enabled = self.config.mode.is_enabled();
         let incoming = &self.incoming;
         let provider = self;
@@ -478,7 +483,7 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
             match rx.recv().await {
                 Some(incoming) => {
                     let closer: Box<dyn FnOnce() + Send> = Box::new(|| {});
-                    Ok((incoming.metadata, closer, incoming.stream))
+                    Ok((incoming.metadata, incoming.direction, closer, incoming.stream))
                 }
                 None => Err(Libp2pError::ListenFailed("libp2p incoming channel closed".into())),
             }
@@ -505,6 +510,7 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
 
 struct IncomingStream {
     metadata: TransportMetadata,
+    direction: StreamDirection,
     stream: BoxedLibp2pStream,
 }
 
@@ -546,11 +552,11 @@ impl SwarmDriver {
     fn new(
         swarm: libp2p::Swarm<Libp2pBehaviour>,
         command_rx: mpsc::Receiver<SwarmCommand>,
-        incoming_tx: mpsc::Sender<IncomingStream>,
-        listen_addrs: Vec<Multiaddr>,
-        external_addrs: Vec<Multiaddr>,
-        _reservations: Vec<ReservationTarget>,
-    ) -> Self {
+    incoming_tx: mpsc::Sender<IncomingStream>,
+    listen_addrs: Vec<Multiaddr>,
+    external_addrs: Vec<Multiaddr>,
+    _reservations: Vec<ReservationTarget>,
+) -> Self {
         Self { swarm, command_rx, incoming_tx, pending_dials: HashMap::new(), listen_addrs, external_addrs, listening: false }
     }
 
@@ -633,17 +639,22 @@ impl SwarmDriver {
             SwarmEvent::Behaviour(Libp2pEvent::RelayServer(event)) => {
                 debug!("libp2p relay server event: {:?}", event);
             }
-            SwarmEvent::Behaviour(Libp2pEvent::Dcutr(event)) => {
-                debug!("libp2p dcutr event: {:?}", event);
-            }
+            SwarmEvent::Behaviour(Libp2pEvent::Dcutr(event)) => match event {
+                libp2p::dcutr::Event::DirectConnectionUpgradeSucceeded { remote_peer_id, .. } => {
+                    info!("libp2p dcutr: hole punch succeeded with {remote_peer_id}");
+                }
+                libp2p::dcutr::Event::DirectConnectionUpgradeFailed { remote_peer_id, error } => {
+                    warn!("libp2p dcutr: hole punch with {remote_peer_id} failed: {error}");
+                }
+                other => debug!("libp2p dcutr event: {:?}", other),
+            },
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("libp2p listening on {address}");
                 self.listening = true;
             }
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, .. } => {
-                if self.pending_dials.contains_key(&connection_id) {
-                    self.swarm.behaviour_mut().streams.request_stream(peer_id, connection_id, connection_id);
-                }
+                debug!("libp2p connection established with {peer_id} on {connection_id:?}; requesting stream");
+                self.request_stream_bridge(peer_id, connection_id);
             }
             SwarmEvent::OutgoingConnectionError { connection_id, error, .. } => {
                 if let Some(pending) = self.pending_dials.remove(&connection_id) {
@@ -660,6 +671,7 @@ impl SwarmDriver {
         }
 
         let addrs = if self.listen_addrs.is_empty() { vec![default_listen_addr()] } else { self.listen_addrs.clone() };
+        info!("libp2p starting listen on {:?}", addrs);
 
         for addr in addrs {
             if let Err(err) = self.swarm.listen_on(addr) {
@@ -675,8 +687,13 @@ impl SwarmDriver {
     async fn handle_stream_event(&mut self, event: StreamEvent) {
         match event {
             StreamEvent::Inbound { peer_id, endpoint, stream, .. } => {
+                if matches!(endpoint, libp2p::core::ConnectedPoint::Dialer { .. }) {
+                    debug!("libp2p_bridge: skipping inbound stream on dialed connection to {peer_id} to avoid duplicate bridging");
+                    return;
+                }
                 let metadata = metadata_from_endpoint(&peer_id, &endpoint);
-                let incoming = IncomingStream { metadata, stream: Box::new(stream.compat()) };
+                info!("libp2p_bridge: inbound stream from {peer_id} over {:?}, handing to Kaspa", metadata.path);
+                let incoming = IncomingStream { metadata, direction: StreamDirection::Inbound, stream: Box::new(stream.compat()) };
                 let _ = self.incoming_tx.send(incoming).await;
             }
             StreamEvent::Outbound { peer_id, request_id, endpoint, stream, .. } => {
@@ -684,10 +701,28 @@ impl SwarmDriver {
                 if let Some(pending) = self.pending_dials.remove(&request_id) {
                     let _ = pending.respond_to.send(Ok((metadata, Box::new(stream.compat()))));
                 } else {
-                    debug!("received outbound stream for unknown request {request_id:?}");
+                    info!("libp2p_bridge: outbound stream with no pending dial (req {request_id:?}) from {peer_id}; handing to Kaspa");
+                    let incoming =
+                        IncomingStream { metadata, direction: StreamDirection::Outbound, stream: Box::new(stream.compat()) };
+                    let _ = self.incoming_tx.send(incoming).await;
                 }
             }
         }
+    }
+
+    fn request_stream_bridge(&mut self, peer_id: PeerId, connection_id: StreamRequestId) {
+        let (respond_to, rx) = oneshot::channel();
+        self.pending_dials.insert(connection_id, DialRequest { respond_to });
+        self.swarm.behaviour_mut().streams.request_stream(peer_id, connection_id, connection_id);
+
+        let tx = self.incoming_tx.clone();
+        spawn(async move {
+            if let Ok(Ok((metadata, stream))) = rx.await {
+                info!("libp2p_bridge: established stream with {peer_id} (req {connection_id:?}); handing to Kaspa");
+                let incoming = IncomingStream { metadata, direction: StreamDirection::Outbound, stream };
+                let _ = tx.send(incoming).await;
+            }
+        });
     }
 }
 
@@ -773,4 +808,11 @@ fn default_stream_protocol() -> libp2p::StreamProtocol {
 
 fn default_listen_addr() -> Multiaddr {
     Multiaddr::from_str("/ip4/0.0.0.0/tcp/0").expect("static multiaddr should parse")
+}
+
+/// Whether a stream originated from a local outbound dial or from a remote inbound request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamDirection {
+    Inbound,
+    Outbound,
 }

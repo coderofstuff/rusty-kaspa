@@ -63,10 +63,10 @@ If you believe a change in one of these directories is absolutely required, you 
 
 ## Status audit (fresh eyes)
 
-- Done: feature gating/default-off stance; identity loader (ephemeral + persisted); transport seam in `ConnectionHandler` (`connect_with_stream`/`serve_with_incoming`); NetAddress relay_port merge; inbound caps/buckets in connection manager; libp2p stream provider now real (relay/identify/DCUtR, dial/listen/reserve); daemon/libp2p runtime wired with outbound connector handing streams into the P2P hub; CLI surface exposes reservations/external/advertise/relay caps.
-- Incomplete/by design: helper control plane still a placeholder (no listener bound yet); keep documented as TBD.
+- Done: feature gating/default-off stance; identity loader (ephemeral + persisted); transport seam in `ConnectionHandler` (`connect_with_stream`/`serve_with_incoming`); NetAddress relay_port merge; inbound caps/buckets in connection manager; libp2p stream provider now real (relay/identify/DCUtR, dial/listen/reserve); daemon/libp2p runtime wired with outbound connector handing streams into the P2P hub; CLI surface exposes reservations/external/advertise/relay caps; dedicated libp2p listen port (default `p2p_port+1`, no port sharing with TCP); libp2p→Kaspa bridge live (streams handed into ConnectionHandler with synthetic metadata).
+- Incomplete/by design: helper control plane still a placeholder (no listener bound yet); keep documented as TBD. DCUtR harness is present but marked `#[ignore]` in CI due to upstream relay-client drop panic—use manually for punch verification.
 - Out-of-scope diffs: none (checked against `upstream/master` for guarded directories).
-- Stub sweep: transport hot paths no longer emit `NotImplemented`; remaining TODOs are legacy (unrelated to libp2p) or helper-control stubs.
+- Stub sweep: transport hot paths no longer emit `NotImplemented`; remaining TODOs are legacy (unrelated to libp2p) or helper-control stubs. Dcutr success/failure now logged at info.
 
 ## Execution Order (checklist)
 

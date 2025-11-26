@@ -4,7 +4,7 @@
 - **off** (default): libp2p disabled; transport is plain TCP. No libp2p deps pulled in unless compiled with `--features libp2p`.
 - **full/helper**: libp2p stack enabled (helper == full for now). Requires explicit `--libp2p-mode full|helper`.
 - Helper control (relay/DCUtR) binds only when `--libp2p-helper-listen <addr>` is set (**currently stubbed; no control-plane listener is started**).
-- Ports: helper listen is explicit; TCP P2P port stays unchanged (`--listen`/default p2p port).
+- Ports: TCP P2P port stays unchanged (`--listen`/default p2p port); libp2p uses a dedicated port (`--libp2p-listen-port` or `KASPAD_LIBP2P_LISTEN_PORT`, default `p2p_port+1`). Libp2p is intentionally **not** multiplexed on the P2P TCP port.
 
 ## Identity & privacy
 - Default identity is **ephemeral**. Persist only when `--libp2p-identity-path <path>` is provided (or `KASPAD_LIBP2P_IDENTITY_PATH`).
@@ -18,7 +18,7 @@
 - Reservation refresh uses exponential backoff to avoid relay spam; failed attempts delay retries, successful reservations refresh on a timer.
 
 ## Config surface (env/CLI highlights)
-- `--libp2p-mode`, `--libp2p-identity-path`, `--libp2p-helper-listen`
+- `--libp2p-mode`, `--libp2p-identity-path`, `--libp2p-helper-listen`, `--libp2p-listen-port`
 - Reservations: `--libp2p-reservations` (comma-separated) or `KASPAD_LIBP2P_RESERVATIONS`
 - External announce: `--libp2p-external-multiaddrs`, `--libp2p-advertise-addresses`
 - Inbound caps: `--libp2p-relay-inbound-cap`, `--libp2p-relay-inbound-unknown-cap`
@@ -44,3 +44,4 @@
 - For libp2p/DCUtR manual checks, build with `--features libp2p` and run the example harness:
   - `cargo run -p kaspa-p2p-libp2p --example dcutr_harness --features libp2p -- <ip:port>`
   - Or set `LIBP2P_TARGET_ADDR=<ip:port>` to attempt an outbound dial; otherwise it prints the local peer ID and waits for inbound streams.
+- A DCUtR-focused integration test exists under `components/p2p-libp2p/tests/dcutr.rs` but is `#[ignore]` in CI due to an upstream relay-client drop panic; run manually if you need a quick punch sanity check.

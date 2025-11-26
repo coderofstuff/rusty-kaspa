@@ -234,9 +234,15 @@ impl AsyncService for Libp2pInitService {
         Box::pin(async move {
             let handle = tokio::runtime::Handle::current();
             log::info!("libp2p init: listen addresses {:?}", self.config.listen_addresses);
-            let provider = SwarmStreamProvider::with_handle(self.config.clone(), self.identity.clone(), handle)
-                .map_err(|e| AsyncServiceError::Service(e.to_string()))?;
+            let provider = match SwarmStreamProvider::with_handle(self.config.clone(), self.identity.clone(), handle) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::error!("libp2p init failed to build provider: {e}");
+                    return Err(AsyncServiceError::Service(e.to_string()));
+                }
+            };
             let _ = self.provider_cell.set(Arc::new(provider));
+            log::info!("libp2p init: provider ready");
             Ok(())
         })
     }
@@ -278,6 +284,7 @@ impl AsyncService for Libp2pNodeService {
             if !self.config.mode.is_enabled() {
                 return Ok(());
             }
+            log::info!("libp2p node service starting; waiting for provider and connection handler");
 
             let provider = loop {
                 if let Some(provider) = self.provider_cell.get() {
@@ -301,6 +308,7 @@ impl AsyncService for Libp2pNodeService {
                 log::error!("libp2p inbound bridge failed to start: {err}");
                 return Err(AsyncServiceError::Service(err.to_string()));
             }
+            log::info!("libp2p node service started: bridging libp2p streams into Kaspa");
 
             self.shutdown.listener.clone().await;
             Ok(())
