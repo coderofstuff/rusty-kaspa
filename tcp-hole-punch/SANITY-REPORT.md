@@ -65,3 +65,4 @@ Notes:
 - libp2p transport no longer logs “transport unimplemented”; the swarm now dials/listens/reserves with real metadata plumbing.
 - Helper control remains a stub; no listener is bound even when `--libp2p-helper-listen` is set (documented as TBD).
 - DCUtR logging promoted to info on success/fail; a dedicated DCUtR harness test exists but is `#[ignore]` for now due to upstream relay-client drop panic—run manually when needed.
+- Added DCUtR dial-back via relay to trigger hole punch negotiations when we only have inbound relayed connections; see `tcp-hole-punch/DCUTR-GAP-NOTE.md`. Build/test matrix above rerun after the change.

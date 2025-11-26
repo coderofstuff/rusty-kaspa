@@ -6,10 +6,11 @@ use kaspa_p2p_lib::common::ProtocolError;
 use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
 use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
+use libp2p::identify;
 use libp2p::identity::Keypair;
 use libp2p::multiaddr::Multiaddr;
 use libp2p::multiaddr::Protocol;
-use libp2p::swarm::dial_opts::DialOpts;
+use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{identity, relay, PeerId};
 use log::{debug, info, warn};
@@ -538,6 +539,8 @@ struct SwarmDriver {
     pending_dials: HashMap<StreamRequestId, DialRequest>,
     listen_addrs: Vec<Multiaddr>,
     external_addrs: Vec<Multiaddr>,
+    peer_states: HashMap<PeerId, PeerState>,
+    active_relay: Option<RelayInfo>,
     listening: bool,
 }
 
@@ -552,12 +555,26 @@ impl SwarmDriver {
     fn new(
         swarm: libp2p::Swarm<Libp2pBehaviour>,
         command_rx: mpsc::Receiver<SwarmCommand>,
-    incoming_tx: mpsc::Sender<IncomingStream>,
-    listen_addrs: Vec<Multiaddr>,
-    external_addrs: Vec<Multiaddr>,
-    _reservations: Vec<ReservationTarget>,
-) -> Self {
-        Self { swarm, command_rx, incoming_tx, pending_dials: HashMap::new(), listen_addrs, external_addrs, listening: false }
+        incoming_tx: mpsc::Sender<IncomingStream>,
+        listen_addrs: Vec<Multiaddr>,
+        external_addrs: Vec<Multiaddr>,
+        reservations: Vec<ReservationTarget>,
+    ) -> Self {
+        let local_peer_id = *swarm.local_peer_id();
+        let active_relay =
+            reservations.into_iter().find_map(|r| relay_info_from_multiaddr(&r.multiaddr, local_peer_id));
+
+        Self {
+            swarm,
+            command_rx,
+            incoming_tx,
+            pending_dials: HashMap::new(),
+            listen_addrs,
+            external_addrs,
+            peer_states: HashMap::new(),
+            active_relay,
+            listening: false,
+        }
     }
 
     async fn run(mut self) {
@@ -600,6 +617,11 @@ impl SwarmDriver {
                 let _ = respond_to.send(self.start_listening());
             }
             SwarmCommand::Reserve { mut target, respond_to } => {
+                if self.active_relay.is_none() {
+                    if let Some(info) = relay_info_from_multiaddr(&target, *self.swarm.local_peer_id()) {
+                        self.active_relay = Some(info);
+                    }
+                }
                 if !target.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
                     target.push(Protocol::P2pCircuit);
                 }
@@ -622,7 +644,18 @@ impl SwarmDriver {
                 let _ = event;
             }
             SwarmEvent::Behaviour(Libp2pEvent::Identify(event)) => {
-                debug!("libp2p identify event: {:?}", event);
+                match event {
+                    identify::Event::Received { peer_id, ref info, .. } => {
+                        debug!(
+                            "libp2p identify received from {peer_id}: protocols={:?} listen_addrs={:?}",
+                            info.protocols, info.listen_addrs
+                        );
+                        let supports_dcutr = info.protocols.iter().any(|p| p.as_ref() == "/libp2p/dcutr");
+                        self.mark_dcutr_support(peer_id, supports_dcutr);
+                        self.maybe_request_dialback(peer_id);
+                    }
+                    other => debug!("libp2p identify event: {:?}", other),
+                }
             }
             SwarmEvent::Behaviour(Libp2pEvent::RelayClient(event)) => match event {
                 relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
@@ -633,6 +666,8 @@ impl SwarmDriver {
                 }
                 relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
                     info!("libp2p inbound circuit established from {src_peer_id}");
+                    self.mark_relay_path(src_peer_id);
+                    self.maybe_request_dialback(src_peer_id);
                 }
                 _ => {}
             },
@@ -650,11 +685,20 @@ impl SwarmDriver {
             },
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("libp2p listening on {address}");
+                if self.active_relay.is_none() {
+                    if let Some(info) = relay_info_from_multiaddr(&address, *self.swarm.local_peer_id()) {
+                        self.active_relay = Some(info);
+                    }
+                }
                 self.listening = true;
             }
-            SwarmEvent::ConnectionEstablished { peer_id, connection_id, .. } => {
+            SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
                 debug!("libp2p connection established with {peer_id} on {connection_id:?}; requesting stream");
+                self.track_established(peer_id, &endpoint);
                 self.request_stream_bridge(peer_id, connection_id);
+            }
+            SwarmEvent::ConnectionClosed { peer_id, endpoint, .. } => {
+                self.track_closed(peer_id, &endpoint);
             }
             SwarmEvent::OutgoingConnectionError { connection_id, error, .. } => {
                 if let Some(pending) = self.pending_dials.remove(&connection_id) {
@@ -682,6 +726,27 @@ impl SwarmDriver {
 
         self.listening = true;
         Ok(())
+    }
+
+    fn track_established(&mut self, peer_id: PeerId, endpoint: &libp2p::core::ConnectedPoint) {
+        let state = self.peer_states.entry(peer_id).or_default();
+        if matches!(endpoint, libp2p::core::ConnectedPoint::Dialer { .. }) {
+            state.outgoing = state.outgoing.saturating_add(1);
+        }
+        if endpoint_uses_relay(endpoint) {
+            state.connected_via_relay = true;
+        }
+    }
+
+    fn track_closed(&mut self, peer_id: PeerId, endpoint: &libp2p::core::ConnectedPoint) {
+        if let Some(state) = self.peer_states.get_mut(&peer_id) {
+            if matches!(endpoint, libp2p::core::ConnectedPoint::Dialer { .. }) && state.outgoing > 0 {
+                state.outgoing -= 1;
+            }
+            if endpoint_uses_relay(endpoint) {
+                state.connected_via_relay = false;
+            }
+        }
     }
 
     async fn handle_stream_event(&mut self, event: StreamEvent) {
@@ -723,6 +788,45 @@ impl SwarmDriver {
                 let _ = tx.send(incoming).await;
             }
         });
+    }
+
+    fn mark_dcutr_support(&mut self, peer_id: PeerId, supports: bool) {
+        if supports {
+            self.peer_states.entry(peer_id).or_default().supports_dcutr = true;
+        }
+    }
+
+    fn mark_relay_path(&mut self, peer_id: PeerId) {
+        self.peer_states.entry(peer_id).or_default().connected_via_relay = true;
+    }
+
+    fn maybe_request_dialback(&mut self, peer_id: PeerId) {
+        let Some(state) = self.peer_states.get(&peer_id) else { return };
+        if !state.supports_dcutr || !state.connected_via_relay || state.outgoing > 0 {
+            return;
+        }
+        let Some(relay) = &self.active_relay else {
+            debug!("libp2p dcutr: no active relay available for dial-back to {peer_id}");
+            return;
+        };
+
+        let mut circuit_addr = relay.circuit_base.clone();
+        strip_peer_suffix(&mut circuit_addr, *self.swarm.local_peer_id());
+        if !circuit_addr.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+            circuit_addr.push(Protocol::P2pCircuit);
+        }
+        circuit_addr.push(Protocol::P2p(peer_id));
+
+        let opts = DialOpts::peer_id(peer_id)
+            .addresses(vec![circuit_addr.clone()])
+            .condition(PeerCondition::Always)
+            .extend_addresses_through_behaviour()
+            .build();
+
+        match self.swarm.dial(opts) {
+            Ok(()) => info!("libp2p dcutr: initiated dial-back to {peer_id} via relay {}", relay.relay_peer),
+            Err(err) => warn!("libp2p dcutr: failed to dial {peer_id} via relay {}: {err}", relay.relay_peer),
+        }
     }
 }
 
@@ -815,4 +919,53 @@ fn default_listen_addr() -> Multiaddr {
 pub enum StreamDirection {
     Inbound,
     Outbound,
+}
+
+#[derive(Clone)]
+struct RelayInfo {
+    relay_peer: PeerId,
+    circuit_base: Multiaddr,
+}
+
+#[derive(Default)]
+struct PeerState {
+    supports_dcutr: bool,
+    outgoing: usize,
+    connected_via_relay: bool,
+}
+
+fn extract_relay_peer(addr: &Multiaddr) -> Option<PeerId> {
+    let components: Vec<_> = addr.iter().collect();
+    for window in components.windows(2) {
+        if let [Protocol::P2p(peer), Protocol::P2pCircuit] = window {
+            return Some(peer.to_owned());
+        }
+    }
+    None
+}
+
+fn relay_info_from_multiaddr(addr: &Multiaddr, local_peer_id: PeerId) -> Option<RelayInfo> {
+    let relay_peer = extract_relay_peer(addr)?;
+    let mut circuit_base = addr.clone();
+    if !circuit_base.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+        circuit_base.push(Protocol::P2pCircuit);
+    }
+    strip_peer_suffix(&mut circuit_base, local_peer_id);
+    Some(RelayInfo { relay_peer, circuit_base })
+}
+
+fn strip_peer_suffix(addr: &mut Multiaddr, peer_id: PeerId) {
+    if let Some(Protocol::P2p(last)) = addr.iter().last() {
+        if last == peer_id {
+            addr.pop();
+        }
+    }
+}
+
+fn endpoint_uses_relay(endpoint: &libp2p::core::ConnectedPoint) -> bool {
+    let addr = match endpoint {
+        libp2p::core::ConnectedPoint::Dialer { address, .. } => address,
+        libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => send_back_addr,
+    };
+    addr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
 }
