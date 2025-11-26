@@ -53,6 +53,8 @@ pub struct Libp2pArgs {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub libp2p_helper_listen: Option<SocketAddr>,
+    /// Optional dedicated libp2p listen port (defaults to p2p port + 1).
+    pub libp2p_listen_port: Option<u16>,
     /// Optional inbound caps for libp2p relay connections (per relay / unknown relay bucket).
     pub libp2p_relay_inbound_cap: Option<usize>,
     pub libp2p_relay_inbound_unknown_cap: Option<usize>,
@@ -70,6 +72,7 @@ impl Default for Libp2pArgs {
             libp2p_mode: Libp2pMode::Off,
             libp2p_identity_path: None,
             libp2p_helper_listen: None,
+            libp2p_listen_port: None,
             libp2p_relay_inbound_cap: None,
             libp2p_relay_inbound_unknown_cap: None,
             libp2p_reservations: Vec::new(),
@@ -80,15 +83,18 @@ impl Default for Libp2pArgs {
 }
 
 /// Translate CLI/config args into the adapter config.
-pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path) -> AdapterConfig {
+pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: SocketAddr) -> AdapterConfig {
     let env_mode = env::var("KASPAD_LIBP2P_MODE").ok().and_then(|s| parse_libp2p_mode(&s));
     let env_identity_path = env::var("KASPAD_LIBP2P_IDENTITY_PATH").ok().map(PathBuf::from);
     let env_helper_listen = env::var("KASPAD_LIBP2P_HELPER_LISTEN").ok().and_then(|s| s.parse::<SocketAddr>().ok());
+    let env_listen_port = env::var("KASPAD_LIBP2P_LISTEN_PORT").ok().and_then(|s| s.parse::<u16>().ok());
 
     let mode = if args.libp2p_mode != Libp2pMode::default() { args.libp2p_mode } else { env_mode.unwrap_or(args.libp2p_mode) };
 
     let identity_path = args.libp2p_identity_path.clone().or(env_identity_path);
     let helper_listen = args.libp2p_helper_listen.or(env_helper_listen);
+    let listen_port = args.libp2p_listen_port.or(env_listen_port).unwrap_or_else(|| p2p_listen.port().saturating_add(1));
+    let listen_addr = SocketAddr::new(p2p_listen.ip(), listen_port);
     let relay_inbound_cap =
         args.libp2p_relay_inbound_cap.or(env::var("KASPAD_LIBP2P_RELAY_INBOUND_CAP").ok().and_then(|s| s.parse().ok()));
     let relay_inbound_unknown_cap = args
@@ -115,6 +121,7 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path) -> AdapterConf
         .mode(AdapterMode::from(mode).effective())
         .identity(identity)
         .helper_listen(helper_listen)
+        .listen_addresses(vec![listen_addr])
         .relay_inbound_cap(relay_inbound_cap)
         .relay_inbound_unknown_cap(relay_inbound_unknown_cap)
         .reservations(reservations)
@@ -226,6 +233,7 @@ impl AsyncService for Libp2pInitService {
     fn start(self: Arc<Self>) -> AsyncServiceFuture {
         Box::pin(async move {
             let handle = tokio::runtime::Handle::current();
+            log::info!("libp2p init: listen addresses {:?}", self.config.listen_addresses);
             let provider = SwarmStreamProvider::with_handle(self.config.clone(), self.identity.clone(), handle)
                 .map_err(|e| AsyncServiceError::Service(e.to_string()))?;
             let _ = self.provider_cell.set(Arc::new(provider));
@@ -273,6 +281,7 @@ impl AsyncService for Libp2pNodeService {
 
             let provider = loop {
                 if let Some(provider) = self.provider_cell.get() {
+                    log::info!("libp2p provider initialised; starting node service");
                     break provider.clone();
                 }
                 sleep(Duration::from_millis(50)).await;
@@ -280,6 +289,7 @@ impl AsyncService for Libp2pNodeService {
 
             let handler = loop {
                 if let Some(handler) = self.flow_context.connection_handler() {
+                    log::info!("libp2p connection handler available; wiring inbound bridge");
                     break handler;
                 }
                 sleep(Duration::from_millis(50)).await;
@@ -287,7 +297,10 @@ impl AsyncService for Libp2pNodeService {
 
             let svc = kaspa_p2p_libp2p::Libp2pService::with_provider(self.config.clone(), provider);
             svc.start().await.map_err(|e| AsyncServiceError::Service(e.to_string()))?;
-            svc.start_inbound(Arc::new(handler)).await.map_err(|e| AsyncServiceError::Service(e.to_string()))?;
+            if let Err(err) = svc.start_inbound(Arc::new(handler)).await {
+                log::error!("libp2p inbound bridge failed to start: {err}");
+                return Err(AsyncServiceError::Service(err.to_string()));
+            }
 
             self.shutdown.listener.clone().await;
             Ok(())
@@ -317,7 +330,7 @@ mod tests {
         env::set_var("KASPAD_LIBP2P_RELAY_INBOUND_CAP", "5");
         env::set_var("KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP", "7");
 
-        let cfg = libp2p_config_from_args(&Libp2pArgs::default(), Path::new("/tmp/app"));
+        let cfg = libp2p_config_from_args(&Libp2pArgs::default(), Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
         assert_eq!(cfg.mode, AdapterMode::Full);
         assert!(matches!(cfg.identity, AdapterIdentity::Persisted(ref path) if path.ends_with("libp2p-id.key")));
         assert_eq!(cfg.helper_listen, Some("127.0.0.1:12345".parse().unwrap()));
@@ -337,7 +350,7 @@ mod tests {
         let mut args = Libp2pArgs::default();
         args.libp2p_mode = Libp2pMode::Helper;
 
-        let cfg = libp2p_config_from_args(&args, Path::new("/tmp/app"));
+        let cfg = libp2p_config_from_args(&args, Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
         // Helper aliases to Full in the adapter config (effective mode).
         assert_eq!(cfg.mode, AdapterMode::Full);
 

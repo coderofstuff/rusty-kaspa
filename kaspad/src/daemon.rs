@@ -1,3 +1,5 @@
+#[cfg(feature = "libp2p")]
+use std::net::SocketAddr;
 use std::{fs, path::PathBuf, process::exit, sync::Arc, time::Duration};
 
 use async_channel::unbounded;
@@ -27,8 +29,6 @@ use kaspa_utils::networking::ContextualNetAddress;
 use kaspa_utils::networking::NET_ADDRESS_SERVICE_LIBP2P_RELAY;
 use kaspa_utils::sysinfo::SystemInfo;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
-#[cfg(feature = "libp2p")]
-use std::net::SocketAddr;
 
 #[cfg(feature = "libp2p")]
 use crate::libp2p::libp2p_config_from_args;
@@ -560,8 +560,7 @@ Do you confirm? (y/n)";
 
     #[cfg(feature = "libp2p")]
     let (libp2p_config, libp2p_status, outbound_connector, libp2p_init_service, libp2p_provider_cell) = {
-        let mut cfg = libp2p_config_from_args(&args.libp2p, &app_dir);
-        cfg.listen_addresses = vec![SocketAddr::new(p2p_server_addr.ip.into(), p2p_server_addr.port)];
+        let cfg = libp2p_config_from_args(&args.libp2p, &app_dir, SocketAddr::new(p2p_server_addr.ip.into(), p2p_server_addr.port));
         let runtime = crate::libp2p::libp2p_runtime_from_config(&cfg);
         let status: GetLibp2pStatusResponse = crate::libp2p::libp2p_status_from_config(&cfg, runtime.peer_id.clone());
         (cfg, status, runtime.outbound, runtime.init_service, runtime.provider_cell)

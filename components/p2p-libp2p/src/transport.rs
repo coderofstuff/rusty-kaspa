@@ -434,6 +434,7 @@ impl SwarmStreamProvider {
 
     async fn ensure_listening(&self) -> Result<(), Libp2pError> {
         let (tx, rx) = oneshot::channel();
+        info!("libp2p ensure listening on configured addresses");
         self.command_tx
             .send(SwarmCommand::EnsureListening { respond_to: tx })
             .await
@@ -577,6 +578,7 @@ impl SwarmDriver {
     async fn handle_command(&mut self, command: SwarmCommand) {
         match command {
             SwarmCommand::Dial { address, respond_to } => {
+                info!("libp2p dial request to {address}");
                 let dial_opts = DialOpts::unknown_peer_id().address(address).build();
                 let request_id = dial_opts.connection_id();
                 match self.swarm.dial(dial_opts) {
@@ -616,7 +618,7 @@ impl SwarmDriver {
             SwarmEvent::Behaviour(Libp2pEvent::Identify(event)) => {
                 debug!("libp2p identify event: {:?}", event);
             }
-            SwarmEvent::Behaviour(Libp2pEvent::Relay(event)) => match event {
+            SwarmEvent::Behaviour(Libp2pEvent::RelayClient(event)) => match event {
                 relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
                     info!("libp2p reservation accepted by {relay_peer_id}, renewal={renewal}");
                 }
@@ -628,11 +630,14 @@ impl SwarmDriver {
                 }
                 _ => {}
             },
+            SwarmEvent::Behaviour(Libp2pEvent::RelayServer(event)) => {
+                debug!("libp2p relay server event: {:?}", event);
+            }
             SwarmEvent::Behaviour(Libp2pEvent::Dcutr(event)) => {
                 debug!("libp2p dcutr event: {:?}", event);
             }
             SwarmEvent::NewListenAddr { address, .. } => {
-                debug!("libp2p listening on {address}");
+                info!("libp2p listening on {address}");
                 self.listening = true;
             }
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, .. } => {
@@ -658,6 +663,7 @@ impl SwarmDriver {
 
         for addr in addrs {
             if let Err(err) = self.swarm.listen_on(addr) {
+                warn!("libp2p failed to listen: {err}");
                 return Err(Libp2pError::ListenFailed(err.to_string()));
             }
         }
