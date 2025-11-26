@@ -26,9 +26,9 @@ Notes:
   - Result: Same behaviour as default run; P2P on 0.0.0.0:16511; no libp2p/helper started. Clean shutdown on SIGTERM.
 - Libp2p feature on, mode `full` (helper configured):
   - Command: `target/debug/kaspad --simnet --appdir /tmp/kaspad-sanity-libp2p-full --loglevel=info --nodnsseed --disable-upnp --rpcmaxclients=0 --nogrpc --libp2p-mode=full --libp2p-helper-listen=127.0.0.1:38080`
-  - Result: **Panics immediately**: `there is no reactor running, must be called from the context of a Tokio 1.x runtime` (from `SwarmStreamProvider::new`), so libp2p full mode does not start yet.
+  - Result: Starts cleanly; P2P on 0.0.0.0:16511; libp2p swarm/helper initialises without panic. (Outbound still logs “NotImplemented” stub as expected.)
 
-## Follow-ups
+## Notes / Fix
 
-- Fix libp2p full-mode startup: ensure `SwarmStreamProvider::new` is created inside a Tokio runtime (current panic blocks full-mode smoke).
-- Consider a quick retry after that fix; gating/off behaviour already matches default. No PLAN updates needed beyond tracking the startup fix.
+- Root cause: `SwarmStreamProvider::new` was constructed before a Tokio runtime existed (daemon sync path), causing “no reactor running” panics in full mode.
+- Fix: libp2p init is now deferred to an `AsyncService` (`Libp2pInitService`) registered with the existing daemon `AsyncRuntime`, constructing the swarm via `SwarmStreamProvider::with_handle` inside the runtime. Outbound connector uses a shared `OnceCell` to pick up the provider once initialised.

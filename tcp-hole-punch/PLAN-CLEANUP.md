@@ -92,7 +92,7 @@ t as alias to `full` until a real need. Helper control port requires explicit fl
 3. **Adapter / Injection Boundary**
 
    - [x] Create `components/p2p-libp2p` (feature-gated) owning: libp2p spawn/dial/listen/reserve, helper JSON API, H2 tuning, multiaddr parsing, synthetic addressing, reservation refresh/backoff.
-   - [x] Add libp2p service skeleton to host dial/listen/reservation start-up (currently stubbed/unimplemented).
+   - [x] Add libp2p service skeleton to host dial/listen/reservation start-up (currently stubbed/unimplemented). Libp2p swarm/provider is initialised inside the daemon `AsyncRuntime` (see `Libp2pInitService`) to avoid pre-runtime panics.
    - [x] Structure adapter crate into submodules (e.g., `helper_api`, `reservations`, `transport`, `metadata`) to avoid a god module.
    - [x] Make `ConnectionHandler` transport-agnostic: accept `AsyncRead/AsyncWrite` + metadata. Metadata separates identity (PeerId/IP), path (relay/origin), capabilities—document this boundary.
    - [x] Synthetic address stable per PeerId (relay-agnostic); store relay metadata separately. Synthetic address is identity accounting only (not a reachable address).

@@ -27,6 +27,7 @@ use kaspa_utils::networking::ContextualNetAddress;
 use kaspa_utils::networking::NET_ADDRESS_SERVICE_LIBP2P_RELAY;
 use kaspa_utils::sysinfo::SystemInfo;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
+#[cfg(feature = "libp2p")]
 use log::warn;
 
 #[cfg(feature = "libp2p")]
@@ -330,15 +331,16 @@ pub fn create_core_with_runtime(runtime: &Runtime, args: &Args, fd_total_budget:
 
     let app_dir = get_app_dir_from_args(args);
     #[cfg(feature = "libp2p")]
-    let (libp2p_config, libp2p_status, outbound_connector): (
+    let (libp2p_config, libp2p_status, outbound_connector, libp2p_init_service): (
         kaspa_p2p_libp2p::Config,
         GetLibp2pStatusResponse,
         Arc<dyn kaspa_p2p_lib::OutboundConnector>,
+        Option<Arc<crate::libp2p::Libp2pInitService>>,
     ) = {
         let cfg = libp2p_config_from_args(&args.libp2p, &app_dir);
         let runtime = crate::libp2p::libp2p_runtime_from_config(&cfg);
         let status = crate::libp2p::libp2p_status_from_config(&cfg, runtime.peer_id.clone());
-        (cfg, status, runtime.outbound)
+        (cfg, status, runtime.outbound, runtime.init_service)
     };
     #[cfg(feature = "libp2p")]
     if libp2p_config.mode.is_enabled() {
@@ -760,6 +762,10 @@ Do you confirm? (y/n)";
     async_runtime.register(rpc_core_service.clone());
     if let Some(grpc_service) = grpc_service {
         async_runtime.register(grpc_service)
+    }
+    #[cfg(feature = "libp2p")]
+    if let Some(libp2p_init_service) = libp2p_init_service {
+        async_runtime.register(libp2p_init_service);
     }
     async_runtime.register(p2p_service);
     async_runtime.register(consensus_monitor);

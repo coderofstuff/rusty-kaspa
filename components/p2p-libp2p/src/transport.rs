@@ -18,6 +18,7 @@ use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use std::{fs, io, path::Path};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::OnceCell;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -193,6 +194,15 @@ mod tests {
             other => panic!("expected relay path, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn swarm_provider_requires_runtime() {
+        let cfg = Config::default();
+        let id = Libp2pIdentity::from_config(&cfg).expect("identity");
+        // Should succeed inside a Tokio runtime.
+        let res = SwarmStreamProvider::new(cfg, id);
+        assert!(res.is_ok());
+    }
 }
 
 /// Outbound connector that prefers libp2p when enabled, otherwise falls back to TCP.
@@ -200,15 +210,24 @@ pub struct Libp2pOutboundConnector {
     config: Config,
     fallback: Arc<dyn OutboundConnector>,
     provider: Option<Arc<dyn Libp2pStreamProvider>>,
+    provider_cell: Option<Arc<OnceCell<Arc<dyn Libp2pStreamProvider>>>>,
 }
 
 impl Libp2pOutboundConnector {
     pub fn new(config: Config, fallback: Arc<dyn OutboundConnector>) -> Self {
-        Self { config, fallback, provider: None }
+        Self { config, fallback, provider: None, provider_cell: None }
     }
 
     pub fn with_provider(config: Config, fallback: Arc<dyn OutboundConnector>, provider: Arc<dyn Libp2pStreamProvider>) -> Self {
-        Self { config, fallback, provider: Some(provider) }
+        Self { config, fallback, provider: Some(provider), provider_cell: None }
+    }
+
+    pub fn with_provider_cell(
+        config: Config,
+        fallback: Arc<dyn OutboundConnector>,
+        provider_cell: Arc<OnceCell<Arc<dyn Libp2pStreamProvider>>>,
+    ) -> Self {
+        Self { config, fallback, provider: None, provider_cell: Some(provider_cell) }
     }
 }
 
@@ -254,7 +273,38 @@ impl OutboundConnector for Libp2pOutboundConnector {
             });
         }
 
-        Box::pin(async move { Err(ConnectionError::ProtocolError(ProtocolError::Other("libp2p outbound connector unimplemented"))) })
+        if let Some(cell) = &self.provider_cell {
+            if let Some(provider) = cell.get() {
+                let address = match NetAddress::from_str(&address) {
+                    Ok(addr) => addr,
+                    Err(_) => {
+                        return Box::pin(async move {
+                            Err(ConnectionError::ProtocolError(ProtocolError::Other("invalid libp2p address provided")))
+                        })
+                    }
+                };
+                let provider = provider.clone();
+                let handler = handler.clone();
+                return Box::pin(async move {
+                    let (mut md, stream) = provider
+                        .dial(address)
+                        .await
+                        .map_err(|_| ConnectionError::ProtocolError(ProtocolError::Other("libp2p dial failed")))?;
+
+                    md.capabilities.libp2p = true;
+                    if matches!(md.path, kaspa_p2p_lib::PathKind::Unknown) {
+                        md.path = kaspa_p2p_lib::PathKind::Direct;
+                    }
+                    handler.connect_with_stream(stream, md).await
+                });
+            }
+        }
+
+        Box::pin(async move {
+            Err(ConnectionError::ProtocolError(ProtocolError::Other(
+                "libp2p outbound connector unavailable (provider not initialised)",
+            )))
+        })
     }
 }
 
@@ -385,11 +435,16 @@ pub struct SwarmStreamProvider {
 
 impl SwarmStreamProvider {
     pub fn new(config: Config, identity: Libp2pIdentity) -> Result<Self, Libp2pError> {
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| Libp2pError::ListenFailed("missing tokio runtime".into()))?;
+        Self::with_handle(config, identity, handle)
+    }
+
+    pub fn with_handle(config: Config, identity: Libp2pIdentity, handle: tokio::runtime::Handle) -> Result<Self, Libp2pError> {
         let (command_tx, command_rx) = mpsc::channel(16);
         let (incoming_tx, incoming_rx) = mpsc::channel(32);
         let protocol = default_stream_protocol();
         let swarm = build_streaming_swarm(&identity, protocol.clone())?;
-        let task = tokio::spawn(SwarmDriver::new(swarm, command_rx, incoming_tx).run());
+        let task = handle.spawn(SwarmDriver::new(swarm, command_rx, incoming_tx).run());
 
         Ok(Self { config, command_tx, incoming: Mutex::new(incoming_rx), _task: task })
     }

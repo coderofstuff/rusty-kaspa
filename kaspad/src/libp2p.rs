@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use kaspa_core::task::service::{AsyncService, AsyncServiceError, AsyncServiceFuture};
 use kaspa_p2p_lib::{OutboundConnector, TcpConnector};
 use kaspa_p2p_libp2p::SwarmStreamProvider;
 use kaspa_p2p_libp2p::{
@@ -14,6 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tokio::sync::OnceCell;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -134,36 +136,37 @@ pub struct Libp2pRuntime {
     pub outbound: Arc<dyn OutboundConnector>,
     pub peer_id: Option<String>,
     pub identity: Option<kaspa_p2p_libp2p::Libp2pIdentity>,
+    pub(crate) init_service: Option<Arc<Libp2pInitService>>,
 }
 
 pub fn libp2p_runtime_from_config(config: &AdapterConfig) -> Libp2pRuntime {
     if config.mode.is_enabled() {
         match kaspa_p2p_libp2p::Libp2pIdentity::from_config(config) {
-            Ok(identity) => match SwarmStreamProvider::new(config.clone(), identity.clone()) {
-                Ok(provider) => {
-                    let peer_id = Some(identity.peer_id_string());
-                    let outbound =
-                        Arc::new(Libp2pOutboundConnector::with_provider(config.clone(), Arc::new(TcpConnector), Arc::new(provider)));
-                    Libp2pRuntime { outbound, peer_id, identity: Some(identity) }
-                }
-                Err(err) => {
-                    log::warn!("libp2p runtime failed to start: {err}; falling back to TCP only");
-                    Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None }
-                }
-            },
+            Ok(identity) => {
+                let peer_id = Some(identity.peer_id_string());
+                let provider_cell: Arc<OnceCell<Arc<dyn kaspa_p2p_libp2p::Libp2pStreamProvider>>> = Arc::new(OnceCell::new());
+                let outbound = Arc::new(Libp2pOutboundConnector::with_provider_cell(
+                    config.clone(),
+                    Arc::new(TcpConnector),
+                    provider_cell.clone(),
+                ));
+                let init_service =
+                    Some(Arc::new(Libp2pInitService { config: config.clone(), identity: identity.clone(), provider_cell }));
+                Libp2pRuntime { outbound, peer_id, identity: Some(identity), init_service }
+            }
             Err(err) => {
                 log::warn!("libp2p identity setup failed: {err}; falling back to TCP only");
-                Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None }
+                Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None, init_service: None }
             }
         }
     } else {
-        Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None }
+        Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None, init_service: None }
     }
 }
 
 #[cfg(not(feature = "libp2p"))]
 pub fn libp2p_runtime_from_config(_config: &AdapterConfig) -> Libp2pRuntime {
-    Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None }
+    Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None, init_service: None }
 }
 
 fn resolve_identity_path(path: &Path, app_dir: &Path) -> PathBuf {
@@ -191,6 +194,34 @@ where
         return cli.to_vec();
     }
     env_val.map(|s| s.split(',').filter_map(|item| parse(item.trim())).collect()).unwrap_or_default()
+}
+
+pub(crate) struct Libp2pInitService {
+    config: AdapterConfig,
+    identity: kaspa_p2p_libp2p::Libp2pIdentity,
+    provider_cell: Arc<OnceCell<Arc<dyn kaspa_p2p_libp2p::Libp2pStreamProvider>>>,
+}
+
+impl AsyncService for Libp2pInitService {
+    fn ident(self: Arc<Self>) -> &'static str {
+        "libp2p-init"
+    }
+
+    fn start(self: Arc<Self>) -> AsyncServiceFuture {
+        Box::pin(async move {
+            let handle = tokio::runtime::Handle::current();
+            let provider = SwarmStreamProvider::with_handle(self.config.clone(), self.identity.clone(), handle)
+                .map_err(|e| AsyncServiceError::Service(e.to_string()))?;
+            let _ = self.provider_cell.set(Arc::new(provider));
+            Ok(())
+        })
+    }
+
+    fn signal_exit(self: Arc<Self>) {}
+
+    fn stop(self: Arc<Self>) -> AsyncServiceFuture {
+        Box::pin(async move { Ok(()) })
+    }
 }
 
 #[cfg(test)]
