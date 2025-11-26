@@ -3,7 +3,7 @@
 ## Modes and defaults
 - **off** (default): libp2p disabled; transport is plain TCP. No libp2p deps pulled in unless compiled with `--features libp2p`.
 - **full/helper**: libp2p stack enabled (helper == full for now). Requires explicit `--libp2p-mode full|helper`.
-- Helper control (relay/DCUtR) binds only when `--libp2p-helper-listen <addr>` is set.
+- Helper control (relay/DCUtR) binds only when `--libp2p-helper-listen <addr>` is set (control plane currently stubbed; no listener binds yet).
 - Ports: helper listen is explicit; TCP P2P port stays unchanged (`--listen`/default p2p port).
 
 ## Identity & privacy
