@@ -19,6 +19,7 @@
 
 ## Config surface (env/CLI highlights)
 - `--libp2p-mode`, `--libp2p-identity-path`, `--libp2p-helper-listen`, `--libp2p-listen-port`
+- `--libp2p-autonat-allow-private`: Allow AutoNAT to discover and verify private IPs (e.g. for labs). Default: off (global only).
 - Reservations: `--libp2p-reservations` (comma-separated) or `KASPAD_LIBP2P_RESERVATIONS`
 - External announce: `--libp2p-external-multiaddrs`, `--libp2p-advertise-addresses`
 - Inbound caps: `--libp2p-relay-inbound-cap`, `--libp2p-relay-inbound-unknown-cap`
@@ -27,6 +28,7 @@
 ## Examples
 - Plain TCP public node (libp2p off): default build/run (no flags).
 - Private relay (ephemeral ID): `--features libp2p --libp2p-mode full --libp2p-helper-listen 0.0.0.0:38080`
+- **Lab / Private Relay:** Use `--libp2p-autonat-allow-private` if your relay or peers are on private IPs (e.g. 10.x.x.x, 192.168.x.x). Do NOT use this on public mainnet relays.
 - Public relay with persistent ID + advertised addresses:
   ```
   target/debug/kaspad --simnet --libp2p-mode=full --libp2p-helper-listen=0.0.0.0:38080 \

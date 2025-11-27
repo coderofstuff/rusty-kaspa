@@ -26,7 +26,7 @@ LIBP2P_PORT=${LIBP2P_PORT:-$((P2P_PORT + 1))}
 RPC_PORT=${RPC_PORT:-17110}
 HELPER_PORT=${HELPER_PORT:-38080}
 LOGLEVEL=${LOGLEVEL:-debug}
-RUST_LOG=${RUST_LOG:-info,libp2p_swarm=info,libp2p_dcutr=debug,libp2p_identify=info}
+RUST_LOG=${RUST_LOG:-info,kaspa_p2p_libp2p=debug,libp2p_swarm=info,libp2p_dcutr=debug,libp2p_autonat=debug,libp2p_identify=info}
 
 APPDIR_A=${APPDIR_A:-~/kaspa/node-a}
 APPDIR_B=${APPDIR_B:-~/kaspa/node-b}
@@ -38,6 +38,9 @@ B_EXTERNAL_IP=${B_EXTERNAL_IP:-10.0.3.62}
 
 # Required for starting nodes A/B.
 C_PEER_ID=${C_PEER_ID:-}
+
+# AutoNAT: Allow private IPs for lab environment
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=${KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE:-true}
 
 ssh_run() {
   local host=$1
@@ -55,6 +58,7 @@ LOG=${APPDIR_C}/kaspad.log
 : > "\${LOG}"
 RUST_LOG=${RUST_LOG} \\
 KASPAD_LIBP2P_LISTEN_PORT=${LIBP2P_PORT} \\
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=${KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE} \\
 nohup ${BIN_PATH} \\
   ${NETWORK_FLAG} \\
   --appdir=${APPDIR_C} \\
@@ -93,6 +97,7 @@ LOG=${appdir}/kaspad.log
 KASPAD_LIBP2P_RESERVATIONS=${reservations} \\
 KASPAD_LIBP2P_EXTERNAL_MULTIADDRS=/ip4/${external_ip}/tcp/${LIBP2P_PORT} \\
 KASPAD_LIBP2P_LISTEN_PORT=${LIBP2P_PORT} \\
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=${KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE} \\
 RUST_LOG=${RUST_LOG} \\
 nohup ${BIN_PATH} \\
   ${NETWORK_FLAG} \\
@@ -125,13 +130,22 @@ case "${action}" in
     start_private_node "${NODE_A}" "${APPDIR_A}" "${A_EXTERNAL_IP}" "127.0.0.1:${HELPER_PORT}"
     start_private_node "${NODE_B}" "${APPDIR_B}" "${B_EXTERNAL_IP}" "127.0.0.1:${HELPER_PORT}"
     ;;
+  start-ab)
+    echo "Starting nodes A and B with existing C_PEER_ID=${C_PEER_ID}"
+    start_private_node "${NODE_A}" "${APPDIR_A}" "${A_EXTERNAL_IP}" "127.0.0.1:${HELPER_PORT}"
+    start_private_node "${NODE_B}" "${APPDIR_B}" "${B_EXTERNAL_IP}" "127.0.0.1:${HELPER_PORT}"
+    ;;
+  start-c)
+    start_node_c
+    echo "Started node C on ${NODE_C}; fetch peer id via getLibp2pStatus before starting A/B."
+    ;;
   stop)
     stop_node "${NODE_A}"
     stop_node "${NODE_B}"
     stop_node "${NODE_C}"
     ;;
   *)
-    echo "Usage: $0 [start|stop]" >&2
+    echo "Usage: $0 [start|start-ab|start-c|stop]" >&2
     exit 1
     ;;
 esac

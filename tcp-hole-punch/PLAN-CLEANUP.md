@@ -72,6 +72,8 @@ If you believe a change in one of these directories is absolutely required, you 
      - Implemented `DcutrHackBehaviour` to manually advertise `/libp2p/dcutr` protocol, resolving a regression where `dcutr` behaviour was not registering its protocol with `Identify`.
      - Fixed double-stream initiation race condition on Node C by ensuring only the connection dialer initiates the bridge stream.
      - **Restored Helper API Dialing:** Re-implemented the helper API to support manual dialing of circuit addresses, which is essential for triggering the hole punch in the absence of automatic discovery (MDNS/Kademlia).
+     - **AutoNAT / Private IP Flag (2025-11-27):** Added `--libp2p-autonat-allow-private` flag to enable AutoNAT server support for private IPs in lab environments, defaulting to safe global-only behaviour for production.
+     - **DCUtR Lab Verification:** Successfully verified DCUtR hole punching in the Proxmox NAT lab with the AutoNAT fix and Identify push updates disabled.
 - [x] Out-of-scope diffs: none (checked against `upstream/master` for guarded directories).
 - Stub sweep: transport hot paths no longer emit `NotImplemented`; remaining TODOs are legacy (unrelated to libp2p) or helper-control stubs. Dcutr success/failure now logged at info.
 

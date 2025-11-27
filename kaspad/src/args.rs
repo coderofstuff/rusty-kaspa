@@ -539,6 +539,13 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .use_value_delimiter(true)
                 .value_parser(clap::value_parser!(SocketAddr))
                 .help("Comma-separated addresses to advertise for non-libp2p aware peers."),
+        )
+        .arg(
+            Arg::new("libp2p-autonat-allow-private")
+                .long("libp2p-autonat-allow-private")
+                .env("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE")
+                .action(ArgAction::SetTrue)
+                .help("Allow AutoNAT to discover and verify private IP addresses (useful for lab environments)."),
         );
 
     #[cfg(feature = "devnet-prealloc")]
@@ -652,6 +659,11 @@ impl Args {
                     .get_many::<SocketAddr>("libp2p-advertise-addresses")
                     .map(|vals| vals.copied().collect())
                     .unwrap_or(defaults.libp2p.libp2p_advertise_addresses),
+                libp2p_autonat_allow_private: arg_match_unwrap_or::<bool>(
+                    &m,
+                    "libp2p-autonat-allow-private",
+                    defaults.libp2p.libp2p_autonat_allow_private,
+                ),
             },
 
             #[cfg(feature = "devnet-prealloc")]

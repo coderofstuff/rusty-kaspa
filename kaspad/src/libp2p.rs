@@ -5,8 +5,8 @@ use kaspa_p2p_flows::flow_context::FlowContext;
 use kaspa_p2p_lib::{OutboundConnector, TcpConnector};
 use kaspa_p2p_libp2p::SwarmStreamProvider;
 use kaspa_p2p_libp2p::{
-    Config as AdapterConfig, ConfigBuilder as AdapterConfigBuilder, Identity as AdapterIdentity, Libp2pOutboundConnector,
-    Mode as AdapterMode,
+    AutoNatConfig, Config as AdapterConfig, ConfigBuilder as AdapterConfigBuilder, Identity as AdapterIdentity,
+    Libp2pOutboundConnector, Mode as AdapterMode,
 };
 use kaspa_rpc_core::{GetLibp2pStatusResponse, RpcLibp2pIdentity, RpcLibp2pMode};
 #[cfg(feature = "libp2p")]
@@ -64,6 +64,8 @@ pub struct Libp2pArgs {
     pub libp2p_external_multiaddrs: Vec<String>,
     /// Addresses to advertise (non-libp2p aware).
     pub libp2p_advertise_addresses: Vec<SocketAddr>,
+    /// Allow AutoNAT to discover private IPs (for lab environments).
+    pub libp2p_autonat_allow_private: bool,
 }
 
 impl Default for Libp2pArgs {
@@ -78,6 +80,7 @@ impl Default for Libp2pArgs {
             libp2p_reservations: Vec::new(),
             libp2p_external_multiaddrs: Vec::new(),
             libp2p_advertise_addresses: Vec::new(),
+            libp2p_autonat_allow_private: false,
         }
     }
 }
@@ -88,6 +91,10 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
     let env_identity_path = env::var("KASPAD_LIBP2P_IDENTITY_PATH").ok().map(PathBuf::from);
     let env_helper_listen = env::var("KASPAD_LIBP2P_HELPER_LISTEN").ok().and_then(|s| s.parse::<SocketAddr>().ok());
     let env_listen_port = env::var("KASPAD_LIBP2P_LISTEN_PORT").ok().and_then(|s| s.parse::<u16>().ok());
+    let env_autonat_allow_private = env::var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE")
+        .ok()
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     let mode = if args.libp2p_mode != Libp2pMode::default() { args.libp2p_mode } else { env_mode.unwrap_or(args.libp2p_mode) };
 
@@ -110,12 +117,16 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
         merge_list(&args.libp2p_advertise_addresses, env::var("KASPAD_LIBP2P_ADVERTISE_ADDRESSES").ok().as_deref(), |s| {
             s.parse::<SocketAddr>().ok()
         });
+    let autonat_allow_private = args.libp2p_autonat_allow_private || env_autonat_allow_private;
 
     let identity = identity_path
         .as_ref()
         .map(|path| resolve_identity_path(path, app_dir))
         .map(AdapterIdentity::Persisted)
         .unwrap_or(AdapterIdentity::Ephemeral);
+
+    let mut autonat_config = AutoNatConfig::default();
+    autonat_config.server_only_if_public = !autonat_allow_private; // Default is true (global only), allow_private flips it.
 
     AdapterConfigBuilder::new()
         .mode(AdapterMode::from(mode).effective())
@@ -127,6 +138,7 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
         .reservations(reservations)
         .external_multiaddrs(external_multiaddrs)
         .advertise_addresses(advertise_addresses)
+        .autonat(autonat_config)
         .build()
 }
 
@@ -341,6 +353,7 @@ mod tests {
         env::set_var("KASPAD_LIBP2P_HELPER_LISTEN", "127.0.0.1:12345");
         env::set_var("KASPAD_LIBP2P_RELAY_INBOUND_CAP", "5");
         env::set_var("KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP", "7");
+        env::set_var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE", "true");
 
         let cfg = libp2p_config_from_args(&Libp2pArgs::default(), Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
         assert_eq!(cfg.mode, AdapterMode::Full);
@@ -348,12 +361,14 @@ mod tests {
         assert_eq!(cfg.helper_listen, Some("127.0.0.1:12345".parse().unwrap()));
         assert_eq!(cfg.relay_inbound_cap, Some(5));
         assert_eq!(cfg.relay_inbound_unknown_cap, Some(7));
+        assert_eq!(cfg.autonat.server_only_if_public, false); // allow_private=true -> server_only_if_public=false
 
         env::remove_var("KASPAD_LIBP2P_MODE");
         env::remove_var("KASPAD_LIBP2P_IDENTITY_PATH");
         env::remove_var("KASPAD_LIBP2P_HELPER_LISTEN");
         env::remove_var("KASPAD_LIBP2P_RELAY_INBOUND_CAP");
         env::remove_var("KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP");
+        env::remove_var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE");
     }
 
     #[test]
