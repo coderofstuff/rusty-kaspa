@@ -748,6 +748,9 @@ impl SwarmDriver {
                     self.request_stream_bridge(peer_id, connection_id);
                 } else {
                     debug!("libp2p waiting for stream from {peer_id} (as listener)");
+                    // If we are only a listener on a relayed connection and the peer supports DCUtR,
+                    // initiate a bidirectional dial-back via the active relay so we become a dialer too.
+                    self.maybe_request_dialback(peer_id);
                 }
             }
             SwarmEvent::ConnectionClosed { peer_id, endpoint, .. } => {
