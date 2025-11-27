@@ -650,6 +650,9 @@ impl SwarmDriver {
                             "libp2p identify received from {peer_id}: protocols={:?} listen_addrs={:?}",
                             info.protocols, info.listen_addrs
                         );
+                        if !addr_uses_relay(&info.observed_addr) {
+                            self.swarm.add_external_address(info.observed_addr.clone());
+                        }
                         let supports_dcutr = info.protocols.iter().any(|p| p.as_ref() == "/libp2p/dcutr");
                         self.mark_dcutr_support(peer_id, supports_dcutr);
                         self.maybe_request_dialback(peer_id);
@@ -735,6 +738,9 @@ impl SwarmDriver {
         }
         if endpoint_uses_relay(endpoint) {
             state.connected_via_relay = true;
+            debug!("libp2p track_established: peer {} connected via relay", peer_id);
+        } else {
+            debug!("libp2p track_established: peer {} connected DIRECTLY (no relay)", peer_id);
         }
     }
 
@@ -801,10 +807,23 @@ impl SwarmDriver {
     }
 
     fn maybe_request_dialback(&mut self, peer_id: PeerId) {
-        let Some(state) = self.peer_states.get(&peer_id) else { return };
-        if !state.supports_dcutr || !state.connected_via_relay || state.outgoing > 0 {
+        let Some(state) = self.peer_states.get(&peer_id) else {
+            debug!("libp2p dcutr: skipping dial-back to {peer_id}: no peer state");
+            return;
+        };
+        if !state.supports_dcutr {
+            debug!("libp2p dcutr: skipping dial-back to {peer_id}: peer does not support dcutr");
             return;
         }
+        if !state.connected_via_relay {
+            debug!("libp2p dcutr: skipping dial-back to {peer_id}: not connected via relay");
+            return;
+        }
+        if state.outgoing > 0 {
+            debug!("libp2p dcutr: skipping dial-back to {peer_id}: already have outgoing connection");
+            return;
+        }
+        
         let Some(relay) = &self.active_relay else {
             debug!("libp2p dcutr: no active relay available for dial-back to {peer_id}");
             return;
@@ -960,6 +979,10 @@ fn strip_peer_suffix(addr: &mut Multiaddr, peer_id: PeerId) {
             addr.pop();
         }
     }
+}
+
+fn addr_uses_relay(addr: &Multiaddr) -> bool {
+    addr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
 }
 
 fn endpoint_uses_relay(endpoint: &libp2p::core::ConnectedPoint) -> bool {

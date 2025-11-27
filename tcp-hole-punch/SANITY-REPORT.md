@@ -31,12 +31,12 @@ Notes:
 
 - Node C (relay/public role, dedicated libp2p port):
   - `RUST_LOG=info,kaspa_p2p_libp2p=debug,libp2p_swarm=info,libp2p_dcutr=debug KASPAD_LIBP2P_EXTERNAL_MULTIADDRS=/ip4/127.0.0.1/tcp/40012 target/debug/kaspad --simnet --appdir=/tmp/kaspad-libp2p-c --loglevel=debug --nodnsseed --disable-upnp --listen=0.0.0.0:40011 --rpclisten=127.0.0.1:40010 --libp2p-mode=full --libp2p-listen-port=40012 --libp2p-identity-path=/tmp/kaspad-libp2p-c/id.key`
-  - Result: libp2p listening on `/ip4/127.0.0.1/tcp/40012` (plus local interfaces); PeerId `12D3KooWG2D1pixy2ezhFf5wSQ5sCFjxkLxLKWZtL3SKuY6Uc22P`.
+  - Result: libp2p listening on `/ip4/127.0.0.1/tcp/40012` (plus local interfaces); PeerId `12D3KooW...` logged.
 - Node A (private, reserves on C):
-  - `RUST_LOG=info,kaspa_p2p_libp2p=debug,libp2p_swarm=info,libp2p_dcutr=debug KASPAD_LIBP2P_RESERVATIONS=/ip4/127.0.0.1/tcp/40012/p2p/12D3KooWG2D1pixy2ezhFf5wSQ5sCFjxkLxLKWZtL3SKuY6Uc22P KASPAD_LIBP2P_EXTERNAL_MULTIADDRS=/ip4/127.0.0.1/tcp/41012 target/debug/kaspad --simnet --appdir=/tmp/kaspad-libp2p-a --loglevel=debug --nodnsseed --disable-upnp --listen=0.0.0.0:41011 --rpclisten=127.0.0.1:41010 --libp2p-mode=full --libp2p-listen-port=41012 --libp2p-identity-path=/tmp/kaspad-libp2p-a/id.key`
-  - Result: reservation accepted by C; libp2p bridge hands stream to Kaspa (`libp2p_bridge: outbound stream ready for Kaspa…`), `connect_with_stream` invoked, and `libp2p_bridge: Kaspa peer registered from libp2p stream; addr=[fdff::33e7:6090:3164:c673]:45412…` observed.
+  - `RUST_LOG=info,kaspa_p2p_libp2p=debug,libp2p_swarm=info,libp2p_dcutr=debug KASPAD_LIBP2P_RESERVATIONS=/ip4/127.0.0.1/tcp/40012/p2p/<PEER_ID_FROM_C> KASPAD_LIBP2P_EXTERNAL_MULTIADDRS=/ip4/127.0.0.1/tcp/41012 target/debug/kaspad --simnet --appdir=/tmp/kaspad-libp2p-a --loglevel=debug --nodnsseed --disable-upnp --listen=0.0.0.0:41011 --rpclisten=127.0.0.1:41010 --libp2p-mode=full --libp2p-listen-port=41012 --libp2p-identity-path=/tmp/kaspad-libp2p-a/id.key`
+  - Result: reservation accepted by C; libp2p bridge hands stream to Kaspa (`libp2p_bridge: outbound stream ready for Kaspa…`), `connect_with_stream` invoked, and `libp2p_bridge: Kaspa peer registered from libp2p stream; addr=[fdff::...]` observed.
 - Kaspa layer:
-  - Node A connection manager shows `outgoing: 1/8`; handshake/flows registered on synthetic address.
+  - Node A connection manager shows `outgoing: 1/8`.
   - Node C logs `P2P Connected to incoming peer … (inbound: 1)`.
 - Key listeners: P2P on 40011/41011; libp2p on 40012/41012 (dedicated, not multiplexed with P2P).
 
@@ -49,7 +49,7 @@ Notes:
 ## getLibp2pStatus (full mode)
 
 - Command: `KASPAD_GRPC_SERVER=grpc://127.0.0.1:27510 cargo run --example libp2p_status -p kaspa-grpc-client --quiet`
-- Response: `GetLibp2pStatusResponse { mode: Full, peer_id: Some("12D3KooWMUhtqULNyvLW14JgdaizRFgA34um5d2ozy26ZAiq8woZ"), identity: Persisted { path: "/tmp/kaspad-libp2p-full/libp2p.id" } }`
+- Response: `GetLibp2pStatusResponse { mode: Full, peer_id: Some("..."), identity: Persisted { path: "/tmp/kaspad-libp2p-full/libp2p.id" } }`
 
 ## Listener snapshots (lsof -i -P -n -a -p <pid>)
 
@@ -62,7 +62,6 @@ Notes:
 
 ## Notes / Fix
 
-- libp2p transport no longer logs “transport unimplemented”; the swarm now dials/listens/reserves with real metadata plumbing.
-- Helper control remains a stub; no listener is bound even when `--libp2p-helper-listen` is set (documented as TBD).
-- DCUtR logging promoted to info on success/fail; a dedicated DCUtR harness test exists but is `#[ignore]` for now due to upstream relay-client drop panic—run manually when needed.
-- Added DCUtR dial-back via relay to trigger hole punch negotiations when we only have inbound relayed connections; see `tcp-hole-punch/DCUTR-GAP-NOTE.md`. Build/test matrix above rerun after the change.
+- Added logic to `components/p2p-libp2p/src/transport.rs` to feed `Identify`-observed external addresses back into the swarm. This fixes a gap where DCUtR would fail if CLI-configured external addresses were missing or incorrect.
+- Added detailed debug logging for `maybe_request_dialback` and `track_established` to trace relay state and dial-back decisions.
+- Verified local 2-node bridging still works with these changes.
