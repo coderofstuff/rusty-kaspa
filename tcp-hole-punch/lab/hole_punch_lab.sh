@@ -16,6 +16,11 @@ NODE_C=${NODE_C:-ubuntu@10.0.3.50}
 
 REPO_PATH=${REPO_PATH:-~/rusty-kaspa}
 BIN_PATH=${BIN_PATH:-${REPO_PATH}/target/release/kaspad}
+NETWORK_FLAG=${NETWORK_FLAG-}
+if [[ -z ${NETWORK_FLAG+x} ]]; then
+  # Default to simnet unless caller overrides. Set NETWORK_FLAG="" to run mainnet.
+  NETWORK_FLAG="--simnet"
+fi
 P2P_PORT=${P2P_PORT:-16111}
 LIBP2P_PORT=${LIBP2P_PORT:-$((P2P_PORT + 1))}
 RPC_PORT=${RPC_PORT:-17110}
@@ -51,7 +56,7 @@ LOG=${APPDIR_C}/kaspad.log
 RUST_LOG=${RUST_LOG} \\
 KASPAD_LIBP2P_LISTEN_PORT=${LIBP2P_PORT} \\
 nohup ${BIN_PATH} \\
-  --simnet \\
+  ${NETWORK_FLAG} \\
   --appdir=${APPDIR_C} \\
   --loglevel=${LOGLEVEL} \\
   --nodnsseed \\
@@ -90,7 +95,7 @@ KASPAD_LIBP2P_EXTERNAL_MULTIADDRS=/ip4/${external_ip}/tcp/${LIBP2P_PORT} \\
 KASPAD_LIBP2P_LISTEN_PORT=${LIBP2P_PORT} \\
 RUST_LOG=${RUST_LOG} \\
 nohup ${BIN_PATH} \\
-  --simnet \\
+  ${NETWORK_FLAG} \\
   --appdir=${appdir} \\
   --loglevel=${LOGLEVEL} \\
   --nodnsseed \\
