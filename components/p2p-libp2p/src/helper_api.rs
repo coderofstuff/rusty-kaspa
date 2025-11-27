@@ -37,10 +37,10 @@ impl HelperApi {
             "dial" => {
                 let addr_str = req.multiaddr.ok_or_else(|| HelperError::Invalid("missing multiaddr".into()))?;
                 let addr = Multiaddr::from_str(&addr_str).map_err(|e| HelperError::Invalid(e.to_string()))?;
-                
+
                 // Trigger the dial. We don't return the stream here, just success/failure of connection.
                 let _ = self.provider.dial_multiaddr(addr).await.map_err(|e| HelperError::DialFailed(e.to_string()))?;
-                
+
                 Ok(r#"{"ok":true,"msg":"dial successful"}"#.to_string())
             }
             _ => Err(HelperError::UnknownAction),
@@ -67,7 +67,8 @@ mod tests {
         }
         fn listen<'a>(
             &'a self,
-        ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
+        ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>>
+        {
             Box::pin(async { Err(Libp2pError::Disabled) })
         }
         fn reserve<'a>(&'a self, _: Multiaddr) -> BoxFuture<'a, Result<(), Libp2pError>> {

@@ -1,6 +1,6 @@
+use futures::StreamExt;
 use kaspa_p2p_libp2p::config::{ConfigBuilder, Mode};
 use kaspa_p2p_libp2p::Libp2pIdentity;
-use futures::StreamExt;
 use libp2p::core::transport::choice::OrTransport;
 use libp2p::core::upgrade;
 use libp2p::dcutr;

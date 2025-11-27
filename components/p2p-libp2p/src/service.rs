@@ -1,7 +1,7 @@
+use crate::helper_api::HelperApi;
 use crate::reservations::ReservationManager;
 use crate::transport::{multiaddr_to_metadata, BoxedLibp2pStream, Libp2pStreamProvider, StreamDirection};
 use crate::{config::Config, transport::Libp2pError};
-use crate::helper_api::HelperApi;
 use kaspa_p2p_lib::{ConnectionHandler, MetadataConnectInfo, PathKind};
 use libp2p::Multiaddr;
 use log::{debug, warn};
@@ -10,8 +10,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::ReceiverStream;
@@ -60,14 +60,14 @@ impl Libp2pService {
             let api = HelperApi::new(provider.clone());
             let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| Libp2pError::ListenFailed(e.to_string()))?;
             log::info!("libp2p helper API listening on {addr}");
-            
+
             tokio::spawn(async move {
                 loop {
                     if let Ok((stream, _)) = listener.accept().await {
-                         let api = api.clone();
-                         tokio::spawn(async move {
-                             handle_helper_connection(stream, api).await;
-                         });
+                        let api = api.clone();
+                        tokio::spawn(async move {
+                            handle_helper_connection(stream, api).await;
+                        });
                     }
                 }
             });
@@ -434,7 +434,10 @@ mod tests {
             })
         }
 
-        fn dial_multiaddr<'a>(&'a self, _address: Multiaddr) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+        fn dial_multiaddr<'a>(
+            &'a self,
+            _address: Multiaddr,
+        ) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
             Box::pin(async move {
                 self.attempts.fetch_add(1, Ordering::SeqCst);
                 let mut guard = self.responses.lock().expect("responses");
@@ -445,7 +448,8 @@ mod tests {
 
         fn listen<'a>(
             &'a self,
-        ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
+        ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>>
+        {
             let drops = self.drops.clone();
             Box::pin(async move {
                 let (client, _server) = duplex(64);

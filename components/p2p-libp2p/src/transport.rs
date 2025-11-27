@@ -22,8 +22,8 @@ use std::{fs, io, path::Path};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::OnceCell;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::task::JoinHandle;
 use tokio::task::spawn;
+use tokio::task::JoinHandle;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 #[derive(Debug, thiserror::Error)]
@@ -421,7 +421,6 @@ impl SwarmStreamProvider {
                     }
                 })
                 .collect()
-            
         };
         let mut external_multiaddrs = parse_multiaddrs(&config.external_multiaddrs)?;
         external_multiaddrs.extend(config.advertise_addresses.iter().filter_map(|addr| {
@@ -471,7 +470,10 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
         })
     }
 
-    fn dial_multiaddr<'a>(&'a self, multiaddr: Multiaddr) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+    fn dial_multiaddr<'a>(
+        &'a self,
+        multiaddr: Multiaddr,
+    ) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
         let enabled = self.config.mode.is_enabled();
         let tx = self.command_tx.clone();
         Box::pin(async move {
@@ -582,8 +584,7 @@ impl SwarmDriver {
         reservations: Vec<ReservationTarget>,
     ) -> Self {
         let local_peer_id = *swarm.local_peer_id();
-        let active_relay =
-            reservations.into_iter().find_map(|r| relay_info_from_multiaddr(&r.multiaddr, local_peer_id));
+        let active_relay = reservations.into_iter().find_map(|r| relay_info_from_multiaddr(&r.multiaddr, local_peer_id));
 
         Self {
             swarm,
@@ -697,7 +698,8 @@ impl SwarmDriver {
                 }
                 other => debug!("libp2p identify event: {:?}", other),
             },
-            SwarmEvent::Behaviour(Libp2pEvent::RelayClient(event)) => {
+            SwarmEvent::Behaviour(Libp2pEvent::RelayClient(event)) =>
+            {
                 #[allow(unreachable_patterns)]
                 match event {
                     relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
@@ -865,7 +867,7 @@ impl SwarmDriver {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: already have outgoing connection");
             return;
         }
-        
+
         let Some(relay) = &self.active_relay else {
             debug!("libp2p dcutr: no active relay available for dial-back to {peer_id}");
             return;
@@ -1044,10 +1046,10 @@ struct MockProvider {
 
 #[cfg(test)]
 fn make_test_stream(drops: Arc<std::sync::atomic::AtomicUsize>) -> BoxedLibp2pStream {
-    use tokio::io::{AsyncRead, AsyncWrite};
-    use tokio::io::{ReadBuf, duplex};
     use std::pin::Pin;
     use std::task::{Context, Poll};
+    use tokio::io::{duplex, ReadBuf};
+    use tokio::io::{AsyncRead, AsyncWrite};
 
     struct DropStream {
         inner: tokio::io::DuplexStream,
@@ -1086,7 +1088,10 @@ fn make_test_stream(drops: Arc<std::sync::atomic::AtomicUsize>) -> BoxedLibp2pSt
 
 #[cfg(test)]
 impl MockProvider {
-    fn with_responses(responses: std::collections::VecDeque<Result<(), Libp2pError>>, drops: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+    fn with_responses(
+        responses: std::collections::VecDeque<Result<(), Libp2pError>>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
         Self { responses: std::sync::Mutex::new(responses), attempts: std::sync::atomic::AtomicUsize::new(0), drops }
     }
 
@@ -1106,7 +1111,10 @@ impl Libp2pStreamProvider for MockProvider {
         })
     }
 
-    fn dial_multiaddr<'a>(&'a self, _address: Multiaddr) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+    fn dial_multiaddr<'a>(
+        &'a self,
+        _address: Multiaddr,
+    ) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
         Box::pin(async move {
             self.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut guard = self.responses.lock().expect("responses");

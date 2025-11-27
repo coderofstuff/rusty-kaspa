@@ -1,7 +1,10 @@
 mod tests {
     use futures::StreamExt;
     use libp2p::{
-        dcutr, identify, identity, noise, relay, relay::client as relay_client, swarm::{NetworkBehaviour, SwarmEvent}, tcp, yamux, PeerId, Swarm, Transport, SwarmBuilder
+        dcutr, identify, identity, noise, relay,
+        relay::client as relay_client,
+        swarm::{NetworkBehaviour, SwarmEvent},
+        tcp, yamux, PeerId, Swarm, SwarmBuilder, Transport,
     };
     use std::time::Duration;
 
@@ -79,7 +82,7 @@ mod tests {
             .authenticate(noise_keys)
             .multiplex(yamux::Config::default())
             .boxed();
-        
+
         let behaviour = MyBehaviour {
             identify: identify::Behaviour::new(identify::Config::new("/test/1.0".into(), id.public())),
             dcutr: dcutr::Behaviour::new(peer_id),

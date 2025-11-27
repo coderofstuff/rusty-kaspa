@@ -357,10 +357,7 @@ impl ProtoP2p for ConnectionHandler {
                 .socket_addr
                 .or_else(|| info.metadata.synthetic_socket_addr())
                 .ok_or_else(|| TonicStatus::new(tonic::Code::InvalidArgument, "Incoming connection opening request has no address"))?;
-            info!(
-                "libp2p_bridge: Kaspa peer registered from libp2p stream; addr={socket_address}, metadata={:?}",
-                info.metadata
-            );
+            info!("libp2p_bridge: Kaspa peer registered from libp2p stream; addr={socket_address}, metadata={:?}", info.metadata);
             (socket_address, info.metadata)
         } else {
             let remote_address = request.remote_addr().ok_or_else(|| {
