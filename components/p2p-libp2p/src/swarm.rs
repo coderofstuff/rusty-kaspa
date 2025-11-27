@@ -12,7 +12,7 @@ use libp2p::relay::{self, client as relay_client};
 use libp2p::swarm::behaviour::ToSwarm;
 use libp2p::swarm::handler::{OneShotHandler, StreamUpgradeError};
 use libp2p::swarm::THandlerInEvent;
-use libp2p::swarm::{ConnectionId, NetworkBehaviour, NotifyHandler, Stream, StreamProtocol, SubstreamProtocol};
+use libp2p::swarm::{dummy, ConnectionId, NetworkBehaviour, NotifyHandler, Stream, StreamProtocol, SubstreamProtocol};
 use libp2p::tcp::tokio::Transport as TcpTransport;
 use libp2p::yamux;
 use libp2p::{identity, swarm, Swarm, Transport};
@@ -62,6 +62,8 @@ pub(crate) struct Libp2pBehaviour {
     pub relay_client: relay_client::Behaviour,
     pub relay_server: relay::Behaviour,
     pub dcutr: dcutr::Behaviour,
+    /// No-op behaviour that only advertises `/libp2p/dcutr` via Identify.
+    pub dcutr_hack: DcutrHackBehaviour,
     pub autonat: autonat::Behaviour,
     pub streams: StreamBehaviour,
 }
@@ -73,8 +75,65 @@ pub(crate) enum Libp2pEvent {
     RelayClient(relay_client::Event),
     RelayServer(relay::Event),
     Dcutr(dcutr::Event),
+    DcutrHack(void::Void),
     Autonat(autonat::Event),
     Stream(StreamEvent),
+}
+
+impl From<void::Void> for Libp2pEvent {
+    fn from(event: void::Void) -> Self {
+        Libp2pEvent::DcutrHack(event)
+    }
+}
+
+/// A minimal behaviour that forces `/libp2p/dcutr` into the Identify protocol list.
+pub struct DcutrHackBehaviour;
+
+impl NetworkBehaviour for DcutrHackBehaviour {
+    type ConnectionHandler = dummy::ConnectionHandler;
+    type ToSwarm = void::Void;
+
+    fn handle_established_inbound_connection(
+        &mut self,
+        _: ConnectionId,
+        _: libp2p::PeerId,
+        _: &libp2p::Multiaddr,
+        _: &libp2p::Multiaddr,
+    ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
+        Ok(dummy::ConnectionHandler)
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        _: ConnectionId,
+        _: libp2p::PeerId,
+        _: &libp2p::Multiaddr,
+        _: libp2p::core::Endpoint,
+        _: libp2p::core::transport::PortUse,
+    ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
+        Ok(dummy::ConnectionHandler)
+    }
+
+    fn on_swarm_event(&mut self, _: swarm::behaviour::FromSwarm) {}
+
+    fn on_connection_handler_event(
+        &mut self,
+        _: libp2p::PeerId,
+        _: ConnectionId,
+        _: swarm::THandlerOutEvent<Self>,
+    ) {
+    }
+
+    fn poll(
+        &mut self,
+        _: &mut Context<'_>,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        Poll::Pending
+    }
+
+    fn protocol_info(&self) -> impl Iterator<Item = &'static [u8]> {
+        std::iter::once(dcutr::PROTOCOL_NAME.as_bytes())
+    }
 }
 
 impl From<PingEvent> for Libp2pEvent {
@@ -171,6 +230,7 @@ pub(crate) fn build_streaming_swarm(
         relay_client: relay_client_behaviour,
         relay_server: relay::Behaviour::new(peer_id, relay::Config::default()),
         dcutr: dcutr::Behaviour::new(peer_id),
+        dcutr_hack: DcutrHackBehaviour,
         autonat,
         streams: StreamBehaviour::new(protocol),
     };
