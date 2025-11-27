@@ -12,8 +12,7 @@ use libp2p::multiaddr::Multiaddr;
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::SwarmEvent;
-use libp2p::{dcutr, identity, relay, PeerId};
-use libp2p::dcutr::Event as DcutrEvent;
+use libp2p::{identity, relay, PeerId};
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -699,6 +698,9 @@ impl SwarmDriver {
             }
             SwarmEvent::Behaviour(Libp2pEvent::Dcutr(event)) => {
                 debug!("libp2p dcutr event: {:?}", event);
+            }
+            SwarmEvent::Behaviour(Libp2pEvent::Autonat(event)) => {
+                debug!("libp2p autonat event: {:?}", event);
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("libp2p listening on {address}");

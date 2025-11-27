@@ -4,6 +4,7 @@ use libp2p::core::transport::choice::OrTransport;
 use libp2p::core::upgrade::{self, InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 use libp2p::dcutr;
 use libp2p::identify;
+use libp2p::autonat;
 use libp2p::noise;
 use libp2p::ping;
 use libp2p::relay::{self, client as relay_client};
@@ -59,8 +60,8 @@ pub(crate) struct Libp2pBehaviour {
     pub relay_client: relay_client::Behaviour,
     pub relay_server: relay::Behaviour,
     pub dcutr: dcutr::Behaviour,
+    pub autonat: autonat::Behaviour,
     pub streams: StreamBehaviour,
-    pub dcutr_hack: DcutrHackBehaviour,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -70,8 +71,8 @@ pub(crate) enum Libp2pEvent {
     RelayClient(relay_client::Event),
     RelayServer(relay::Event),
     Dcutr(dcutr::Event),
+    Autonat(autonat::Event),
     Stream(StreamEvent),
-    DcutrHack(Infallible),
 }
 
 impl From<PingEvent> for Libp2pEvent {
@@ -104,6 +105,12 @@ impl From<dcutr::Event> for Libp2pEvent {
     }
 }
 
+impl From<autonat::Event> for Libp2pEvent {
+    fn from(event: autonat::Event) -> Self {
+        Libp2pEvent::Autonat(event)
+    }
+}
+
 impl From<ping::Event> for Libp2pEvent {
     fn from(event: ping::Event) -> Self {
         Libp2pEvent::Ping(PingEvent::from(event))
@@ -113,12 +120,6 @@ impl From<ping::Event> for Libp2pEvent {
 impl From<StreamEvent> for Libp2pEvent {
     fn from(event: StreamEvent) -> Self {
         Libp2pEvent::Stream(event)
-    }
-}
-
-impl From<Infallible> for Libp2pEvent {
-    fn from(event: Infallible) -> Self {
-        Libp2pEvent::DcutrHack(event)
     }
 }
 
@@ -133,6 +134,9 @@ pub(crate) fn build_streaming_swarm(
 
     info!("libp2p streaming swarm peer id: {}", peer_id);
 
+    // Configure AutoNAT
+    let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
+
     let behaviour = Libp2pBehaviour {
         ping: ping::Behaviour::default(),
         identify: identify::Behaviour::new(identify::Config::new(
@@ -142,8 +146,8 @@ pub(crate) fn build_streaming_swarm(
         relay_client: relay_client_behaviour,
         relay_server: relay::Behaviour::new(peer_id, relay::Config::default()),
         dcutr: dcutr::Behaviour::new(peer_id),
+        autonat,
         streams: StreamBehaviour::new(protocol),
-        dcutr_hack: DcutrHackBehaviour,
     };
     Ok(Swarm::new(transport, behaviour, peer_id, cfg))
 }
@@ -386,81 +390,6 @@ impl OutboundUpgrade<Stream> for StreamOutboundUpgrade {
 
     fn upgrade_outbound(self, stream: Stream, _: Self::Info) -> Self::Future {
         future::ready(Ok(StreamHandlerEvent::Outbound { request_id: self.request_id, stream }))
-    }
-}
-
-// Hack to force advertising /libp2p/dcutr
-#[derive(Debug)]
-pub struct DcutrHackBehaviour;
-
-impl NetworkBehaviour for DcutrHackBehaviour {
-    type ConnectionHandler = swarm::handler::OneShotHandler<DcutrHackProtocol, DcutrHackProtocol, Infallible>;
-    type ToSwarm = Infallible;
-
-    fn handle_established_inbound_connection(
-        &mut self,
-        _: ConnectionId,
-        _: libp2p::PeerId,
-        _: &libp2p::Multiaddr,
-        _: &libp2p::Multiaddr,
-    ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
-        Ok(swarm::handler::OneShotHandler::new(SubstreamProtocol::new(DcutrHackProtocol, ()), Default::default()))
-    }
-
-    fn handle_established_outbound_connection(
-        &mut self,
-        _: ConnectionId,
-        _: libp2p::PeerId,
-        _: &libp2p::Multiaddr,
-        _: libp2p::core::Endpoint,
-        _: libp2p::core::transport::PortUse,
-    ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
-        Ok(swarm::handler::OneShotHandler::new(SubstreamProtocol::new(DcutrHackProtocol, ()), Default::default()))
-    }
-
-    fn on_swarm_event(&mut self, _: swarm::behaviour::FromSwarm) {}
-
-    fn on_connection_handler_event(
-        &mut self,
-        _: libp2p::PeerId,
-        _: ConnectionId,
-        _: Result<Infallible, StreamUpgradeError<Infallible>>,
-    ) {}
-
-    fn poll(&mut self, _: &mut Context<'_>) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
-        Poll::Pending
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct DcutrHackProtocol;
-
-impl UpgradeInfo for DcutrHackProtocol {
-    type Info = &'static str;
-    type InfoIter = iter::Once<Self::Info>;
-
-    fn protocol_info(&self) -> Self::InfoIter {
-        iter::once("/libp2p/dcutr")
-    }
-}
-
-impl InboundUpgrade<Stream> for DcutrHackProtocol {
-    type Output = Infallible;
-    type Error = Infallible;
-    type Future = future::Pending<Result<Self::Output, Self::Error>>;
-
-    fn upgrade_inbound(self, _: Stream, _: Self::Info) -> Self::Future {
-        future::pending()
-    }
-}
-
-impl OutboundUpgrade<Stream> for DcutrHackProtocol {
-    type Output = Infallible;
-    type Error = Infallible;
-    type Future = future::Pending<Result<Self::Output, Self::Error>>;
-
-    fn upgrade_outbound(self, _: Stream, _: Self::Info) -> Self::Future {
-        future::pending()
     }
 }
 
