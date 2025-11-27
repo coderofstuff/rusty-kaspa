@@ -18,8 +18,8 @@ use libp2p::swarm::THandlerInEvent;
 use libp2p::swarm::{ConnectionId, NetworkBehaviour, NotifyHandler, Stream, StreamProtocol, SubstreamProtocol};
 use libp2p::tcp::tokio::Transport as TcpTransport;
 use libp2p::yamux;
-use libp2p::{identity, swarm, Swarm, Transport};
-use log::info;
+use libp2p::{identity, swarm, Multiaddr, Swarm, Transport};
+use log::{debug, info};
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::iter;
@@ -89,11 +89,29 @@ impl From<()> for Libp2pEvent {
     }
 }
 
-/// A minimal handler/behaviour whose only purpose is to advertise `/libp2p/dcutr` as a supported
-/// protocol so Identify includes it in the protocol list. The upgrade is a no-op; we never use the
-/// negotiated stream.
+/// A minimal handler/behaviour that:
+/// 1. Advertises `/libp2p/dcutr` as a supported protocol so Identify includes it in the protocol list
+/// 2. Seeds configured external addresses as DCUtR candidates via ToSwarm events
+///
+/// The address seeding is critical because `swarm.add_external_address()` bypasses DCUtR's candidate
+/// mechanism. DCUtR only sees addresses that flow through `NewExternalAddrCandidate` events.
 #[derive(Clone, Default)]
-pub struct DcutrHackBehaviour;
+pub struct DcutrHackBehaviour {
+    /// Addresses waiting to be emitted as candidates
+    pending_candidates: VecDeque<Multiaddr>,
+    /// Addresses that have been proposed as candidates and are waiting to be confirmed
+    pending_confirms: VecDeque<Multiaddr>,
+}
+
+impl DcutrHackBehaviour {
+    /// Create a new DcutrHackBehaviour that will seed the given addresses as DCUtR candidates.
+    pub fn new(external_addrs: Vec<Multiaddr>) -> Self {
+        Self {
+            pending_candidates: external_addrs.into_iter().collect(),
+            pending_confirms: VecDeque::new(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct DcutrAdvertiseUpgrade;
@@ -131,6 +149,20 @@ impl NetworkBehaviour for DcutrHackBehaviour {
     fn on_connection_handler_event(&mut self, _: libp2p::PeerId, _: ConnectionId, _: swarm::THandlerOutEvent<Self>) {}
 
     fn poll(&mut self, _: &mut Context<'_>) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        // First, emit any pending candidates (NewExternalAddrCandidate)
+        if let Some(addr) = self.pending_candidates.pop_front() {
+            debug!("DcutrHackBehaviour: emitting NewExternalAddrCandidate for {}", addr);
+            // Queue it for confirmation after the candidate event is processed
+            self.pending_confirms.push_back(addr.clone());
+            return Poll::Ready(ToSwarm::NewExternalAddrCandidate(addr));
+        }
+
+        // Then, confirm any pending addresses (ExternalAddrConfirmed)
+        if let Some(addr) = self.pending_confirms.pop_front() {
+            debug!("DcutrHackBehaviour: emitting ExternalAddrConfirmed for {}", addr);
+            return Poll::Ready(ToSwarm::ExternalAddrConfirmed(addr));
+        }
+
         Poll::Pending
     }
 }
@@ -289,13 +321,26 @@ pub(crate) fn build_streaming_swarm(
         behaviour
     };
 
+    // Parse configured external addresses for DCUtR candidate seeding
+    let external_addrs: Vec<Multiaddr> = config
+        .external_multiaddrs
+        .iter()
+        .filter_map(|s| {
+            s.parse::<Multiaddr>().ok().map(|addr| {
+                debug!("DCUtR candidate seed: {}", addr);
+                addr
+            })
+        })
+        .collect();
+    info!("DcutrHackBehaviour seeding {} external address candidates for DCUtR", external_addrs.len());
+
     let behaviour = Libp2pBehaviour {
         ping: ping::Behaviour::default(),
         identify,
         relay_client: relay_client_behaviour,
         relay_server: relay::Behaviour::new(peer_id, relay::Config::default()),
         dcutr: dcutr::Behaviour::new(peer_id),
-        dcutr_hack: DcutrHackBehaviour,
+        dcutr_hack: DcutrHackBehaviour::new(external_addrs),
         autonat,
         streams: StreamBehaviour::new(protocol),
     };
