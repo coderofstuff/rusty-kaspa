@@ -65,6 +65,7 @@ If you believe a change in one of these directories is absolutely required, you 
 
 - Done: feature gating/default-off stance; identity loader (ephemeral + persisted); transport seam in `ConnectionHandler` (`connect_with_stream`/`serve_with_incoming`); NetAddress relay_port merge; inbound caps/buckets in connection manager; libp2p stream provider now real (relay/identify/DCUtR, dial/listen/reserve); daemon/libp2p runtime wired with outbound connector handing streams into the P2P hub; CLI surface exposes reservations/external/advertise/relay caps; dedicated libp2p listen port (default `p2p_port+1`, no port sharing with TCP); libp2p→Kaspa bridge live (streams handed into ConnectionHandler with synthetic metadata).
 - Incomplete/by design: helper control plane still a placeholder (no listener bound yet); keep documented as TBD. DCUtR harness exists but is `#[ignore]` due to upstream libp2p relay-client panic when the transport channel drops; manual runs currently trip that upstream issue.
+- Consensus/header drift was reverted to exactly match `upstream/master` (CompressedParents/RLE, hashing, stores, RPC/convertors). Libp2p/DCUtR does not depend on consensus internals.
 - [x] DCUtR gap: legacy branch succeeded in the NAT lab because it forced a dial-back over the relay when only an inbound relayed connection existed. Clean branch never dialed back, so DCUtR never negotiated. Dial-back via active relay (peer-aware) added to the swarm driver; see `tcp-hole-punch/DCUTR-GAP-NOTE.md`.
    - [x] **Fix Applied (2025-11-27):**
      - Restored logic to feed `Identify` observed addresses into swarm external addresses.
@@ -165,6 +166,11 @@ t as alias to `full` until a real need. Helper control port requires explicit fl
    - [x] Add CI job for `--no-default-features` to ensure non-libp2p build stays healthy.
    - [x] Ensure libp2p crates are opt-in via features/default-members.
    - [x] Add CI job with libp2p/all-features enabled so tests run in that mode. Optional: check default build’s dependency tree excludes libp2p.
+
+## Wire surface (libp2p-specific)
+
+- NetAddress carries `services` and `relay_port` to mark nodes that can act as libp2p relays and which port to use. These fields are optional/backwards-compatible on the wire (zero/None defaults) and ignored by unaware peers.
+- Libp2p/DCUtR relies on this metadata to advertise relay capability and budget inbound relay traffic; it does not affect consensus or core P2P semantics when libp2p is off.
 
 ## Notes for New Engineers
 
