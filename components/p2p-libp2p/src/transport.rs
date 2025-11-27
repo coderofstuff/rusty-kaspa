@@ -12,7 +12,8 @@ use libp2p::multiaddr::Multiaddr;
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::SwarmEvent;
-use libp2p::{identity, relay, PeerId};
+use libp2p::{dcutr, identity, relay, PeerId};
+use libp2p::dcutr::Event as DcutrEvent;
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -637,7 +638,7 @@ impl SwarmDriver {
         }
     }
 
-    async fn handle_event(&mut self, event: SwarmEvent<Libp2pEvent, impl std::fmt::Debug>) {
+    async fn handle_event(&mut self, event: SwarmEvent<Libp2pEvent>) {
         match event {
             SwarmEvent::Behaviour(Libp2pEvent::Stream(event)) => self.handle_stream_event(event).await,
             SwarmEvent::Behaviour(Libp2pEvent::Ping(event)) => {
@@ -677,15 +678,9 @@ impl SwarmDriver {
             SwarmEvent::Behaviour(Libp2pEvent::RelayServer(event)) => {
                 debug!("libp2p relay server event: {:?}", event);
             }
-            SwarmEvent::Behaviour(Libp2pEvent::Dcutr(event)) => match event {
-                libp2p::dcutr::Event::DirectConnectionUpgradeSucceeded { remote_peer_id, .. } => {
-                    info!("libp2p dcutr: hole punch succeeded with {remote_peer_id}");
-                }
-                libp2p::dcutr::Event::DirectConnectionUpgradeFailed { remote_peer_id, error } => {
-                    warn!("libp2p dcutr: hole punch with {remote_peer_id} failed: {error}");
-                }
-                other => debug!("libp2p dcutr event: {:?}", other),
-            },
+            SwarmEvent::Behaviour(Libp2pEvent::Dcutr(event)) => {
+                debug!("libp2p dcutr event: {:?}", event);
+            }
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("libp2p listening on {address}");
                 if self.active_relay.is_none() {
@@ -696,9 +691,14 @@ impl SwarmDriver {
                 self.listening = true;
             }
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
-                debug!("libp2p connection established with {peer_id} on {connection_id:?}; requesting stream");
+                debug!("libp2p connection established with {peer_id} on {connection_id:?}");
                 self.track_established(peer_id, &endpoint);
-                self.request_stream_bridge(peer_id, connection_id);
+                if endpoint.is_dialer() {
+                    info!("libp2p initiating stream to {peer_id} (as dialer)");
+                    self.request_stream_bridge(peer_id, connection_id);
+                } else {
+                    debug!("libp2p waiting for stream from {peer_id} (as listener)");
+                }
             }
             SwarmEvent::ConnectionClosed { peer_id, endpoint, .. } => {
                 self.track_closed(peer_id, &endpoint);

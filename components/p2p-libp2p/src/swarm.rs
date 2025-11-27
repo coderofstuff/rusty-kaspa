@@ -8,7 +8,7 @@ use libp2p::noise;
 use libp2p::ping;
 use libp2p::relay::{self, client as relay_client};
 use libp2p::swarm::behaviour::ToSwarm;
-use libp2p::swarm::handler::OneShotHandler;
+use libp2p::swarm::handler::{OneShotHandler, StreamUpgradeError};
 use libp2p::swarm::THandlerInEvent;
 use libp2p::swarm::{ConnectionId, NetworkBehaviour, NotifyHandler, Stream, StreamProtocol, SubstreamProtocol};
 use libp2p::tcp::tokio::Transport as TcpTransport;
@@ -60,6 +60,7 @@ pub(crate) struct Libp2pBehaviour {
     pub relay_server: relay::Behaviour,
     pub dcutr: dcutr::Behaviour,
     pub streams: StreamBehaviour,
+    pub dcutr_hack: DcutrHackBehaviour,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -70,6 +71,7 @@ pub(crate) enum Libp2pEvent {
     RelayServer(relay::Event),
     Dcutr(dcutr::Event),
     Stream(StreamEvent),
+    DcutrHack(Infallible),
 }
 
 impl From<PingEvent> for Libp2pEvent {
@@ -114,6 +116,12 @@ impl From<StreamEvent> for Libp2pEvent {
     }
 }
 
+impl From<Infallible> for Libp2pEvent {
+    fn from(event: Infallible) -> Self {
+        Libp2pEvent::DcutrHack(event)
+    }
+}
+
 /// Build a libp2p swarm with ping + raw stream support.
 pub(crate) fn build_streaming_swarm(
     identity: &Libp2pIdentity,
@@ -135,6 +143,7 @@ pub(crate) fn build_streaming_swarm(
         relay_server: relay::Behaviour::new(peer_id, relay::Config::default()),
         dcutr: dcutr::Behaviour::new(peer_id),
         streams: StreamBehaviour::new(protocol),
+        dcutr_hack: DcutrHackBehaviour,
     };
     Ok(Swarm::new(transport, behaviour, peer_id, cfg))
 }
@@ -247,14 +256,15 @@ impl NetworkBehaviour for StreamBehaviour {
         _peer: libp2p::PeerId,
         addr: &libp2p::Multiaddr,
         role_override: libp2p::core::Endpoint,
+        port_use: libp2p::core::transport::PortUse,
     ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
         let handler = self.new_handler();
-        let endpoint = libp2p::core::ConnectedPoint::Dialer { address: addr.clone(), role_override };
+        let endpoint = libp2p::core::ConnectedPoint::Dialer { address: addr.clone(), role_override, port_use };
         self.connections.insert(connection_id, endpoint);
         Ok(handler)
     }
 
-    fn on_swarm_event(&mut self, event: swarm::behaviour::FromSwarm<Self::ConnectionHandler>) {
+    fn on_swarm_event(&mut self, event: swarm::behaviour::FromSwarm) {
         match event {
             swarm::behaviour::FromSwarm::ConnectionEstablished(event) => {
                 self.connections.insert(event.connection_id, event.endpoint.clone());
@@ -269,7 +279,20 @@ impl NetworkBehaviour for StreamBehaviour {
         }
     }
 
-    fn on_connection_handler_event(&mut self, peer_id: libp2p::PeerId, connection_id: ConnectionId, event: StreamHandlerEvent) {
+    fn on_connection_handler_event(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        connection_id: ConnectionId,
+        event: Result<StreamHandlerEvent, StreamUpgradeError<Infallible>>
+    ) {
+        let event = match event {
+            Ok(ev) => ev,
+            Err(e) => {
+                log::warn!("libp2p stream upgrade failed: {e}");
+                return;
+            }
+        };
+
         let Some(endpoint) = self.connections.get(&connection_id).cloned() else { return };
 
         match event {
@@ -291,7 +314,6 @@ impl NetworkBehaviour for StreamBehaviour {
     fn poll(
         &mut self,
         _cx: &mut Context<'_>,
-        _params: &mut impl swarm::PollParameters,
     ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         if let Some(event) = self.pending_events.pop_front() {
             return Poll::Ready(ToSwarm::GenerateEvent(event));
@@ -364,6 +386,81 @@ impl OutboundUpgrade<Stream> for StreamOutboundUpgrade {
 
     fn upgrade_outbound(self, stream: Stream, _: Self::Info) -> Self::Future {
         future::ready(Ok(StreamHandlerEvent::Outbound { request_id: self.request_id, stream }))
+    }
+}
+
+// Hack to force advertising /libp2p/dcutr
+#[derive(Debug)]
+pub struct DcutrHackBehaviour;
+
+impl NetworkBehaviour for DcutrHackBehaviour {
+    type ConnectionHandler = swarm::handler::OneShotHandler<DcutrHackProtocol, DcutrHackProtocol, Infallible>;
+    type ToSwarm = Infallible;
+
+    fn handle_established_inbound_connection(
+        &mut self,
+        _: ConnectionId,
+        _: libp2p::PeerId,
+        _: &libp2p::Multiaddr,
+        _: &libp2p::Multiaddr,
+    ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
+        Ok(swarm::handler::OneShotHandler::new(SubstreamProtocol::new(DcutrHackProtocol, ()), Default::default()))
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        _: ConnectionId,
+        _: libp2p::PeerId,
+        _: &libp2p::Multiaddr,
+        _: libp2p::core::Endpoint,
+        _: libp2p::core::transport::PortUse,
+    ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
+        Ok(swarm::handler::OneShotHandler::new(SubstreamProtocol::new(DcutrHackProtocol, ()), Default::default()))
+    }
+
+    fn on_swarm_event(&mut self, _: swarm::behaviour::FromSwarm) {}
+
+    fn on_connection_handler_event(
+        &mut self,
+        _: libp2p::PeerId,
+        _: ConnectionId,
+        _: Result<Infallible, StreamUpgradeError<Infallible>>,
+    ) {}
+
+    fn poll(&mut self, _: &mut Context<'_>) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        Poll::Pending
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DcutrHackProtocol;
+
+impl UpgradeInfo for DcutrHackProtocol {
+    type Info = &'static str;
+    type InfoIter = iter::Once<Self::Info>;
+
+    fn protocol_info(&self) -> Self::InfoIter {
+        iter::once("/libp2p/dcutr")
+    }
+}
+
+impl InboundUpgrade<Stream> for DcutrHackProtocol {
+    type Output = Infallible;
+    type Error = Infallible;
+    type Future = future::Pending<Result<Self::Output, Self::Error>>;
+
+    fn upgrade_inbound(self, _: Stream, _: Self::Info) -> Self::Future {
+        future::pending()
+    }
+}
+
+impl OutboundUpgrade<Stream> for DcutrHackProtocol {
+    type Output = Infallible;
+    type Error = Infallible;
+    type Future = future::Pending<Result<Self::Output, Self::Error>>;
+
+    fn upgrade_outbound(self, _: Stream, _: Self::Info) -> Self::Future {
+        future::pending()
     }
 }
 

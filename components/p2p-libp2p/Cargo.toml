@@ -21,7 +21,7 @@ log.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
-libp2p = { version = "0.52.4", default-features = false, features = ["tokio", "tcp", "dns", "noise", "yamux", "macros", "ping", "identify", "relay", "dcutr"] }
+libp2p = { version = "0.56.0", default-features = false, features = ["tokio", "tcp", "dns", "noise", "yamux", "macros", "ping", "identify", "relay", "dcutr"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tempfile = "3.12.0"
 
