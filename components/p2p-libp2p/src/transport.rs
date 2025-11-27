@@ -677,6 +677,12 @@ impl SwarmDriver {
                     if !addr_uses_relay(&info.observed_addr) {
                         self.swarm.add_external_address(info.observed_addr.clone());
                     }
+                    for addr in &info.listen_addrs {
+                        if is_tcp_dialable(addr) && !addr_uses_relay(addr) {
+                            info!(target: "libp2p_identify", "adding listen addr as external candidate for DCUtR: {}", addr);
+                            self.swarm.add_external_address(addr.clone());
+                        }
+                    }
                     self.mark_dcutr_support(peer_id, supports_dcutr);
                     self.maybe_request_dialback(peer_id);
                 }
@@ -1027,6 +1033,20 @@ fn strip_peer_suffix(addr: &mut Multiaddr, peer_id: PeerId) {
 
 fn addr_uses_relay(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+}
+
+fn is_tcp_dialable(addr: &Multiaddr) -> bool {
+    let mut has_ip = false;
+    let mut has_tcp = false;
+    for p in addr.iter() {
+        match p {
+            Protocol::Ip4(_) | Protocol::Ip6(_) => has_ip = true,
+            Protocol::Tcp(_) => has_tcp = true,
+            Protocol::P2pCircuit => return false,
+            _ => {}
+        }
+    }
+    has_ip && has_tcp
 }
 
 fn endpoint_uses_relay(endpoint: &libp2p::core::ConnectedPoint) -> bool {
