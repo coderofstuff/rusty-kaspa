@@ -404,7 +404,8 @@ impl SwarmStreamProvider {
         let (command_tx, command_rx) = mpsc::channel(16);
         let (incoming_tx, incoming_rx) = mpsc::channel(32);
         let protocol = default_stream_protocol();
-        let swarm = build_streaming_swarm(&identity, protocol.clone())?;
+        // Pass config to build_streaming_swarm to configure AutoNAT
+        let swarm = build_streaming_swarm(&identity, &config, protocol.clone())?;
 
         let listen_multiaddrs = if config.listen_addresses.is_empty() {
             vec![default_listen_addr()]

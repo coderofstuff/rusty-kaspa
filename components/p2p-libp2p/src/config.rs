@@ -1,5 +1,32 @@
 use std::{net::SocketAddr, path::PathBuf};
 
+/// Configuration for AutoNAT behaviour.
+#[derive(Clone, Debug)]
+pub struct AutoNatConfig {
+    /// Enable AutoNAT client behaviour (address discovery).
+    pub enable_client: bool,
+    /// Enable AutoNAT server behaviour (help others discover addresses).
+    pub enable_server: bool,
+    /// Only allow AutoNAT server for publicly reachable nodes.
+    pub server_only_if_public: bool,
+    /// Maximum AutoNAT server requests per peer (rate limiting).
+    pub max_server_requests_per_peer: usize,
+    /// Confidence threshold for address confirmation (number of confirmations needed).
+    pub confidence_threshold: usize,
+}
+
+impl Default for AutoNatConfig {
+    fn default() -> Self {
+        Self {
+            enable_client: true,
+            enable_server: true,
+            server_only_if_public: false,
+            max_server_requests_per_peer: 1,
+            confidence_threshold: 3,
+        }
+    }
+}
+
 /// Runtime configuration for the libp2p adapter.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -16,6 +43,8 @@ pub struct Config {
     pub external_multiaddrs: Vec<String>,
     /// Advertised socket addresses for non-libp2p awareness.
     pub advertise_addresses: Vec<SocketAddr>,
+    /// AutoNAT configuration.
+    pub autonat: AutoNatConfig,
 }
 
 impl Default for Config {
@@ -30,6 +59,7 @@ impl Default for Config {
             reservations: Vec::new(),
             external_multiaddrs: Vec::new(),
             advertise_addresses: Vec::new(),
+            autonat: AutoNatConfig::default(),
         }
     }
 }
@@ -94,6 +124,11 @@ impl ConfigBuilder {
 
     pub fn advertise_addresses(mut self, addrs: Vec<SocketAddr>) -> Self {
         self.config.advertise_addresses = addrs;
+        self
+    }
+
+    pub fn autonat(mut self, autonat: AutoNatConfig) -> Self {
+        self.config.autonat = autonat;
         self
     }
 

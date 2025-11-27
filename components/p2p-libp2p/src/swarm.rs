@@ -1,4 +1,5 @@
 use crate::transport::{Libp2pError, Libp2pIdentity};
+use crate::config::Config;
 use futures_util::future;
 use libp2p::core::transport::choice::OrTransport;
 use libp2p::core::upgrade::{self, InboundUpgrade, OutboundUpgrade, UpgradeInfo};
@@ -20,6 +21,7 @@ use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::iter;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 type BoxedTransport = libp2p::core::transport::Boxed<(libp2p::PeerId, libp2p::core::muxing::StreamMuxerBox)>;
 
@@ -126,6 +128,7 @@ impl From<StreamEvent> for Libp2pEvent {
 /// Build a libp2p swarm with ping + raw stream support.
 pub(crate) fn build_streaming_swarm(
     identity: &Libp2pIdentity,
+    config: &Config,
     protocol: StreamProtocol,
 ) -> Result<Swarm<Libp2pBehaviour>, Libp2pError> {
     let peer_id = identity.peer_id;
@@ -135,12 +138,27 @@ pub(crate) fn build_streaming_swarm(
     info!("libp2p streaming swarm peer id: {} (dcutr enabled, identify will advertise {})", peer_id, dcutr::PROTOCOL_NAME);
 
     // Configure AutoNAT
-    let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
+    let mut autonat_cfg = autonat::Config::default();
+    if config.autonat.enable_client {
+        autonat_cfg.confidence_max = config.autonat.confidence_threshold;
+        info!("AutoNAT client mode ENABLED for peer={}", peer_id);
+    }
+    if config.autonat.enable_server {
+        autonat_cfg.only_global_ips = config.autonat.server_only_if_public;
+        autonat_cfg.throttle_server_period = Duration::from_secs(60);
+        autonat_cfg.throttle_clients_peer_max = config.autonat.max_server_requests_per_peer;
+        info!("AutoNAT server mode ENABLED for peer={}", peer_id);
+    }
+    if !config.autonat.enable_client && !config.autonat.enable_server {
+        info!("AutoNAT DISABLED for peer={}", peer_id);
+    }
+    let autonat = autonat::Behaviour::new(peer_id, autonat_cfg);
 
     let identify = {
         let identify_cfg =
             identify::Config::new(format!("/kaspad/libp2p/{}", env!("CARGO_PKG_VERSION")), identity.keypair.public())
-                .with_push_listen_addr_updates(true);
+                .with_push_listen_addr_updates(false); // Disabled to prevent relay flooding
+        info!("Identify: push listen addr updates = false");
         let behaviour = identify::Behaviour::new(identify_cfg);
         // Developer sanity: ensure DCUtR is in the supported protocol set we hand to Identify.
         debug_assert!(!dcutr::PROTOCOL_NAME.as_ref().is_empty(), "dcutr protocol name must be non-empty");
@@ -166,11 +184,19 @@ fn build_transport(
     let local_key: identity::Keypair = identity.keypair.clone();
     let noise_keys = noise::Config::new(&local_key).map_err(|e| Libp2pError::Identity(e.to_string()))?;
 
+    // Configure yamux with large buffers to support high throughput (e.g. block sync) over hole-punched links
+    let yamux_config = {
+        let mut cfg = yamux::Config::default();
+        cfg.set_receive_window_size(32 * 1024 * 1024); // 32 MiB
+        cfg.set_max_buffer_size(32 * 1024 * 1024);
+        cfg
+    };
+
     let tcp = TcpTransport::new(libp2p::tcp::Config::default().nodelay(true));
     let transport = OrTransport::new(tcp, relay_transport)
         .upgrade(upgrade::Version::V1Lazy)
         .authenticate(noise_keys)
-        .multiplex(yamux::Config::default())
+        .multiplex(yamux_config)
         .boxed();
 
     let cfg = libp2p::swarm::Config::with_tokio_executor();
@@ -181,10 +207,17 @@ fn build_tcp_transport(identity: &Libp2pIdentity) -> Result<(BoxedTransport, swa
     let local_key: identity::Keypair = identity.keypair.clone();
     let noise_keys = noise::Config::new(&local_key).map_err(|e| Libp2pError::Identity(e.to_string()))?;
 
+    let yamux_config = {
+        let mut cfg = yamux::Config::default();
+        cfg.set_receive_window_size(32 * 1024 * 1024); // 32 MiB
+        cfg.set_max_buffer_size(32 * 1024 * 1024);
+        cfg
+    };
+
     let tcp = TcpTransport::new(libp2p::tcp::Config::default().nodelay(true))
         .upgrade(upgrade::Version::V1Lazy)
         .authenticate(noise_keys)
-        .multiplex(yamux::Config::default())
+        .multiplex(yamux_config)
         .boxed();
 
     let cfg = libp2p::swarm::Config::with_tokio_executor();
