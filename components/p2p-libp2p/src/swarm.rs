@@ -1,18 +1,21 @@
-use crate::transport::{Libp2pError, Libp2pIdentity};
 use crate::config::Config;
+use crate::transport::{Libp2pError, Libp2pIdentity};
 use futures_util::future;
+use libp2p::autonat;
 use libp2p::core::transport::choice::OrTransport;
 use libp2p::core::upgrade::{self, InboundUpgrade, OutboundUpgrade, UpgradeInfo};
-use libp2p::autonat;
 use libp2p::dcutr;
 use libp2p::identify;
 use libp2p::noise;
 use libp2p::ping;
 use libp2p::relay::{self, client as relay_client};
 use libp2p::swarm::behaviour::ToSwarm;
-use libp2p::swarm::handler::{OneShotHandler, StreamUpgradeError};
+use libp2p::swarm::handler::{
+    ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,
+    OneShotHandler, StreamUpgradeError,
+};
 use libp2p::swarm::THandlerInEvent;
-use libp2p::swarm::{dummy, ConnectionId, NetworkBehaviour, NotifyHandler, Stream, StreamProtocol, SubstreamProtocol};
+use libp2p::swarm::{ConnectionId, NetworkBehaviour, NotifyHandler, Stream, StreamProtocol, SubstreamProtocol};
 use libp2p::tcp::tokio::Transport as TcpTransport;
 use libp2p::yamux;
 use libp2p::{identity, swarm, Swarm, Transport};
@@ -75,23 +78,32 @@ pub(crate) enum Libp2pEvent {
     RelayClient(relay_client::Event),
     RelayServer(relay::Event),
     Dcutr(dcutr::Event),
-    DcutrHack(void::Void),
+    DcutrHack(()),
     Autonat(autonat::Event),
     Stream(StreamEvent),
 }
 
-impl From<void::Void> for Libp2pEvent {
-    fn from(event: void::Void) -> Self {
+impl From<()> for Libp2pEvent {
+    fn from(event: ()) -> Self {
         Libp2pEvent::DcutrHack(event)
     }
 }
 
-/// A minimal behaviour that forces `/libp2p/dcutr` into the Identify protocol list.
+/// A minimal handler/behaviour whose only purpose is to advertise `/libp2p/dcutr` as a supported
+/// protocol so Identify includes it in the protocol list. The upgrade is a no-op; we never use the
+/// negotiated stream.
+#[derive(Clone, Default)]
 pub struct DcutrHackBehaviour;
 
+#[derive(Clone, Copy, Default)]
+pub struct DcutrAdvertiseUpgrade;
+
+#[derive(Clone, Default)]
+pub struct DcutrAdvertiseHandler;
+
 impl NetworkBehaviour for DcutrHackBehaviour {
-    type ConnectionHandler = dummy::ConnectionHandler;
-    type ToSwarm = void::Void;
+    type ConnectionHandler = DcutrAdvertiseHandler;
+    type ToSwarm = ();
 
     fn handle_established_inbound_connection(
         &mut self,
@@ -100,7 +112,7 @@ impl NetworkBehaviour for DcutrHackBehaviour {
         _: &libp2p::Multiaddr,
         _: &libp2p::Multiaddr,
     ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
-        Ok(dummy::ConnectionHandler)
+        Ok(DcutrAdvertiseHandler::default())
     }
 
     fn handle_established_outbound_connection(
@@ -111,28 +123,82 @@ impl NetworkBehaviour for DcutrHackBehaviour {
         _: libp2p::core::Endpoint,
         _: libp2p::core::transport::PortUse,
     ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
-        Ok(dummy::ConnectionHandler)
+        Ok(DcutrAdvertiseHandler::default())
     }
 
     fn on_swarm_event(&mut self, _: swarm::behaviour::FromSwarm) {}
 
-    fn on_connection_handler_event(
-        &mut self,
-        _: libp2p::PeerId,
-        _: ConnectionId,
-        _: swarm::THandlerOutEvent<Self>,
-    ) {
+    fn on_connection_handler_event(&mut self, _: libp2p::PeerId, _: ConnectionId, _: swarm::THandlerOutEvent<Self>) {}
+
+    fn poll(&mut self, _: &mut Context<'_>) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        Poll::Pending
     }
+}
+
+impl ConnectionHandler for DcutrAdvertiseHandler {
+    type FromBehaviour = ();
+    type ToBehaviour = ();
+    type InboundProtocol = DcutrAdvertiseUpgrade;
+    type OutboundProtocol = DcutrAdvertiseUpgrade;
+    type InboundOpenInfo = ();
+    type OutboundOpenInfo = ();
+
+    fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
+        SubstreamProtocol::new(DcutrAdvertiseUpgrade, ())
+    }
+
+    fn on_behaviour_event(&mut self, _: Self::FromBehaviour) {}
 
     fn poll(
         &mut self,
         _: &mut Context<'_>,
-    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+    ) -> Poll<ConnectionHandlerEvent<Self::OutboundProtocol, Self::OutboundOpenInfo, Self::ToBehaviour>> {
         Poll::Pending
     }
 
-    fn protocol_info(&self) -> impl Iterator<Item = &'static [u8]> {
-        std::iter::once(dcutr::PROTOCOL_NAME.as_bytes())
+    fn on_connection_event(
+        &mut self,
+        event: ConnectionEvent<Self::InboundProtocol, Self::OutboundProtocol, Self::InboundOpenInfo, Self::OutboundOpenInfo>,
+    ) {
+        match event {
+            ConnectionEvent::FullyNegotiatedInbound(FullyNegotiatedInbound { .. }) => {}
+            ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound { .. }) => {}
+            ConnectionEvent::DialUpgradeError(DialUpgradeError { .. }) => {}
+            ConnectionEvent::ListenUpgradeError(_) => {}
+            ConnectionEvent::AddressChange(_) => {}
+            ConnectionEvent::LocalProtocolsChange(_) => {}
+            ConnectionEvent::RemoteProtocolsChange(_) => {}
+            _ => {}
+        }
+    }
+}
+
+impl UpgradeInfo for DcutrAdvertiseUpgrade {
+    type Info = StreamProtocol;
+    type InfoIter = iter::Once<StreamProtocol>;
+
+    fn protocol_info(&self) -> Self::InfoIter {
+        iter::once(dcutr::PROTOCOL_NAME.clone())
+    }
+}
+
+impl InboundUpgrade<Stream> for DcutrAdvertiseUpgrade {
+    type Output = ();
+    type Error = Infallible;
+    type Future = future::Ready<Result<Self::Output, Self::Error>>;
+
+    fn upgrade_inbound(self, _: Stream, _: Self::Info) -> Self::Future {
+        future::ready(Ok(()))
+    }
+}
+
+impl OutboundUpgrade<Stream> for DcutrAdvertiseUpgrade {
+    type Output = ();
+    type Error = Infallible;
+    type Future = future::Ready<Result<Self::Output, Self::Error>>;
+
+    fn upgrade_outbound(self, _: Stream, _: Self::Info) -> Self::Future {
+        future::ready(Ok(()))
     }
 }
 
@@ -214,9 +280,8 @@ pub(crate) fn build_streaming_swarm(
     let autonat = autonat::Behaviour::new(peer_id, autonat_cfg);
 
     let identify = {
-        let identify_cfg =
-            identify::Config::new(format!("/kaspad/libp2p/{}", env!("CARGO_PKG_VERSION")), identity.keypair.public())
-                .with_push_listen_addr_updates(false); // Disabled to prevent relay flooding
+        let identify_cfg = identify::Config::new(format!("/kaspad/libp2p/{}", env!("CARGO_PKG_VERSION")), identity.keypair.public())
+            .with_push_listen_addr_updates(false); // Disabled to prevent relay flooding
         info!("Identify: push listen addr updates = false");
         let behaviour = identify::Behaviour::new(identify_cfg);
         // Developer sanity: ensure DCUtR is in the supported protocol set we hand to Identify.
@@ -387,7 +452,7 @@ impl NetworkBehaviour for StreamBehaviour {
         &mut self,
         peer_id: libp2p::PeerId,
         connection_id: ConnectionId,
-        event: Result<StreamHandlerEvent, StreamUpgradeError<Infallible>>
+        event: Result<StreamHandlerEvent, StreamUpgradeError<Infallible>>,
     ) {
         let event = match event {
             Ok(ev) => ev,
@@ -415,10 +480,7 @@ impl NetworkBehaviour for StreamBehaviour {
         }
     }
 
-    fn poll(
-        &mut self,
-        _cx: &mut Context<'_>,
-    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+    fn poll(&mut self, _cx: &mut Context<'_>) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         if let Some(event) = self.pending_events.pop_front() {
             return Poll::Ready(ToSwarm::GenerateEvent(event));
         }
