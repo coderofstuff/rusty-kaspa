@@ -61,6 +61,11 @@ If you believe a change in one of these directories is absolutely required, you 
 
 **Tests and docs** may be added anywhere they logically belong, as long as they do not alter runtime code.
 
+## Consensus rollback
+
+- Consensus/header code (including CompressedParents/RLE, hashing, stores, RPC/convertors) is reverted to exactly match `upstream/master`.
+- Libp2p/DCUtR does not depend on consensus or IBD internals; any future divergence here must be explicitly justified and reviewed.
+
 ## Status audit (fresh eyes)
 
 - Done: feature gating/default-off stance; identity loader (ephemeral + persisted); transport seam in `ConnectionHandler` (`connect_with_stream`/`serve_with_incoming`); NetAddress relay_port merge; inbound caps/buckets in connection manager; libp2p stream provider now real (relay/identify/DCUtR, dial/listen/reserve); daemon/libp2p runtime wired with outbound connector handing streams into the P2P hub; CLI surface exposes reservations/external/advertise/relay caps; dedicated libp2p listen port (default `p2p_port+1`, no port sharing with TCP); libp2p→Kaspa bridge live (streams handed into ConnectionHandler with synthetic metadata).
@@ -165,12 +170,12 @@ t as alias to `full` until a real need. Helper control port requires explicit fl
 
    - [x] Add CI job for `--no-default-features` to ensure non-libp2p build stays healthy.
    - [x] Ensure libp2p crates are opt-in via features/default-members.
-   - [x] Add CI job with libp2p/all-features enabled so tests run in that mode. Optional: check default build’s dependency tree excludes libp2p.
+- [x] Add CI job with libp2p/all-features enabled so tests run in that mode. Optional: check default build’s dependency tree excludes libp2p.
 
 ## Wire surface (libp2p-specific)
 
-- NetAddress carries `services` and `relay_port` to mark nodes that can act as libp2p relays and which port to use. These fields are optional/backwards-compatible on the wire (zero/None defaults) and ignored by unaware peers.
-- Libp2p/DCUtR relies on this metadata to advertise relay capability and budget inbound relay traffic; it does not affect consensus or core P2P semantics when libp2p is off.
+- NetAddress carries `services` (bitflags) and `relay_port` (optional u16) to mark peers that can act as libp2p relays and the port to dial. Tags are optional/backwards-compatible on the wire (proto fields default to zero/None) and ignored by unaware peers.
+- Libp2p/DCUtR uses this metadata to advertise relay capability and budget inbound relay traffic; default TCP nodes behave identically, and consensus/IBD remain untouched.
 
 ## Notes for New Engineers
 

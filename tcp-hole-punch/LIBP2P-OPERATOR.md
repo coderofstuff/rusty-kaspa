@@ -5,7 +5,7 @@
 - **full/helper**: libp2p stack enabled (helper == full for now). Requires explicit `--libp2p-mode full|helper`.
 - Helper control (relay/DCUtR) binds only when `--libp2p-helper-listen <addr>` is set (**currently stubbed; no control-plane listener is started**).
 - Ports: TCP P2P port stays unchanged (`--listen`/default p2p port); libp2p uses a dedicated port (`--libp2p-listen-port` or `KASPAD_LIBP2P_LISTEN_PORT`, default `p2p_port+1`). Libp2p is intentionally **not** multiplexed on the P2P TCP port.
-- AutoNAT posture: client+server enabled in full/helper modes; server is public-only by default. Labs can opt into private IP reachability with `--libp2p-autonat-allow-private` / `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true`.
+- AutoNAT posture: client+server enabled in full/helper modes; server is public-only by default (`server_only_if_public=true`). Labs can opt into private IP reachability with `--libp2p-autonat-allow-private` / `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true`.
 
 ## Identity & privacy
 - Default identity is **ephemeral**. Persist only when `--libp2p-identity-path <path>` is provided (or `KASPAD_LIBP2P_IDENTITY_PATH`).
@@ -25,6 +25,11 @@
 - External announce: `--libp2p-external-multiaddrs`, `--libp2p-advertise-addresses`
 - Inbound caps: `--libp2p-relay-inbound-cap`, `--libp2p-relay-inbound-unknown-cap`
 - Env overrides all have `KASPAD_LIBP2P_*` prefix; **CLI > env > defaults** for precedence.
+
+## Address metadata
+- NetAddress carries a `services` bitflag and optional `relay_port` to mark peers that can act as libp2p relays and which port to use. Defaults are zero/None so unaware peers ignore them.
+- The relay flag is set only when libp2p is enabled; address book merges metadata (bitwise OR on services, relay port upgraded if provided). No change to equality/hashing (still IP:port).
+- This wire addition is backwards-compatible (proto fields optional) and does not affect consensus or TCP behaviour when libp2p is off.
 
 ## Examples
 - Plain TCP public node (libp2p off): default build/run (no flags).

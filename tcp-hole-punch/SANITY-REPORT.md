@@ -1,69 +1,28 @@
 # TCP Hole Punch / Libp2p Sanity Checks
 
-Date: 2025-11-27 (post-consensus rollback)
+Date: 2025-11-27 (post-consensus alignment re-verify)
 
 ## Build / Test Matrix
 
-- Default (no `libp2p` feature):
-  - `cargo build` ✅
-  - `cargo check --no-default-features` ✅
-- Libp2p enabled:
-  - `cargo build --features libp2p --bin kaspad` ✅
-  - `cargo test -p kaspa-p2p-libp2p --lib --tests -- --nocapture` ✅ (one DCUtR integration test is `#[ignore]` due to upstream relay-client drop panic; leave for manual runs)
-  - `cargo test -p kaspad --lib --features libp2p` ✅
+- `cargo build` ✅
+- `cargo check --no-default-features` ✅
+- `cargo build --features libp2p --bin kaspad` ✅ (yamux deprecation warnings only)
+- `cargo test -p kaspa-p2p-libp2p --lib --tests` ✅ (DCUtR integration tests remain `#[ignore]` upstream)
+- `cargo test -p kaspad --lib --features libp2p` ✅
 
-Notes:
-- Warnings limited to pre-existing unused type aliases in `kaspa-wrpc-wasm` and deprecated `SwarmBuilder` in the ignored DCUtR harness.
+## Runtime Smoke (single-host)
 
-## Runtime Smoke (single-node, local)
+- Default binary (no libp2p feature):
+  - `./target/debug/kaspad --simnet --appdir /tmp/kaspad-sanity-default --loglevel=info --nodnsseed --disable-upnp --listen=127.0.0.1:18611 --rpclisten=127.0.0.1:18610`
+  - Result: P2P on 127.0.0.1:18611, RPC on 127.0.0.1:18610, clean SIGTERM shutdown.
+- Libp2p feature build, mode `off`:
+  - `./target/debug/kaspad --simnet --appdir /tmp/kaspad-sanity-libp2p-off --loglevel=info --nodnsseed --disable-upnp --listen=127.0.0.1:19611 --rpclisten=127.0.0.1:19610 --libp2p-mode=off`
+  - Result: Same as default; no libp2p activity; clean shutdown.
+- Libp2p feature build, mode `full` (dedicated port):
+  - `./target/debug/kaspad --simnet --appdir /tmp/kaspad-sanity-libp2p-full --loglevel=debug --nodnsseed --disable-upnp --listen=127.0.0.1:20611 --rpclisten=127.0.0.1:20610 --libp2p-mode=full --libp2p-listen-port=20612 --libp2p-identity-path=/tmp/kaspad-sanity-libp2p-full/id.key`
+  - Result: libp2p swarm initialises (peer id logged); AutoNAT client+server enabled; listening on `/ip4/127.0.0.1/tcp/20612`; clean shutdown.
 
-- Default binary (libp2p feature off, runtime default):
-  - Command: `target/debug/kaspad --simnet --appdir /tmp/kaspad-sanity-default --loglevel=info --nodnsseed --disable-upnp`
-  - Result: Starts normally; P2P on 0.0.0.0:16511; no libp2p/helper activity. Clean shutdown on SIGTERM.
-- Libp2p feature on, mode `off`:
-  - Command: `target/debug/kaspad --simnet --appdir /tmp/kaspad-sanity-libp2p-off --loglevel=info --nodnsseed --disable-upnp --libp2p-mode=off`
-  - Result: Same behaviour as default run; P2P on 0.0.0.0:16511; no libp2p/helper started. Clean shutdown on SIGTERM.
-- Libp2p feature on, mode `full` (dedicated port):
-  - Command: `target/debug/kaspad --simnet --appdir /tmp/kaspad-libp2p-full --loglevel=debug --nodnsseed --disable-upnp --listen=0.0.0.0:17511 --rpclisten=127.0.0.1:17510 --libp2p-mode=full --libp2p-listen-port=17512 --libp2p-identity-path=/tmp/kaspad-libp2p-full/libp2p.id`
-  - Result: Starts cleanly; P2P on 0.0.0.0:17511; libp2p swarm initialises (peer id logged); AutoNAT client/server enabled, DCUtR advertised; helper port still opt-in.
+## DCUtR / Lab status
 
-## Local libp2p→Kaspa bridging sanity (two nodes, no NAT)
-
-- Node C (relay/public role, dedicated libp2p port):
-  - `RUST_LOG=info,kaspa_p2p_libp2p=debug,libp2p_swarm=info,libp2p_dcutr=debug KASPAD_LIBP2P_EXTERNAL_MULTIADDRS=/ip4/127.0.0.1/tcp/40012 target/debug/kaspad --simnet --appdir=/tmp/kaspad-libp2p-c --loglevel=debug --nodnsseed --disable-upnp --listen=0.0.0.0:40011 --rpclisten=127.0.0.1:40010 --libp2p-mode=full --libp2p-listen-port=40012 --libp2p-identity-path=/tmp/kaspad-libp2p-c/id.key`
-  - Result: libp2p listening on `/ip4/127.0.0.1/tcp/40012` (plus local interfaces); PeerId `12D3KooW...` logged.
-- Node A (private, reserves on C):
-  - `RUST_LOG=info,kaspa_p2p_libp2p=debug,libp2p_swarm=info,libp2p_dcutr=debug KASPAD_LIBP2P_RESERVATIONS=/ip4/127.0.0.1/tcp/40012/p2p/<PEER_ID_FROM_C> KASPAD_LIBP2P_EXTERNAL_MULTIADDRS=/ip4/127.0.0.1/tcp/41012 target/debug/kaspad --simnet --appdir=/tmp/kaspad-libp2p-a --loglevel=debug --nodnsseed --disable-upnp --listen=0.0.0.0:41011 --rpclisten=127.0.0.1:41010 --libp2p-mode=full --libp2p-listen-port=41012 --libp2p-identity-path=/tmp/kaspad-libp2p-a/id.key`
-  - Result: reservation accepted by C; libp2p bridge hands stream to Kaspa (`libp2p_bridge: outbound stream ready for Kaspa…`), `connect_with_stream` invoked, and `libp2p_bridge: Kaspa peer registered from libp2p stream; addr=[fdff::...]` observed.
-- Kaspa layer:
-  - Node A connection manager shows `outgoing: 1/8`.
-  - Node C logs `P2P Connected to incoming peer … (inbound: 1)`.
-- Key listeners: P2P on 40011/41011; libp2p on 40012/41012 (dedicated, not multiplexed with P2P).
-
-## Local DCUtR harness sanity
-
-- Command: `cargo test -p kaspa-p2p-libp2p --test dcutr -- --ignored --nocapture`
-- Result: panics inside `libp2p-relay::priv_client` (“Behaviour polled after transport channel closed”) when the upstream relay client drops its transport channel; this is an upstream libp2p issue.
-- Conclusion: DCUtR harness currently blocked by upstream relay client panic; test remains `#[ignore]` and should be run manually only for debugging once upstream fixes it.
-
-Proxmox lab harness to be re-run on the real lab hosts (not available in this environment) to reconfirm hole-punching after the consensus rollback.
-
-## getLibp2pStatus (full mode)
-
-- Command: `KASPAD_GRPC_SERVER=grpc://127.0.0.1:27510 cargo run --example libp2p_status -p kaspa-grpc-client --quiet`
-- Response: `GetLibp2pStatusResponse { mode: Full, peer_id: Some("..."), identity: Persisted { path: "/tmp/kaspad-libp2p-full/libp2p.id" } }`
-
-## Listener snapshots (lsof -i -P -n -a -p <pid>)
-
-- Default (no libp2p feature build):
-  - Ports: `TCP *:16511 (P2P)`, RPC disabled for the run above.
-- Libp2p feature on, `--libp2p-mode=off`:
-  - Ports: `TCP *:16511 (P2P)`, RPC disabled for the run above.
-- Libp2p feature on, `--libp2p-mode=full --libp2p-helper-listen=127.0.0.1:38080`:
-  - Ports: `127.0.0.1:27510 (RPC)`, `0.0.0.0:16511 (P2P)`; helper control port not bound (control plane still TODO).
-
-## Notes / Fix
-
-- Added logic to `components/p2p-libp2p/src/transport.rs` to feed `Identify`-observed external addresses back into the swarm. This fixes a gap where DCUtR would fail if CLI-configured external addresses were missing or incorrect.
-- Added detailed debug logging for `maybe_request_dialback` and `track_established` to trace relay state and dial-back decisions.
-- Verified local 2-node bridging still works with these changes.
+- Libp2p DCUtR harness remains `#[ignore]` because upstream relay-client panics when the transport channel drops; not run automatically.
+- Proxmox NAT lab harness not executed in this environment after this consensus verification; rerun on the lab hosts to reconfirm hole punching.
