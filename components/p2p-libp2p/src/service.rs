@@ -1,6 +1,7 @@
 use crate::reservations::ReservationManager;
 use crate::transport::{multiaddr_to_metadata, BoxedLibp2pStream, Libp2pStreamProvider, StreamDirection};
 use crate::{config::Config, transport::Libp2pError};
+use crate::helper_api::HelperApi;
 use kaspa_p2p_lib::{ConnectionHandler, MetadataConnectInfo, PathKind};
 use libp2p::Multiaddr;
 use log::{debug, warn};
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::ReceiverStream;
@@ -50,7 +52,25 @@ impl Libp2pService {
         if !self.config.reservations.is_empty() {
             let reservations = self.config.reservations.clone();
             let state = ReservationState::new(self.reservations.clone(), RESERVATION_REFRESH_INTERVAL);
-            tokio::spawn(async move { reservation_worker(provider, reservations, state).await });
+            let provider_for_worker = provider.clone();
+            tokio::spawn(async move { reservation_worker(provider_for_worker, reservations, state).await });
+        }
+
+        if let Some(addr) = self.config.helper_listen {
+            let api = HelperApi::new(provider.clone());
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| Libp2pError::ListenFailed(e.to_string()))?;
+            log::info!("libp2p helper API listening on {addr}");
+            
+            tokio::spawn(async move {
+                loop {
+                    if let Ok((stream, _)) = listener.accept().await {
+                         let api = api.clone();
+                         tokio::spawn(async move {
+                             handle_helper_connection(stream, api).await;
+                         });
+                    }
+                }
+            });
         }
 
         Ok(())
@@ -104,6 +124,22 @@ impl Libp2pService {
         handler.serve_with_incoming(incoming_stream);
 
         Ok(())
+    }
+}
+
+async fn handle_helper_connection(mut stream: tokio::net::TcpStream, api: HelperApi) {
+    let (reader, mut writer) = stream.split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    if let Ok(bytes) = reader.read_line(&mut line).await {
+        if bytes > 0 {
+            let resp_str = match api.handle_json(&line).await {
+                Ok(r) => r,
+                Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, e),
+            };
+            let _ = writer.write_all(resp_str.as_bytes()).await;
+            let _ = writer.write_all(b"\n").await;
+        }
     }
 }
 
@@ -390,6 +426,15 @@ mod tests {
 
     impl Libp2pStreamProvider for MockProvider {
         fn dial<'a>(&'a self, _address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+            Box::pin(async move {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                let mut guard = self.responses.lock().expect("responses");
+                let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+                resp.map(|_| (TransportMetadata::default(), make_stream(self.drops.clone())))
+            })
+        }
+
+        fn dial_multiaddr<'a>(&'a self, _address: Multiaddr) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
             Box::pin(async move {
                 self.attempts.fetch_add(1, Ordering::SeqCst);
                 let mut guard = self.responses.lock().expect("responses");

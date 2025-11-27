@@ -317,6 +317,7 @@ pub type BoxedLibp2pStream = Box<dyn Libp2pStream>;
 /// will bridge to the libp2p swarm and return a stream plus transport metadata.
 pub trait Libp2pStreamProvider: Send + Sync {
     fn dial<'a>(&'a self, address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
+    fn dial_multiaddr<'a>(&'a self, address: Multiaddr) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
     fn listen<'a>(
         &'a self,
     ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>>;
@@ -419,6 +420,7 @@ impl SwarmStreamProvider {
                     }
                 })
                 .collect()
+            
         };
         let mut external_multiaddrs = parse_multiaddrs(&config.external_multiaddrs)?;
         external_multiaddrs.extend(config.advertise_addresses.iter().filter_map(|addr| {
@@ -459,6 +461,23 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
             }
 
             let multiaddr = to_multiaddr(address)?;
+            let (respond_to, rx) = oneshot::channel();
+            tx.send(SwarmCommand::Dial { address: multiaddr, respond_to })
+                .await
+                .map_err(|_| Libp2pError::DialFailed("libp2p driver stopped".into()))?;
+
+            rx.await.unwrap_or_else(|_| Err(Libp2pError::DialFailed("libp2p dial cancelled".into())))
+        })
+    }
+
+    fn dial_multiaddr<'a>(&'a self, multiaddr: Multiaddr) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+        let enabled = self.config.mode.is_enabled();
+        let tx = self.command_tx.clone();
+        Box::pin(async move {
+            if !enabled {
+                return Err(Libp2pError::Disabled);
+            }
+
             let (respond_to, rx) = oneshot::channel();
             tx.send(SwarmCommand::Dial { address: multiaddr, respond_to })
                 .await
@@ -991,4 +1010,64 @@ fn endpoint_uses_relay(endpoint: &libp2p::core::ConnectedPoint) -> bool {
         libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => send_back_addr,
     };
     addr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+}
+
+#[cfg(test)]
+struct MockProvider {
+    responses: std::sync::Mutex<std::collections::VecDeque<Result<(), Libp2pError>>>,
+    attempts: std::sync::atomic::AtomicUsize,
+    drops: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl MockProvider {
+    fn with_responses(responses: std::collections::VecDeque<Result<(), Libp2pError>>, drops: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        Self { responses: std::sync::Mutex::new(responses), attempts: std::sync::atomic::AtomicUsize::new(0), drops }
+    }
+
+    fn attempts(&self) -> usize {
+        self.attempts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+impl Libp2pStreamProvider for MockProvider {
+    fn dial<'a>(&'a self, _address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+        Box::pin(async move {
+            self.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut guard = self.responses.lock().expect("responses");
+            let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+            resp.map(|_| (TransportMetadata::default(), crate::service::tests::make_stream(self.drops.clone())))
+        })
+    }
+
+    fn dial_multiaddr<'a>(&'a self, _address: Multiaddr) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+        Box::pin(async move {
+            self.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut guard = self.responses.lock().expect("responses");
+            let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+            resp.map(|_| (TransportMetadata::default(), crate::service::tests::make_stream(self.drops.clone())))
+        })
+    }
+
+    fn listen<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
+        let drops = self.drops.clone();
+        Box::pin(async move {
+            let (client, _server) = tokio::io::duplex(64);
+            let stream: BoxedLibp2pStream = Box::new(crate::service::tests::DropStream { inner: client, drops });
+            let closer: Box<dyn FnOnce() + Send> = Box::new(|| {});
+            Ok((TransportMetadata::default(), StreamDirection::Inbound, closer, stream))
+        })
+    }
+
+    fn reserve<'a>(&'a self, _target: Multiaddr) -> BoxFuture<'a, Result<(), Libp2pError>> {
+        Box::pin(async move {
+            self.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut guard = self.responses.lock().expect("responses");
+            let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+            resp
+        })
+    }
 }
