@@ -144,7 +144,18 @@ impl NetworkBehaviour for DcutrHackBehaviour {
         Ok(DcutrAdvertiseHandler::default())
     }
 
-    fn on_swarm_event(&mut self, _: swarm::behaviour::FromSwarm) {}
+    fn on_swarm_event(&mut self, event: swarm::behaviour::FromSwarm) {
+        // Log events to verify the derive macro is forwarding to all behaviours
+        match &event {
+            swarm::behaviour::FromSwarm::NewExternalAddrCandidate(e) => {
+                debug!("DcutrHackBehaviour received FromSwarm::NewExternalAddrCandidate: {}", e.addr);
+            }
+            swarm::behaviour::FromSwarm::ExternalAddrConfirmed(e) => {
+                debug!("DcutrHackBehaviour received FromSwarm::ExternalAddrConfirmed: {}", e.addr);
+            }
+            _ => {}
+        }
+    }
 
     fn on_connection_handler_event(&mut self, _: libp2p::PeerId, _: ConnectionId, _: swarm::THandlerOutEvent<Self>) {}
 
