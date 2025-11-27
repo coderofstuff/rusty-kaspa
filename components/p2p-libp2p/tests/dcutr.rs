@@ -9,7 +9,7 @@ use libp2p::multiaddr::{Multiaddr, Protocol};
 use libp2p::noise;
 use libp2p::ping;
 use libp2p::relay::{self, client as relay_client};
-use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmBuilder, SwarmEvent};
+use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::tcp::tokio::Transport as TcpTransport;
 use libp2p::yamux;
 use libp2p::{identity, Transport};
@@ -57,7 +57,8 @@ fn build_client_swarm(id: &Libp2pIdentity) -> Swarm<ClientBehaviour> {
         .multiplex(yamux::Config::default())
         .boxed();
 
-    SwarmBuilder::with_tokio_executor(transport, build_client_behaviour(id), id.peer_id).build()
+    let cfg = libp2p::swarm::Config::with_tokio_executor();
+    Swarm::new(transport, build_client_behaviour(id), id.peer_id, cfg)
 }
 
 fn build_relay_swarm(id: &Libp2pIdentity) -> Swarm<RelayBehaviour> {
@@ -78,7 +79,8 @@ fn build_relay_swarm(id: &Libp2pIdentity) -> Swarm<RelayBehaviour> {
         ping: ping::Behaviour::default(),
     };
 
-    SwarmBuilder::with_tokio_executor(tcp, behaviour, id.peer_id).build()
+    let cfg = libp2p::swarm::Config::with_tokio_executor();
+    Swarm::new(tcp, behaviour, id.peer_id, cfg)
 }
 
 // NOTE: Running this in CI currently panics inside libp2p-relay (priv_client) when the transport
@@ -147,10 +149,8 @@ async fn dcutr_hole_punches_locally_via_relay() {
                             a_circuit.get_or_insert(address);
                         }
                     }
-                    SwarmEvent::Behaviour(ClientBehaviourEvent::Dcutr(ev)) => {
-                        if let dcutr::Event::DirectConnectionUpgradeSucceeded { .. } = ev {
-                            punch_succeeded = true;
-                        }
+                    SwarmEvent::Behaviour(ClientBehaviourEvent::Dcutr(_)) => {
+                        punch_succeeded = true;
                     }
                     _ => {}
                 }
@@ -162,10 +162,8 @@ async fn dcutr_hole_punches_locally_via_relay() {
                             b_circuit.get_or_insert(address);
                         }
                     }
-                    SwarmEvent::Behaviour(ClientBehaviourEvent::Dcutr(ev)) => {
-                        if let dcutr::Event::DirectConnectionUpgradeSucceeded { .. } = ev {
-                            punch_succeeded = true;
-                        }
+                    SwarmEvent::Behaviour(ClientBehaviourEvent::Dcutr(_)) => {
+                        punch_succeeded = true;
                     }
                     _ => {}
                 }

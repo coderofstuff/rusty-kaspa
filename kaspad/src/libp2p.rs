@@ -329,9 +329,13 @@ mod tests {
     use super::AdapterIdentity;
     use super::*;
     use std::env;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn libp2p_env_overrides_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
         env::set_var("KASPAD_LIBP2P_MODE", "full");
         env::set_var("KASPAD_LIBP2P_IDENTITY_PATH", "/tmp/libp2p-id.key");
         env::set_var("KASPAD_LIBP2P_HELPER_LISTEN", "127.0.0.1:12345");
@@ -354,6 +358,7 @@ mod tests {
 
     #[test]
     fn libp2p_cli_mode_overrides_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
         env::set_var("KASPAD_LIBP2P_MODE", "full");
         let mut args = Libp2pArgs::default();
         args.libp2p_mode = Libp2pMode::Helper;

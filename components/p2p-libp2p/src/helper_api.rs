@@ -51,10 +51,11 @@ impl HelperApi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{BoxedLibp2pStream, TransportMetadata, StreamDirection};
+    use crate::metadata::TransportMetadata;
+    use crate::transport::{BoxedLibp2pStream, StreamDirection};
+    use crate::Libp2pError;
     use futures_util::future::BoxFuture;
     use kaspa_utils::networking::NetAddress;
-    use std::sync::Mutex;
 
     struct MockProvider;
     impl Libp2pStreamProvider for MockProvider {

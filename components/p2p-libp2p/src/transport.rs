@@ -6,6 +6,7 @@ use kaspa_p2p_lib::common::ProtocolError;
 use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
 use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
+use libp2p::dcutr;
 use libp2p::identify;
 use libp2p::identity::Keypair;
 use libp2p::multiaddr::Multiaddr;
@@ -662,37 +663,56 @@ impl SwarmDriver {
             SwarmEvent::Behaviour(Libp2pEvent::Ping(event)) => {
                 let _ = event;
             }
-            SwarmEvent::Behaviour(Libp2pEvent::Identify(event)) => {
-                match event {
-                    identify::Event::Received { peer_id, ref info, .. } => {
-                        debug!(
-                            "libp2p identify received from {peer_id}: protocols={:?} listen_addrs={:?}",
-                            info.protocols, info.listen_addrs
-                        );
-                        if !addr_uses_relay(&info.observed_addr) {
-                            self.swarm.add_external_address(info.observed_addr.clone());
-                        }
-                        let supports_dcutr = info.protocols.iter().any(|p| p.as_ref() == "/libp2p/dcutr");
-                        self.mark_dcutr_support(peer_id, supports_dcutr);
-                        self.maybe_request_dialback(peer_id);
+            SwarmEvent::Behaviour(Libp2pEvent::Identify(event)) => match event {
+                identify::Event::Received { peer_id, ref info, .. } => {
+                    let supports_dcutr = info.protocols.iter().any(|p| p.as_ref() == dcutr::PROTOCOL_NAME.as_ref());
+                    info!(
+                        target: "libp2p_identify",
+                        "identify received from {peer_id}: protocols={:?} (dcutr={supports_dcutr}) listen_addrs={:?}",
+                        info.protocols,
+                        info.listen_addrs
+                    );
+                    if !addr_uses_relay(&info.observed_addr) {
+                        self.swarm.add_external_address(info.observed_addr.clone());
                     }
-                    other => debug!("libp2p identify event: {:?}", other),
+                    self.mark_dcutr_support(peer_id, supports_dcutr);
+                    self.maybe_request_dialback(peer_id);
+                }
+                identify::Event::Pushed { peer_id, ref info, .. } => {
+                    let supports_dcutr = info.protocols.iter().any(|p| p.as_ref() == dcutr::PROTOCOL_NAME.as_ref());
+                    info!(
+                        target: "libp2p_identify",
+                        "identify pushed to {peer_id}: protocols={:?} (dcutr={supports_dcutr}) listen_addrs={:?}",
+                        info.protocols,
+                        info.listen_addrs
+                    );
+                }
+                identify::Event::Sent { peer_id, .. } => {
+                    info!(
+                        target: "libp2p_identify",
+                        "identify sent to {peer_id}; expecting advertisement of {}",
+                        dcutr::PROTOCOL_NAME
+                    );
+                }
+                other => debug!("libp2p identify event: {:?}", other),
+            },
+            SwarmEvent::Behaviour(Libp2pEvent::RelayClient(event)) => {
+                #[allow(unreachable_patterns)]
+                match event {
+                    relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
+                        info!("libp2p reservation accepted by {relay_peer_id}, renewal={renewal}");
+                    }
+                    relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
+                        info!("libp2p outbound circuit established via {relay_peer_id}");
+                    }
+                    relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
+                        info!("libp2p inbound circuit established from {src_peer_id}");
+                        self.mark_relay_path(src_peer_id);
+                        self.maybe_request_dialback(src_peer_id);
+                    }
+                    _ => {}
                 }
             }
-            SwarmEvent::Behaviour(Libp2pEvent::RelayClient(event)) => match event {
-                relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
-                    info!("libp2p reservation accepted by {relay_peer_id}, renewal={renewal}");
-                }
-                relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
-                    info!("libp2p outbound circuit established via {relay_peer_id}");
-                }
-                relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
-                    info!("libp2p inbound circuit established from {src_peer_id}");
-                    self.mark_relay_path(src_peer_id);
-                    self.maybe_request_dialback(src_peer_id);
-                }
-                _ => {}
-            },
             SwarmEvent::Behaviour(Libp2pEvent::RelayServer(event)) => {
                 debug!("libp2p relay server event: {:?}", event);
             }
@@ -1022,6 +1042,48 @@ struct MockProvider {
 }
 
 #[cfg(test)]
+fn make_test_stream(drops: Arc<std::sync::atomic::AtomicUsize>) -> BoxedLibp2pStream {
+    use tokio::io::{AsyncRead, AsyncWrite};
+    use tokio::io::{ReadBuf, duplex};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct DropStream {
+        inner: tokio::io::DuplexStream,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for DropStream {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl AsyncRead for DropStream {
+        fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for DropStream {
+        fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    let (client, _server) = duplex(64);
+    Box::new(DropStream { inner: client, drops })
+}
+
+#[cfg(test)]
 impl MockProvider {
     fn with_responses(responses: std::collections::VecDeque<Result<(), Libp2pError>>, drops: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         Self { responses: std::sync::Mutex::new(responses), attempts: std::sync::atomic::AtomicUsize::new(0), drops }
@@ -1039,7 +1101,7 @@ impl Libp2pStreamProvider for MockProvider {
             self.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut guard = self.responses.lock().expect("responses");
             let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
-            resp.map(|_| (TransportMetadata::default(), crate::service::tests::make_stream(self.drops.clone())))
+            resp.map(|_| (TransportMetadata::default(), make_test_stream(self.drops.clone())))
         })
     }
 
@@ -1048,7 +1110,7 @@ impl Libp2pStreamProvider for MockProvider {
             self.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut guard = self.responses.lock().expect("responses");
             let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
-            resp.map(|_| (TransportMetadata::default(), crate::service::tests::make_stream(self.drops.clone())))
+            resp.map(|_| (TransportMetadata::default(), make_test_stream(self.drops.clone())))
         })
     }
 
@@ -1057,8 +1119,7 @@ impl Libp2pStreamProvider for MockProvider {
     ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
         let drops = self.drops.clone();
         Box::pin(async move {
-            let (client, _server) = tokio::io::duplex(64);
-            let stream: BoxedLibp2pStream = Box::new(crate::service::tests::DropStream { inner: client, drops });
+            let stream = make_test_stream(drops);
             let closer: Box<dyn FnOnce() + Send> = Box::new(|| {});
             Ok((TransportMetadata::default(), StreamDirection::Inbound, closer, stream))
         })

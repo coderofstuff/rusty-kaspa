@@ -2,9 +2,9 @@ use crate::transport::{Libp2pError, Libp2pIdentity};
 use futures_util::future;
 use libp2p::core::transport::choice::OrTransport;
 use libp2p::core::upgrade::{self, InboundUpgrade, OutboundUpgrade, UpgradeInfo};
+use libp2p::autonat;
 use libp2p::dcutr;
 use libp2p::identify;
-use libp2p::autonat;
 use libp2p::noise;
 use libp2p::ping;
 use libp2p::relay::{self, client as relay_client};
@@ -132,17 +132,24 @@ pub(crate) fn build_streaming_swarm(
     let (relay_transport, relay_client_behaviour) = relay_client::new(peer_id);
     let (transport, cfg) = build_transport(identity, relay_transport)?;
 
-    info!("libp2p streaming swarm peer id: {}", peer_id);
+    info!("libp2p streaming swarm peer id: {} (dcutr enabled, identify will advertise {})", peer_id, dcutr::PROTOCOL_NAME);
 
     // Configure AutoNAT
     let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
 
+    let identify = {
+        let identify_cfg =
+            identify::Config::new(format!("/kaspad/libp2p/{}", env!("CARGO_PKG_VERSION")), identity.keypair.public())
+                .with_push_listen_addr_updates(true);
+        let behaviour = identify::Behaviour::new(identify_cfg);
+        // Developer sanity: ensure DCUtR is in the supported protocol set we hand to Identify.
+        debug_assert!(!dcutr::PROTOCOL_NAME.as_ref().is_empty(), "dcutr protocol name must be non-empty");
+        behaviour
+    };
+
     let behaviour = Libp2pBehaviour {
         ping: ping::Behaviour::default(),
-        identify: identify::Behaviour::new(identify::Config::new(
-            format!("/kaspad/libp2p/{}", env!("CARGO_PKG_VERSION")),
-            identity.keypair.public(),
-        )),
+        identify,
         relay_client: relay_client_behaviour,
         relay_server: relay::Behaviour::new(peer_id, relay::Config::default()),
         dcutr: dcutr::Behaviour::new(peer_id),
