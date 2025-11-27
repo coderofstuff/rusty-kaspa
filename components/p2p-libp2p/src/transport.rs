@@ -569,9 +569,14 @@ struct SwarmDriver {
 
 impl SwarmDriver {
     fn bootstrap(&mut self) {
+        info!("libp2p bootstrap: adding {} external addresses", self.external_addrs.len());
         for addr in self.external_addrs.clone() {
+            info!("libp2p bootstrap: registering external address: {}", addr);
             self.swarm.add_external_address(addr);
         }
+        // Log the swarm's external addresses after adding
+        let external_addrs: Vec<_> = self.swarm.external_addresses().collect();
+        info!("libp2p bootstrap: swarm now has {} external addresses: {:?}", external_addrs.len(), external_addrs);
         let _ = self.start_listening();
     }
 
@@ -726,7 +731,14 @@ impl SwarmDriver {
                 debug!("libp2p relay server event: {:?}", event);
             }
             SwarmEvent::Behaviour(Libp2pEvent::Dcutr(event)) => {
-                debug!("libp2p dcutr event: {:?}", event);
+                // Enhanced DCUtR logging to diagnose NoAddresses issue
+                let external_addrs: Vec<_> = self.swarm.external_addresses().collect();
+                info!(
+                    "libp2p dcutr event: {:?} (swarm has {} external addrs: {:?})",
+                    event,
+                    external_addrs.len(),
+                    external_addrs
+                );
             }
             SwarmEvent::Behaviour(Libp2pEvent::Autonat(event)) => {
                 debug!("libp2p autonat event: {:?}", event);
