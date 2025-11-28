@@ -3,7 +3,7 @@
 ## Modes and defaults
 - **off** (default): libp2p disabled; transport is plain TCP. No libp2p deps pulled in unless compiled with `--features libp2p`.
 - **full/helper**: libp2p stack enabled (helper == full for now). Requires explicit `--libp2p-mode full|helper`.
-- Helper control (relay/DCUtR) binds only when `--libp2p-helper-listen <addr>` is set (**currently stubbed; no control-plane listener is started**).
+- Helper API binds only when `--libp2p-helper-listen <addr>` is set (e.g., `127.0.0.1:38080`).
 - Ports: TCP P2P port stays unchanged (`--listen`/default p2p port); libp2p uses a dedicated port (`--libp2p-listen-port` or `KASPAD_LIBP2P_LISTEN_PORT`, default `p2p_port+1`). Libp2p is intentionally **not** multiplexed on the P2P TCP port.
 - AutoNAT posture: client+server enabled in full/helper modes; server is public-only by default (`server_only_if_public=true`). Labs can opt into private IP reachability with `--libp2p-autonat-allow-private` / `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true`.
 
@@ -53,3 +53,66 @@
   - `cargo run -p kaspa-p2p-libp2p --example dcutr_harness --features libp2p -- <ip:port>`
   - Or set `LIBP2P_TARGET_ADDR=<ip:port>` to attempt an outbound dial; otherwise it prints the local peer ID and waits for inbound streams.
 - A DCUtR-focused integration test exists under `components/p2p-libp2p/tests/dcutr.rs` but is `#[ignore]` in CI due to an upstream relay-client drop panic; run manually if you need a quick punch sanity check.
+
+## Helper API (Testing / Debugging)
+
+The helper API provides a simple JSON interface for triggering libp2p operations. **For testing only** - binds to localhost by default.
+
+### Enabling
+```bash
+kaspad --libp2p-mode=full --libp2p-helper-listen=127.0.0.1:38080 ...
+```
+
+### Supported Actions
+
+**Status check:**
+```bash
+echo '{"action":"status"}' | nc -w 5 127.0.0.1 38080
+# Response: {"ok":true}
+```
+
+**Dial via relay (triggers DCUtR hole punch):**
+```bash
+echo '{"action":"dial","multiaddr":"/ip4/RELAY_IP/tcp/16112/p2p/RELAY_PEER_ID/p2p-circuit/p2p/TARGET_PEER_ID"}' | nc -w 5 127.0.0.1 38080
+# Response: {"ok":true,"msg":"dial successful"}
+# On error: {"ok":false,"error":"..."}
+```
+
+### Verifying DCUtR Success
+
+After a relay dial, check the kaspad logs for:
+```
+# Success indicators:
+libp2p dcutr event: ... result: Ok(ConnectionId(...))
+peer XXXX connected DIRECTLY (no relay)
+
+# Failure indicators:
+libp2p dcutr event: ... result: Err(Error { inner: InboundError(Protocol(NoAddresses)) })
+```
+
+### Example: Full DCUtR Test
+
+```bash
+# 1. Start relay node (public IP, no NAT)
+kaspad --testnet --libp2p-mode=full --libp2p-listen-port=16112
+
+# 2. Start Node A (behind NAT)
+kaspad --testnet --libp2p-mode=full --libp2p-listen-port=16112 \
+  --libp2p-external-multiaddrs=/ip4/WAN_IP_A/tcp/16112 \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-reservations=/ip4/RELAY_IP/tcp/16112/p2p/RELAY_PEER_ID
+
+# 3. Start Node B (behind NAT)
+kaspad --testnet --libp2p-mode=full --libp2p-listen-port=16112 \
+  --libp2p-external-multiaddrs=/ip4/WAN_IP_B/tcp/16112 \
+  --libp2p-reservations=/ip4/RELAY_IP/tcp/16112/p2p/RELAY_PEER_ID
+
+# 4. From Node A, dial Node B via relay (triggers DCUtR)
+echo '{"action":"dial","multiaddr":"/ip4/RELAY_IP/tcp/16112/p2p/RELAY_PEER_ID/p2p-circuit/p2p/NODE_B_PEER_ID"}' | nc -w 5 127.0.0.1 38080
+```
+
+### Important Notes
+- Nodes must have `--libp2p-external-multiaddrs` configured with their WAN IP for DCUtR to have addresses to send
+- Both nodes should have reservations on the same relay
+- The helper API only binds when `--libp2p-helper-listen` is explicitly set
+- Use `--loglevel=debug` to see detailed DCUtR negotiation logs
