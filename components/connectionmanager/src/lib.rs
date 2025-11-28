@@ -419,14 +419,16 @@ impl ConnectionManager {
 mod tests {
     use super::*;
     use kaspa_p2p_lib::transport::{Capabilities, TransportMetadata};
-    use kaspa_utils::networking::{IpAddress, PeerId};
+    use kaspa_p2p_lib::PeerProperties;
+    use kaspa_utils::networking::PeerId;
+    use std::collections::HashMap;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Instant;
 
-    fn make_peer(path: PathKind, ip: Ipv4Addr) -> Peer {
-        let metadata = TransportMetadata { path, capabilities: Capabilities { libp2p: true }, ..Default::default() };
+    fn make_peer_with_path(path: PathKind, ip: Ipv4Addr, caps: Capabilities) -> Peer {
+        let metadata = TransportMetadata { path, capabilities: caps, ..Default::default() };
         Peer::new(
-            PeerId::new(uuid::Uuid::new_v4()),
+            PeerId::default(),
             SocketAddr::from((ip, 16000)),
             false,
             Instant::now(),
@@ -436,79 +438,16 @@ mod tests {
         )
     }
 
-    #[test]
-    fn relay_overflow_enforces_per_relay_cap() {
-        let relay_a = PathKind::Relay { relay_id: Some("relay-a".into()) };
-        let relay_b = PathKind::Relay { relay_id: Some("relay-b".into()) };
-        let peers = vec![
-            make_peer(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 1)),
-            make_peer(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 2)),
-            make_peer(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 3)),
-            make_peer(relay_b.clone(), Ipv4Addr::new(10, 0, 0, 4)),
-        ];
-        let refs: Vec<&Peer> = peers.iter().collect();
-        let dropped = ConnectionManager::relay_overflow(&refs, 2, 8);
-        assert_eq!(dropped.len(), 1, "only one peer from relay-a should be dropped");
-        assert!(dropped.iter().all(|p| matches!(p.metadata().path, PathKind::Relay { .. })));
-    }
-
-    #[test]
-    fn relay_overflow_enforces_unknown_bucket() {
-        let relay_unknown = PathKind::Relay { relay_id: None };
-        let peers = vec![
-            make_peer(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 1)),
-            make_peer(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 2)),
-            make_peer(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 3)),
-        ];
-        let refs: Vec<&Peer> = peers.iter().collect();
-        let dropped = ConnectionManager::relay_overflow(&refs, 4, 2);
-        assert_eq!(dropped.len(), 1, "unknown relay bucket should drop overflow");
-        assert!(matches!(dropped[0].metadata().path, PathKind::Relay { relay_id: None }));
-    }
-
-    #[test]
-    fn libp2p_classification_detects_capability_and_relay_path() {
-        // Direct path + libp2p capability => libp2p
-        let direct_libp2p = make_peer(PathKind::Direct, Ipv4Addr::new(10, 0, 2, 1), Some(Capabilities { libp2p: true }));
-        assert!(ConnectionManager::is_libp2p_peer(&direct_libp2p));
-
-        // Relay path without capability still counts as libp2p for accounting.
-        let relay_path = make_peer(PathKind::Relay { relay_id: None }, Ipv4Addr::new(10, 0, 2, 2), None);
-        assert!(ConnectionManager::is_libp2p_peer(&relay_path));
-
-        // Direct path with no capability => non-libp2p.
-        let direct_plain = make_peer(PathKind::Direct, Ipv4Addr::new(10, 0, 2, 3), None);
-        assert!(!ConnectionManager::is_libp2p_peer(&direct_plain));
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use kaspa_p2p_lib::{transport::TransportMetadata, Capabilities, PathKind};
-    use std::time::Instant;
-
-    fn make_peer(relay_id: Option<&str>) -> Peer {
-        let metadata = TransportMetadata {
-            path: relay_id.map(|id| PathKind::Relay { relay_id: Some(id.to_string()) }).unwrap_or(PathKind::Unknown),
-            capabilities: Capabilities { libp2p: true },
-            ..Default::default()
-        };
-        Peer::new(
-            Uuid::new_v4().into(),
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-            false,
-            Instant::now(),
-            Arc::new(PeerProperties::default()),
-            0,
-            metadata,
-        )
+    fn make_relay_peer(relay_id: Option<&str>) -> Peer {
+        let path = PathKind::Relay { relay_id: relay_id.map(|id| id.to_string()) };
+        make_peer_with_path(path, Ipv4Addr::new(127, 0, 0, 1), Capabilities { libp2p: true })
     }
 
     #[test]
     fn relay_overflow_drops_expected_counts() {
-        let r1 = vec![make_peer(Some("r1")), make_peer(Some("r1")), make_peer(Some("r1"))]; // overflow by 1 when cap=2
-        let r2 = vec![make_peer(Some("r2")), make_peer(Some("r2"))]; // fits cap
-        let unknown = vec![make_peer(None), make_peer(None)]; // overflow by 1 when cap=1
+        let r1 = vec![make_relay_peer(Some("r1")), make_relay_peer(Some("r1")), make_relay_peer(Some("r1"))]; // overflow by 1 when cap=2
+        let r2 = vec![make_relay_peer(Some("r2")), make_relay_peer(Some("r2"))]; // fits cap
+        let unknown = vec![make_relay_peer(None), make_relay_peer(None)]; // overflow by 1 when cap=1
 
         let mut all = Vec::new();
         all.extend(r1.iter());
@@ -528,5 +467,52 @@ mod tests {
         assert_eq!(counts.get(&Some("r1".to_string())), Some(&1));
         assert_eq!(counts.get(&Some("r2".to_string())), None);
         assert_eq!(counts.get(&None), Some(&1));
+    }
+
+    #[test]
+    fn relay_overflow_enforces_per_relay_cap() {
+        let relay_a = PathKind::Relay { relay_id: Some("relay-a".into()) };
+        let relay_b = PathKind::Relay { relay_id: Some("relay-b".into()) };
+        let peers = vec![
+            make_peer_with_path(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 1), Capabilities { libp2p: true }),
+            make_peer_with_path(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 2), Capabilities { libp2p: true }),
+            make_peer_with_path(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 3), Capabilities { libp2p: true }),
+            make_peer_with_path(relay_b.clone(), Ipv4Addr::new(10, 0, 0, 4), Capabilities { libp2p: true }),
+        ];
+        let refs: Vec<&Peer> = peers.iter().collect();
+        let dropped = ConnectionManager::relay_overflow(&refs, 2, 8);
+        assert_eq!(dropped.len(), 1, "only one peer from relay-a should be dropped");
+        assert!(dropped.iter().all(|p| matches!(p.metadata().path, PathKind::Relay { .. })));
+    }
+
+    #[test]
+    fn relay_overflow_enforces_unknown_bucket() {
+        let relay_unknown = PathKind::Relay { relay_id: None };
+        let peers = vec![
+            make_peer_with_path(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 1), Capabilities { libp2p: true }),
+            make_peer_with_path(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 2), Capabilities { libp2p: true }),
+            make_peer_with_path(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 3), Capabilities { libp2p: true }),
+        ];
+        let refs: Vec<&Peer> = peers.iter().collect();
+        let dropped = ConnectionManager::relay_overflow(&refs, 4, 2);
+        assert_eq!(dropped.len(), 1, "unknown relay bucket should drop overflow");
+        assert!(matches!(dropped[0].metadata().path, PathKind::Relay { relay_id: None }));
+    }
+
+    #[test]
+    fn libp2p_classification_detects_capability_and_relay_path() {
+        // Direct path + libp2p capability => libp2p
+        let direct_libp2p =
+            make_peer_with_path(PathKind::Direct, Ipv4Addr::new(10, 0, 2, 1), Capabilities { libp2p: true });
+        assert!(ConnectionManager::is_libp2p_peer(&direct_libp2p));
+
+        // Relay path without capability still counts as libp2p for accounting.
+        let relay_path = make_peer_with_path(PathKind::Relay { relay_id: None }, Ipv4Addr::new(10, 0, 2, 2), Capabilities { libp2p: false });
+        assert!(ConnectionManager::is_libp2p_peer(&relay_path));
+
+        // Direct path with no capability => non-libp2p.
+        let direct_plain =
+            make_peer_with_path(PathKind::Direct, Ipv4Addr::new(10, 0, 2, 3), Capabilities { libp2p: false });
+        assert!(!ConnectionManager::is_libp2p_peer(&direct_plain));
     }
 }
