@@ -20,7 +20,7 @@ use libp2p::tcp::tokio::Transport as TcpTransport;
 use libp2p::yamux;
 use libp2p::{identity, swarm, Multiaddr, Swarm, Transport};
 use log::{debug, info};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::iter;
 use std::task::{Context, Poll};
@@ -95,12 +95,19 @@ impl From<()> for Libp2pEvent {
 ///
 /// The address seeding is critical because `swarm.add_external_address()` bypasses DCUtR's candidate
 /// mechanism. DCUtR only sees addresses that flow through `NewExternalAddrCandidate` events.
+///
+/// This behaviour intercepts `ExternalAddrConfirmed` events and re-emits them as `NewExternalAddrCandidate`
+/// so that DCUtR's internal address cache gets populated. Without this, addresses added via
+/// `swarm.add_external_address()` (e.g., from Identify or bootstrap) would never reach DCUtR.
 #[derive(Clone, Default)]
 pub struct DcutrHackBehaviour {
-    /// Addresses waiting to be emitted as candidates
+    /// Addresses waiting to be emitted as NewExternalAddrCandidate
     pending_candidates: VecDeque<Multiaddr>,
     /// Addresses that have been proposed as candidates and are waiting to be confirmed
+    /// (only used for addresses from constructor, not from swarm events)
     pending_confirms: VecDeque<Multiaddr>,
+    /// Addresses we've already emitted as NewExternalAddrCandidate (to avoid duplicates/loops)
+    emitted_candidates: HashSet<Multiaddr>,
 }
 
 impl DcutrHackBehaviour {
@@ -109,6 +116,7 @@ impl DcutrHackBehaviour {
         Self {
             pending_candidates: external_addrs.into_iter().collect(),
             pending_confirms: VecDeque::new(),
+            emitted_candidates: HashSet::new(),
         }
     }
 }
@@ -145,13 +153,22 @@ impl NetworkBehaviour for DcutrHackBehaviour {
     }
 
     fn on_swarm_event(&mut self, event: swarm::behaviour::FromSwarm) {
-        // Log events to verify the derive macro is forwarding to all behaviours
+        // Intercept ExternalAddrConfirmed events and re-emit them as NewExternalAddrCandidate
+        // so that DCUtR's internal address cache gets populated.
         match &event {
             swarm::behaviour::FromSwarm::NewExternalAddrCandidate(e) => {
                 debug!("DcutrHackBehaviour received FromSwarm::NewExternalAddrCandidate: {}", e.addr);
             }
             swarm::behaviour::FromSwarm::ExternalAddrConfirmed(e) => {
                 debug!("DcutrHackBehaviour received FromSwarm::ExternalAddrConfirmed: {}", e.addr);
+                // If we haven't emitted this address as a candidate yet, queue it for emission.
+                // This ensures addresses added via swarm.add_external_address() (which emits
+                // ExternalAddrConfirmed directly) get re-emitted as NewExternalAddrCandidate
+                // so that DCUtR sees them.
+                if !self.emitted_candidates.contains(e.addr) {
+                    debug!("DcutrHackBehaviour: queueing {} for NewExternalAddrCandidate emission", e.addr);
+                    self.pending_candidates.push_back(e.addr.clone());
+                }
             }
             _ => {}
         }
@@ -162,13 +179,18 @@ impl NetworkBehaviour for DcutrHackBehaviour {
     fn poll(&mut self, _: &mut Context<'_>) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         // First, emit any pending candidates (NewExternalAddrCandidate)
         if let Some(addr) = self.pending_candidates.pop_front() {
+            // Track that we've emitted this address to avoid re-emitting it later
+            // when we receive the ExternalAddrConfirmed event for it
+            self.emitted_candidates.insert(addr.clone());
             debug!("DcutrHackBehaviour: emitting NewExternalAddrCandidate for {}", addr);
             // Queue it for confirmation after the candidate event is processed
+            // (only for addresses from constructor, not from swarm events which are already confirmed)
             self.pending_confirms.push_back(addr.clone());
             return Poll::Ready(ToSwarm::NewExternalAddrCandidate(addr));
         }
 
         // Then, confirm any pending addresses (ExternalAddrConfirmed)
+        // This is only for addresses from the constructor that need to be confirmed
         if let Some(addr) = self.pending_confirms.pop_front() {
             debug!("DcutrHackBehaviour: emitting ExternalAddrConfirmed for {}", addr);
             return Poll::Ready(ToSwarm::ExternalAddrConfirmed(addr));
