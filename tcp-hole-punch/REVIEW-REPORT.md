@@ -41,7 +41,7 @@ No justified exceptions found; none of these are required for libp2p/DCUtR.
 
 ## DCUtR / AutoNAT / Bridging
 - Stack matches intent: TCP → Noise → Yamux, relay client/server, DCUtR always enabled, Identify push listen updates disabled, stream bridge over `/kaspad/transport/1.0.0`.
-- Identify feeds observed/listen addrs into swarm external addresses (excluding relay addrs); DCUtR pre-seeded with advertise/external addrs; `/libp2p/dcutr` advertised via DcutrHackBehaviour.
+- Identify feeds observed/listen addrs into swarm external addresses (excluding relay addrs); DCUtR pre-seeded with advertise/external addrs; `/libp2p/dcutr` advertised via DcutrBootstrapBehaviour.
 - Dial-back logic present: listener-side relayed connections trigger dial-back via active relay when peer supports DCUtR; avoids double-bridge by only dialer side initiating unless resolving pending relay dial.
 - Transport metadata stable: synthetic addresses keyed by PeerId with relay path tracked separately; ConnectionManager respects relay/unknown caps.
 - AutoNAT: default `server_only_if_public=true` (global only). Flag/env `--libp2p-autonat-allow-private` / `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE` flips to allow private IPs. Operator doc matches; lab harness sets it true for Proxmox.

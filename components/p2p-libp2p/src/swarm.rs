@@ -66,8 +66,8 @@ pub(crate) struct Libp2pBehaviour {
     pub relay_client: relay_client::Behaviour,
     pub relay_server: relay::Behaviour,
     pub dcutr: dcutr::Behaviour,
-    /// No-op behaviour that only advertises `/libp2p/dcutr` via Identify.
-    pub dcutr_hack: DcutrHackBehaviour,
+    /// No-op behaviour that only advertises `/libp2p/dcutr` via Identify and seeds DCUtR candidates.
+    pub dcutr_bootstrap: DcutrBootstrapBehaviour,
     pub autonat: autonat::Behaviour,
     pub streams: StreamBehaviour,
 }
@@ -79,14 +79,14 @@ pub(crate) enum Libp2pEvent {
     RelayClient(relay_client::Event),
     RelayServer(relay::Event),
     Dcutr(dcutr::Event),
-    DcutrHack(()),
+    DcutrBootstrap(()),
     Autonat(autonat::Event),
     Stream(StreamEvent),
 }
 
 impl From<()> for Libp2pEvent {
     fn from(event: ()) -> Self {
-        Libp2pEvent::DcutrHack(event)
+        Libp2pEvent::DcutrBootstrap(event)
     }
 }
 
@@ -101,7 +101,7 @@ impl From<()> for Libp2pEvent {
 /// so that DCUtR's internal address cache gets populated. Without this, addresses added via
 /// `swarm.add_external_address()` (e.g., from Identify or bootstrap) would never reach DCUtR.
 #[derive(Clone, Default)]
-pub struct DcutrHackBehaviour {
+pub struct DcutrBootstrapBehaviour {
     /// Addresses waiting to be emitted as NewExternalAddrCandidate
     pending_candidates: VecDeque<Multiaddr>,
     /// Addresses that have been proposed as candidates and are waiting to be confirmed
@@ -111,8 +111,8 @@ pub struct DcutrHackBehaviour {
     emitted_candidates: HashSet<Multiaddr>,
 }
 
-impl DcutrHackBehaviour {
-    /// Create a new DcutrHackBehaviour that will seed the given addresses as DCUtR candidates.
+impl DcutrBootstrapBehaviour {
+    /// Create a new bootstrap behaviour that will seed the given addresses as DCUtR candidates.
     pub fn new(external_addrs: Vec<Multiaddr>) -> Self {
         Self {
             pending_candidates: external_addrs.into_iter().collect(),
@@ -128,7 +128,7 @@ pub struct DcutrAdvertiseUpgrade;
 #[derive(Clone, Default)]
 pub struct DcutrAdvertiseHandler;
 
-impl NetworkBehaviour for DcutrHackBehaviour {
+impl NetworkBehaviour for DcutrBootstrapBehaviour {
     type ConnectionHandler = DcutrAdvertiseHandler;
     type ToSwarm = ();
 
@@ -158,16 +158,16 @@ impl NetworkBehaviour for DcutrHackBehaviour {
         // so that DCUtR's internal address cache gets populated.
         match &event {
             swarm::behaviour::FromSwarm::NewExternalAddrCandidate(e) => {
-                debug!("DcutrHackBehaviour received FromSwarm::NewExternalAddrCandidate: {}", e.addr);
+                debug!("DcutrBootstrapBehaviour received FromSwarm::NewExternalAddrCandidate: {}", e.addr);
             }
             swarm::behaviour::FromSwarm::ExternalAddrConfirmed(e) => {
-                debug!("DcutrHackBehaviour received FromSwarm::ExternalAddrConfirmed: {}", e.addr);
+                debug!("DcutrBootstrapBehaviour received FromSwarm::ExternalAddrConfirmed: {}", e.addr);
                 // If we haven't emitted this address as a candidate yet, queue it for emission.
                 // This ensures addresses added via swarm.add_external_address() (which emits
                 // ExternalAddrConfirmed directly) get re-emitted as NewExternalAddrCandidate
                 // so that DCUtR sees them.
                 if !self.emitted_candidates.contains(e.addr) {
-                    debug!("DcutrHackBehaviour: queueing {} for NewExternalAddrCandidate emission", e.addr);
+                    debug!("DcutrBootstrapBehaviour: queueing {} for NewExternalAddrCandidate emission", e.addr);
                     self.pending_candidates.push_back(e.addr.clone());
                 }
             }
@@ -183,7 +183,7 @@ impl NetworkBehaviour for DcutrHackBehaviour {
             // Track that we've emitted this address to avoid re-emitting it later
             // when we receive the ExternalAddrConfirmed event for it
             self.emitted_candidates.insert(addr.clone());
-            debug!("DcutrHackBehaviour: emitting NewExternalAddrCandidate for {}", addr);
+            debug!("DcutrBootstrapBehaviour: emitting NewExternalAddrCandidate for {}", addr);
             // Queue it for confirmation after the candidate event is processed
             // (only for addresses from constructor, not from swarm events which are already confirmed)
             self.pending_confirms.push_back(addr.clone());
@@ -193,7 +193,7 @@ impl NetworkBehaviour for DcutrHackBehaviour {
         // Then, confirm any pending addresses (ExternalAddrConfirmed)
         // This is only for addresses from the constructor that need to be confirmed
         if let Some(addr) = self.pending_confirms.pop_front() {
-            debug!("DcutrHackBehaviour: emitting ExternalAddrConfirmed for {}", addr);
+            debug!("DcutrBootstrapBehaviour: emitting ExternalAddrConfirmed for {}", addr);
             return Poll::Ready(ToSwarm::ExternalAddrConfirmed(addr));
         }
 
@@ -378,7 +378,7 @@ pub(crate) fn build_streaming_swarm(
             external_addrs.push(ma);
         }
     }
-    info!("DcutrHackBehaviour seeding {} external address candidates for DCUtR", external_addrs.len());
+    info!("DcutrBootstrapBehaviour seeding {} external address candidates for DCUtR", external_addrs.len());
 
     // Pre-seed DCUtR's internal address cache BEFORE the swarm starts.
     // This is critical because handler creation happens synchronously when connections
@@ -397,7 +397,7 @@ pub(crate) fn build_streaming_swarm(
         relay_client: relay_client_behaviour,
         relay_server: relay::Behaviour::new(peer_id, relay::Config::default()),
         dcutr,
-        dcutr_hack: DcutrHackBehaviour::new(external_addrs),
+        dcutr_bootstrap: DcutrBootstrapBehaviour::new(external_addrs),
         autonat,
         streams: StreamBehaviour::new(protocol),
     };

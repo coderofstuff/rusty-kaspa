@@ -23,7 +23,7 @@ Context: DCUtR hole punch succeeded on the legacy `tcp-hole-punch` branch in the
 
 1.  **Add Observed Addresses:** In `components/p2p-libp2p/src/transport.rs`, updated `Identify::Received` handler to add `info.observed_addr` to the swarm (filtering out relay addresses).
 2.  **Upgrade libp2p:** Upgraded `libp2p` to `0.56.0` (latest stable) to benefit from upstream fixes and modern APIs.
-3.  **Force DCUtR Advertisement:** Implemented `DcutrHackBehaviour` which is a dummy `NetworkBehaviour` that manually registers a handler supporting `/libp2p/dcutr`. This forces `Identify` to advertise the protocol support.
+3.  **Force DCUtR Advertisement:** Implemented `DcutrBootstrapBehaviour` which is a dummy `NetworkBehaviour` that manually registers a handler supporting `/libp2p/dcutr`. This forces `Identify` to advertise the protocol support.
 4.  **Fix Stream Race:** Updated `SwarmDriver::handle_event` for `ConnectionEstablished` to ONLY request a bridge stream if we are the `Dialer`. This prevents the Listener from opening a redundant stream, eliminating the "connect_with_stream failed" error on Node C.
 5.  **Enhanced Logging:** Added detailed debug logs in `maybe_request_dialback` and `track_established`.
 
