@@ -9,7 +9,8 @@ use libp2p::identify;
 use libp2p::noise;
 use libp2p::ping;
 use libp2p::relay::{self, client as relay_client};
-use libp2p::swarm::behaviour::ToSwarm;
+use libp2p::swarm::behaviour::{FromSwarm, ToSwarm};
+use libp2p::swarm::NewExternalAddrCandidate;
 use libp2p::swarm::handler::{
     ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,
     OneShotHandler, StreamUpgradeError,
@@ -355,24 +356,47 @@ pub(crate) fn build_streaming_swarm(
     };
 
     // Parse configured external addresses for DCUtR candidate seeding
-    let external_addrs: Vec<Multiaddr> = config
+    let mut external_addrs: Vec<Multiaddr> = config
         .external_multiaddrs
         .iter()
         .filter_map(|s| {
             s.parse::<Multiaddr>().ok().map(|addr| {
-                debug!("DCUtR candidate seed: {}", addr);
+                debug!("DCUtR candidate seed (external_multiaddr): {}", addr);
                 addr
             })
         })
         .collect();
+
+    // Also include advertise_addresses (SocketAddr -> Multiaddr conversion)
+    for addr in &config.advertise_addresses {
+        let ma_str = match addr.ip() {
+            std::net::IpAddr::V4(v4) => format!("/ip4/{}/tcp/{}", v4, addr.port()),
+            std::net::IpAddr::V6(v6) => format!("/ip6/{}/tcp/{}", v6, addr.port()),
+        };
+        if let Ok(ma) = ma_str.parse::<Multiaddr>() {
+            debug!("DCUtR candidate seed (advertise_addr): {}", ma);
+            external_addrs.push(ma);
+        }
+    }
     info!("DcutrHackBehaviour seeding {} external address candidates for DCUtR", external_addrs.len());
+
+    // Pre-seed DCUtR's internal address cache BEFORE the swarm starts.
+    // This is critical because handler creation happens synchronously when connections
+    // are established, before any behaviour poll cycle. If DCUtR's cache is empty
+    // when a relay connection arrives, the CONNECT message will have no addresses.
+    let mut dcutr = dcutr::Behaviour::new(peer_id);
+    for addr in &external_addrs {
+        debug!("Pre-seeding DCUtR cache with: {}", addr);
+        dcutr.on_swarm_event(FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate { addr }));
+    }
+    info!("Pre-seeded DCUtR with {} external address candidates", external_addrs.len());
 
     let behaviour = Libp2pBehaviour {
         ping: ping::Behaviour::default(),
         identify,
         relay_client: relay_client_behaviour,
         relay_server: relay::Behaviour::new(peer_id, relay::Config::default()),
-        dcutr: dcutr::Behaviour::new(peer_id),
+        dcutr,
         dcutr_hack: DcutrHackBehaviour::new(external_addrs),
         autonat,
         streams: StreamBehaviour::new(protocol),
