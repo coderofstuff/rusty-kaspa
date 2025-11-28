@@ -560,6 +560,9 @@ struct SwarmDriver {
     command_rx: mpsc::Receiver<SwarmCommand>,
     incoming_tx: mpsc::Sender<IncomingStream>,
     pending_dials: HashMap<StreamRequestId, DialRequest>,
+    /// Tracks relay dials by target peer ID. When dialing via relay, DCUtR may establish
+    /// a direct connection with a different connection_id. We track by peer to correlate.
+    pending_relay_dials: HashMap<PeerId, DialRequest>,
     listen_addrs: Vec<Multiaddr>,
     external_addrs: Vec<Multiaddr>,
     peer_states: HashMap<PeerId, PeerState>,
@@ -596,6 +599,7 @@ impl SwarmDriver {
             command_rx,
             incoming_tx,
             pending_dials: HashMap::new(),
+            pending_relay_dials: HashMap::new(),
             listen_addrs,
             external_addrs,
             peer_states: HashMap::new(),
@@ -623,17 +627,31 @@ impl SwarmDriver {
         for (_, pending) in self.pending_dials.drain() {
             let _ = pending.respond_to.send(Err(Libp2pError::DialFailed("libp2p driver stopped".into())));
         }
+        for (_, pending) in self.pending_relay_dials.drain() {
+            let _ = pending.respond_to.send(Err(Libp2pError::DialFailed("libp2p driver stopped".into())));
+        }
     }
 
     async fn handle_command(&mut self, command: SwarmCommand) {
         match command {
             SwarmCommand::Dial { address, respond_to } => {
                 info!("libp2p dial request to {address}");
+
+                // For relay addresses, track by target peer so DCUtR success can resolve the dial
+                let is_relay = addr_uses_relay(&address);
+                let target_peer = if is_relay { extract_circuit_target_peer(&address) } else { None };
+
                 let dial_opts = DialOpts::unknown_peer_id().address(address).build();
                 let request_id = dial_opts.connection_id();
                 match self.swarm.dial(dial_opts) {
                     Ok(()) => {
-                        self.pending_dials.insert(request_id, DialRequest { respond_to });
+                        if let Some(peer_id) = target_peer {
+                            // For relay dials, track by peer so direct connection via DCUtR resolves it
+                            info!("libp2p relay dial to peer {peer_id}, tracking by peer for DCUtR resolution");
+                            self.pending_relay_dials.insert(peer_id, DialRequest { respond_to });
+                        } else {
+                            self.pending_dials.insert(request_id, DialRequest { respond_to });
+                        }
                     }
                     Err(err) => {
                         let _ = respond_to.send(Err(Libp2pError::DialFailed(err.to_string())));
@@ -755,8 +773,30 @@ impl SwarmDriver {
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
                 debug!("libp2p connection established with {peer_id} on {connection_id:?}");
                 self.track_established(peer_id, &endpoint);
+
+                // Check if we have a pending relay dial for this peer and got a DIRECT connection
+                // (e.g., DCUtR succeeded after relay dial was initiated)
+                let is_direct = !endpoint_uses_relay(&endpoint);
+                let had_pending_relay = if is_direct {
+                    if let Some(pending_relay) = self.pending_relay_dials.remove(&peer_id) {
+                        info!("libp2p DCUtR success: direct connection to {peer_id} resolves pending relay dial");
+                        // Transfer the pending dial to track by the new connection_id
+                        self.pending_dials.insert(connection_id, pending_relay);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
                 if endpoint.is_dialer() {
                     info!("libp2p initiating stream to {peer_id} (as dialer)");
+                    self.request_stream_bridge(peer_id, connection_id);
+                } else if had_pending_relay {
+                    // DCUtR succeeded but we're the listener - still need to initiate stream
+                    // because we had a pending outbound dial that needs to be resolved
+                    info!("libp2p DCUtR: initiating stream to {peer_id} (as listener with pending dial)");
                     self.request_stream_bridge(peer_id, connection_id);
                 } else {
                     debug!("libp2p waiting for stream from {peer_id} (as listener)");
@@ -847,6 +887,14 @@ impl SwarmDriver {
     }
 
     fn request_stream_bridge(&mut self, peer_id: PeerId, connection_id: StreamRequestId) {
+        // Check if there's already a pending dial for this connection (e.g., from relay dial transfer)
+        // If so, don't create a new channel - the existing one will be resolved via StreamEvent::Outbound
+        if self.pending_dials.contains_key(&connection_id) {
+            debug!("libp2p request_stream_bridge: reusing existing pending dial for {connection_id:?}");
+            self.swarm.behaviour_mut().streams.request_stream(peer_id, connection_id, connection_id);
+            return;
+        }
+
         let (respond_to, rx) = oneshot::channel();
         self.pending_dials.insert(connection_id, DialRequest { respond_to });
         self.swarm.behaviour_mut().streams.request_stream(peer_id, connection_id, connection_id);
@@ -1023,6 +1071,24 @@ fn extract_relay_peer(addr: &Multiaddr) -> Option<PeerId> {
     for window in components.windows(2) {
         if let [Protocol::P2p(peer), Protocol::P2pCircuit] = window {
             return Some(peer.to_owned());
+        }
+    }
+    None
+}
+
+/// Extracts the target peer from a relay circuit address.
+/// For `/ip4/.../p2p/RELAY/p2p-circuit/p2p/TARGET`, returns TARGET.
+fn extract_circuit_target_peer(addr: &Multiaddr) -> Option<PeerId> {
+    let components: Vec<_> = addr.iter().collect();
+    // Find p2p-circuit, then look for the next P2p component
+    let mut after_circuit = false;
+    for p in components {
+        if matches!(p, Protocol::P2pCircuit) {
+            after_circuit = true;
+        } else if after_circuit {
+            if let Protocol::P2p(peer_id) = p {
+                return Some(peer_id);
+            }
         }
     }
     None
