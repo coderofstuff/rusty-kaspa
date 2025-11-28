@@ -75,7 +75,7 @@ If you believe a change in one of these directories is absolutely required, you 
    - [x] **Fix Applied (2025-11-27):**
      - Restored logic to feed `Identify` observed addresses into swarm external addresses.
      - Upgraded `libp2p` to `0.56.0` (latest stable) to benefit from upstream fixes.
-    - Implemented `DcutrBootstrapBehaviour` to manually advertise `/libp2p/dcutr` protocol, resolving a regression where `dcutr` behaviour was not registering its protocol with `Identify`.
+     - Implemented `DcutrBootstrapBehaviour` to manually advertise `/libp2p/dcutr` protocol, resolving a regression where `dcutr` behaviour was not registering its protocol with `Identify`.
      - Fixed double-stream initiation race condition on Node C by ensuring only the connection dialer initiates the bridge stream.
      - **Restored Helper API Dialing:** Re-implemented the helper API to support manual dialing of circuit addresses, which is essential for triggering the hole punch in the absence of automatic discovery (MDNS/Kademlia).
      - **AutoNAT / Private IP Flag (2025-11-27):** Added `--libp2p-autonat-allow-private` flag to enable AutoNAT server support for private IPs in lab environments, defaulting to safe global-only behaviour for production.
