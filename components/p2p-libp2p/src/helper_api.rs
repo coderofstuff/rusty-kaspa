@@ -1,6 +1,7 @@
 use crate::transport::Libp2pStreamProvider;
 use libp2p::Multiaddr;
 use serde::Deserialize;
+use serde_json::json;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -25,6 +26,11 @@ struct HelperRequest {
     multiaddr: Option<String>,
 }
 
+enum HelperAction {
+    Status,
+    Dial(Multiaddr),
+}
+
 impl HelperApi {
     pub fn new(provider: Arc<dyn Libp2pStreamProvider>) -> Self {
         Self { provider }
@@ -32,16 +38,34 @@ impl HelperApi {
 
     pub async fn handle_json(&self, json: &str) -> Result<String, HelperError> {
         let req: HelperRequest = serde_json::from_str(json).map_err(|e| HelperError::Invalid(e.to_string()))?;
+        let action = HelperAction::try_from(req)?;
+        let resp = match action {
+            HelperAction::Status => json!({ "ok": true }),
+            HelperAction::Dial(addr) => {
+                // Trigger the dial. We don't return the stream here, just success/failure of connection.
+                self.provider.dial_multiaddr(addr).await.map_err(|e| HelperError::DialFailed(e.to_string()))?;
+                json!({ "ok": true, "msg": "dial successful" })
+            }
+        };
+
+        serde_json::to_string(&resp).map_err(|e| HelperError::Invalid(e.to_string()))
+    }
+
+    pub(crate) fn error_response(err: &HelperError) -> String {
+        json!({ "ok": false, "error": err.to_string() }).to_string()
+    }
+}
+
+impl TryFrom<HelperRequest> for HelperAction {
+    type Error = HelperError;
+
+    fn try_from(req: HelperRequest) -> Result<Self, Self::Error> {
         match req.action.as_str() {
-            "status" => Ok(r#"{"ok":true}"#.to_string()),
+            "status" => Ok(Self::Status),
             "dial" => {
                 let addr_str = req.multiaddr.ok_or_else(|| HelperError::Invalid("missing multiaddr".into()))?;
                 let addr = Multiaddr::from_str(&addr_str).map_err(|e| HelperError::Invalid(e.to_string()))?;
-
-                // Trigger the dial. We don't return the stream here, just success/failure of connection.
-                let _ = self.provider.dial_multiaddr(addr).await.map_err(|e| HelperError::DialFailed(e.to_string()))?;
-
-                Ok(r#"{"ok":true,"msg":"dial successful"}"#.to_string())
+                Ok(Self::Dial(addr))
             }
             _ => Err(HelperError::UnknownAction),
         }
@@ -52,7 +76,7 @@ impl HelperApi {
 mod tests {
     use super::*;
     use crate::metadata::TransportMetadata;
-    use crate::transport::{BoxedLibp2pStream, StreamDirection};
+    use crate::transport::{BoxedLibp2pStream, ReservationHandle, StreamDirection};
     use crate::Libp2pError;
     use futures_util::future::BoxFuture;
     use kaspa_utils::networking::NetAddress;
@@ -71,8 +95,8 @@ mod tests {
         {
             Box::pin(async { Err(Libp2pError::Disabled) })
         }
-        fn reserve<'a>(&'a self, _: Multiaddr) -> BoxFuture<'a, Result<(), Libp2pError>> {
-            Box::pin(async { Ok(()) })
+        fn reserve<'a>(&'a self, _: Multiaddr) -> BoxFuture<'a, Result<ReservationHandle, Libp2pError>> {
+            Box::pin(async { Ok(ReservationHandle::noop()) })
         }
     }
 

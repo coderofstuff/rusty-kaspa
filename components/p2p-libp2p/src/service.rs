@@ -1,6 +1,6 @@
-use crate::helper_api::HelperApi;
+use crate::helper_api::{HelperApi, HelperError};
 use crate::reservations::ReservationManager;
-use crate::transport::{multiaddr_to_metadata, BoxedLibp2pStream, Libp2pStreamProvider, StreamDirection};
+use crate::transport::{multiaddr_to_metadata, BoxedLibp2pStream, Libp2pStreamProvider, ReservationHandle, StreamDirection};
 use crate::{config::Config, transport::Libp2pError};
 use kaspa_p2p_lib::{ConnectionHandler, MetadataConnectInfo, PathKind};
 use libp2p::Multiaddr;
@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::ReceiverStream;
+use triggered::Listener;
 
 /// Placeholder libp2p service that will eventually own dial/listen/reservation logic.
 #[derive(Clone)]
@@ -22,16 +23,24 @@ pub struct Libp2pService {
     config: Config,
     provider: Option<std::sync::Arc<dyn Libp2pStreamProvider>>,
     reservations: ReservationManager,
+    shutdown: Option<Listener>,
 }
 
 const RESERVATION_REFRESH_INTERVAL: Duration = Duration::from_secs(20 * 60);
 const RESERVATION_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const RESERVATION_BASE_BACKOFF: Duration = Duration::from_secs(5);
 const RESERVATION_MAX_BACKOFF: Duration = Duration::from_secs(60);
+const HELPER_MAX_LINE: usize = 8 * 1024;
+const HELPER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Libp2pService {
     pub fn new(config: Config) -> Self {
-        Self { config, provider: None, reservations: ReservationManager::new(RESERVATION_BASE_BACKOFF, RESERVATION_MAX_BACKOFF) }
+        Self {
+            config,
+            provider: None,
+            reservations: ReservationManager::new(RESERVATION_BASE_BACKOFF, RESERVATION_MAX_BACKOFF),
+            shutdown: None,
+        }
     }
 
     pub fn with_provider(config: Config, provider: Arc<dyn Libp2pStreamProvider>) -> Self {
@@ -39,6 +48,18 @@ impl Libp2pService {
             config,
             provider: Some(provider),
             reservations: ReservationManager::new(RESERVATION_BASE_BACKOFF, RESERVATION_MAX_BACKOFF),
+            shutdown: None,
+        }
+    }
+
+    pub fn with_shutdown(mut self, shutdown: Listener) -> Self {
+        self.shutdown = Some(shutdown);
+        self
+    }
+
+    pub async fn shutdown(&self) {
+        if let Some(provider) = &self.provider {
+            provider.shutdown().await;
         }
     }
 
@@ -53,7 +74,8 @@ impl Libp2pService {
             let reservations = self.config.reservations.clone();
             let state = ReservationState::new(self.reservations.clone(), RESERVATION_REFRESH_INTERVAL);
             let provider_for_worker = provider.clone();
-            tokio::spawn(async move { reservation_worker(provider_for_worker, reservations, state).await });
+            let shutdown = self.shutdown.clone();
+            tokio::spawn(async move { reservation_worker(provider_for_worker, reservations, state, shutdown).await });
         }
 
         if let Some(addr) = self.config.helper_listen {
@@ -61,13 +83,41 @@ impl Libp2pService {
             let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| Libp2pError::ListenFailed(e.to_string()))?;
             log::info!("libp2p helper API listening on {addr}");
 
+            let mut shutdown = self.shutdown.clone();
             tokio::spawn(async move {
                 loop {
-                    if let Ok((stream, _)) = listener.accept().await {
-                        let api = api.clone();
-                        tokio::spawn(async move {
-                            handle_helper_connection(stream, api).await;
-                        });
+                    if let Some(shutdown) = shutdown.as_mut() {
+                        tokio::select! {
+                            _ = shutdown.clone() => {
+                                debug!("libp2p helper listener shutting down");
+                                break;
+                            }
+                            accept_res = listener.accept() => match accept_res {
+                                Ok((stream, _)) => {
+                                    let api = api.clone();
+                                    tokio::spawn(async move {
+                                        handle_helper_connection(stream, api).await;
+                                    });
+                                }
+                                Err(err) => {
+                                    warn!("libp2p helper accept error: {err}");
+                                    sleep(Duration::from_millis(200)).await;
+                                }
+                            }
+                        }
+                    } else {
+                        match listener.accept().await {
+                            Ok((stream, _)) => {
+                                let api = api.clone();
+                                tokio::spawn(async move {
+                                    handle_helper_connection(stream, api).await;
+                                });
+                            }
+                            Err(err) => {
+                                warn!("libp2p helper accept error: {err}");
+                                sleep(Duration::from_millis(200)).await;
+                            }
+                        }
                     }
                 }
             });
@@ -86,11 +136,25 @@ impl Libp2pService {
         let provider = self.provider.as_ref().ok_or(Libp2pError::ProviderUnavailable)?.clone();
         let (tx, rx) = mpsc::channel(8);
         let handler_for_outbound = handler.clone();
+        let mut shutdown = self.shutdown.clone();
 
         tokio::spawn(async move {
             loop {
-                match provider.listen().await {
-                    Ok((metadata, direction, _close, stream)) => {
+                let listen_fut = provider.listen();
+                let listen_result = if let Some(ref mut shutdown) = shutdown {
+                    tokio::select! {
+                        _ = shutdown.clone() => {
+                            debug!("libp2p inbound bridge shutting down");
+                            break;
+                        }
+                        res = listen_fut => res,
+                    }
+                } else {
+                    listen_fut.await
+                };
+
+                match listen_result {
+                    Ok((metadata, direction, close, stream)) => {
                         match direction {
                             StreamDirection::Outbound => {
                                 // For locally initiated streams, act as the client and connect directly.
@@ -98,14 +162,18 @@ impl Libp2pService {
                                     "libp2p_bridge: outbound stream ready for Kaspa connect_with_stream with metadata {:?}",
                                     metadata
                                 );
+                                let mut close = Some(close);
                                 if let Err(err) = handler_for_outbound.connect_with_stream(stream, metadata).await {
                                     log::warn!("libp2p_bridge: outbound connect_with_stream failed: {err}");
+                                    if let Some(close) = close.take() {
+                                        close();
+                                    }
                                 }
                             }
                             StreamDirection::Inbound => {
                                 log::info!("libp2p_bridge: inbound stream ready for Kaspa with metadata {:?}", metadata);
                                 let info = MetadataConnectInfo::new(None, metadata);
-                                let connected = MetaConnectedStream::new(stream, info);
+                                let connected = MetaConnectedStream::new(stream, info, Some(close));
                                 if tx.send(Ok(connected)).await.is_err() {
                                     break;
                                 }
@@ -113,6 +181,7 @@ impl Libp2pService {
                         }
                     }
                     Err(err) => {
+                        warn!("libp2p inbound listen error: {err}");
                         let _ = tx.send(Err(io::Error::new(io::ErrorKind::Other, err.to_string()))).await;
                         break;
                     }
@@ -131,19 +200,58 @@ async fn handle_helper_connection(mut stream: tokio::net::TcpStream, api: Helper
     let (reader, mut writer) = stream.split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
-    if let Ok(bytes) = reader.read_line(&mut line).await {
-        if bytes > 0 {
-            let resp_str = match api.handle_json(&line).await {
-                Ok(r) => r,
-                Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, e),
-            };
-            let _ = writer.write_all(resp_str.as_bytes()).await;
-            let _ = writer.write_all(b"\n").await;
+    loop {
+        line.clear();
+        match tokio::time::timeout(HELPER_READ_TIMEOUT, reader.read_line(&mut line)).await {
+            Ok(Ok(bytes)) => {
+                if bytes == 0 {
+                    break;
+                }
+            }
+            Ok(Err(err)) => {
+                warn!("libp2p helper read error: {err}");
+                if err.kind() == io::ErrorKind::InvalidData {
+                    let resp = HelperApi::error_response(&HelperError::Invalid("invalid utf-8".into()));
+                    let _ = writer.write_all(resp.as_bytes()).await;
+                    let _ = writer.write_all(b"\n").await;
+                }
+                break;
+            }
+            Err(_) => {
+                warn!("libp2p helper read timeout after {:?}", HELPER_READ_TIMEOUT);
+                let _ = writer.write_all(br#"{"ok":false,"error":"timeout waiting for request"}"#).await;
+                let _ = writer.write_all(b"\n").await;
+                break;
+            }
         }
+
+        if line.len() > HELPER_MAX_LINE {
+            warn!("libp2p helper request exceeded max length ({} bytes)", HELPER_MAX_LINE);
+            let _ = writer.write_all(br#"{"ok":false,"error":"request too long"}"#).await;
+            let _ = writer.write_all(b"\n").await;
+            break;
+        }
+
+        let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
+        let resp_str = match api.handle_json(trimmed).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("libp2p helper request error: {e}");
+                HelperApi::error_response(&e)
+            }
+        };
+        let _ = writer.write_all(resp_str.as_bytes()).await;
+        let _ = writer.write_all(b"\n").await;
+        break;
     }
 }
 
-async fn reservation_worker(provider: Arc<dyn Libp2pStreamProvider>, reservations: Vec<String>, mut state: ReservationState) {
+async fn reservation_worker(
+    provider: Arc<dyn Libp2pStreamProvider>,
+    reservations: Vec<String>,
+    mut state: ReservationState,
+    mut shutdown: Option<Listener>,
+) {
     if reservations.is_empty() {
         return;
     }
@@ -151,7 +259,19 @@ async fn reservation_worker(provider: Arc<dyn Libp2pStreamProvider>, reservation
     loop {
         let now = Instant::now();
         refresh_reservations(provider.as_ref(), &reservations, &mut state, now).await;
-        sleep(RESERVATION_POLL_INTERVAL).await;
+
+        if let Some(shutdown) = shutdown.as_mut() {
+            tokio::select! {
+                _ = shutdown.clone() => {
+                    debug!("libp2p reservation worker shutting down");
+                    state.release_all().await;
+                    break;
+                }
+                _ = sleep(RESERVATION_POLL_INTERVAL) => {}
+            }
+        } else {
+            sleep(RESERVATION_POLL_INTERVAL).await;
+        }
     }
 }
 
@@ -165,17 +285,18 @@ impl ReservationState {
     fn new(backoff: ReservationManager, refresh_interval: Duration) -> Self {
         Self { backoff, active: HashMap::new(), refresh_interval }
     }
+
+    async fn release_all(&mut self) {
+        let active = std::mem::take(&mut self.active);
+        for (_, reservation) in active {
+            reservation.handle.release().await;
+        }
+    }
 }
 
 struct ActiveReservation {
     refresh_at: Instant,
     handle: ReservationHandle,
-}
-
-struct ReservationHandle {}
-
-impl ReservationHandle {
-    fn release(self) {}
 }
 
 async fn refresh_reservations(
@@ -210,7 +331,7 @@ async fn refresh_reservations(
         }
 
         if let Some(active) = state.active.remove(&key) {
-            active.handle.release();
+            active.handle.release().await;
         }
 
         match attempt_reservation(provider, &parsed).await {
@@ -231,9 +352,9 @@ async fn attempt_reservation(
     provider: &dyn Libp2pStreamProvider,
     target: &ParsedReservation,
 ) -> Result<ReservationHandle, Libp2pError> {
-    provider.reserve(target.multiaddr.clone()).await?;
+    let handle = provider.reserve(target.multiaddr.clone()).await?;
     debug!("libp2p reservation attempt to {} via relay {:?}", target.raw, target.key);
-    Ok(ReservationHandle {})
+    Ok(handle)
 }
 
 #[derive(Clone)]
@@ -259,11 +380,20 @@ impl ParsedReservation {
 struct MetaConnectedStream {
     stream: BoxedLibp2pStream,
     info: MetadataConnectInfo,
+    close: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl MetaConnectedStream {
-    fn new(stream: BoxedLibp2pStream, info: MetadataConnectInfo) -> Self {
-        Self { stream, info }
+    fn new(stream: BoxedLibp2pStream, info: MetadataConnectInfo, close: Option<Box<dyn FnOnce() + Send>>) -> Self {
+        Self { stream, info, close }
+    }
+}
+
+impl Drop for MetaConnectedStream {
+    fn drop(&mut self) {
+        if let Some(close) = self.close.take() {
+            close();
+        }
     }
 }
 
@@ -314,7 +444,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
-    use tokio::io::duplex;
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -337,9 +467,11 @@ mod tests {
     #[tokio::test]
     async fn reservation_refresh_respects_backoff_and_releases() {
         let drops = Arc::new(AtomicUsize::new(0));
+        let releases = Arc::new(AtomicUsize::new(0));
         let provider = Arc::new(MockProvider::with_responses(
             VecDeque::from([Err(Libp2pError::ProviderUnavailable), Ok(()), Ok(())]),
             drops.clone(),
+            releases.clone(),
         ));
 
         let mut state = ReservationState::new(
@@ -366,6 +498,103 @@ mod tests {
         refresh_reservations(provider.as_ref(), &reservations, &mut state, now + Duration::from_millis(200)).await;
         assert_eq!(provider.attempts(), 3, "refresh after interval should re-attempt");
         assert_eq!(drops.load(Ordering::SeqCst), 0, "no streams are held for reservations");
+        assert_eq!(releases.load(Ordering::SeqCst), 1, "previous reservation should be released before refresh");
+    }
+
+    async fn run_helper_once(payload: &str) -> String {
+        let api = HelperApi::new(Arc::new(MockProvider::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind helper listener");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                handle_helper_connection(stream, api).await;
+            }
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect helper");
+        client.write_all(payload.as_bytes()).await.expect("write payload");
+        client.write_all(b"\n").await.expect("newline");
+        let mut resp = String::new();
+        let _ = client.read_to_string(&mut resp).await;
+        resp
+    }
+
+    #[tokio::test]
+    async fn helper_rejects_long_lines() {
+        let payload = "x".repeat(HELPER_MAX_LINE + 10);
+        let resp = run_helper_once(&payload).await;
+        assert!(resp.contains("request too long"));
+    }
+
+    #[tokio::test]
+    async fn helper_survives_bad_input() {
+        let api = HelperApi::new(Arc::new(MockProvider::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind helper listener");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                if let Ok((stream, _)) = listener.accept().await {
+                    let api = api.clone();
+                    tokio::spawn(async move {
+                        handle_helper_connection(stream, api).await;
+                    });
+                }
+            }
+        });
+
+        let mut client1 = tokio::net::TcpStream::connect(addr).await.expect("connect helper");
+        client1.write_all(b"not-json\n").await.expect("write bad payload");
+        let mut resp1 = String::new();
+        let _ = client1.read_to_string(&mut resp1).await;
+
+        let mut client2 = tokio::net::TcpStream::connect(addr).await.expect("connect helper");
+        client2.write_all(br#"{"action":"status"}"#).await.expect("write good payload");
+        client2.write_all(b"\n").await.expect("newline");
+        let mut resp2 = String::new();
+        let _ = client2.read_to_string(&mut resp2).await;
+
+        assert!(resp1.contains(r#""ok":false"#), "bad request should return error");
+        assert!(resp2.contains(r#""ok":true"#), "subsequent request should still succeed");
+    }
+
+    #[tokio::test]
+    async fn helper_rejects_invalid_utf8() {
+        let api = HelperApi::new(Arc::new(MockProvider::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind helper listener");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                handle_helper_connection(stream, api).await;
+            }
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect helper");
+        client.write_all(&[0xff, 0xfe, b'\n']).await.expect("write invalid utf8 payload");
+        let mut resp = String::new();
+        let _ = client.read_to_string(&mut resp).await;
+
+        assert!(resp.contains(r#""ok":false"#), "invalid utf-8 should return error response");
+    }
+
+    #[tokio::test]
+    async fn reservation_worker_releases_on_shutdown() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let releases = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::with_responses(VecDeque::from([Ok(())]), drops.clone(), releases.clone()));
+        let relay = PeerId::random();
+        let reservations = vec![format!("/ip4/203.0.113.1/tcp/4001/p2p/{relay}")];
+        let state = ReservationState::new(
+            ReservationManager::new(Duration::from_millis(10), Duration::from_millis(20)),
+            Duration::from_millis(10),
+        );
+        let (trigger, listener) = triggered::trigger();
+        let worker = tokio::spawn(reservation_worker(provider.clone(), reservations, state, Some(listener)));
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        trigger.trigger();
+        let _ = worker.await;
+
+        assert_eq!(releases.load(Ordering::SeqCst), 1, "shutdown should release active reservations");
     }
 
     fn make_stream(drops: Arc<AtomicUsize>) -> BoxedLibp2pStream {
@@ -412,15 +641,27 @@ mod tests {
         responses: StdMutex<VecDeque<Result<(), Libp2pError>>>,
         attempts: AtomicUsize,
         drops: Arc<AtomicUsize>,
+        releases: Arc<AtomicUsize>,
     }
 
     impl MockProvider {
-        fn with_responses(responses: VecDeque<Result<(), Libp2pError>>, drops: Arc<AtomicUsize>) -> Self {
-            Self { responses: StdMutex::new(responses), attempts: AtomicUsize::new(0), drops }
+        fn with_responses(responses: VecDeque<Result<(), Libp2pError>>, drops: Arc<AtomicUsize>, releases: Arc<AtomicUsize>) -> Self {
+            Self { responses: StdMutex::new(responses), attempts: AtomicUsize::new(0), drops, releases }
         }
 
         fn attempts(&self) -> usize {
             self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Default for MockProvider {
+        fn default() -> Self {
+            Self {
+                responses: StdMutex::new(VecDeque::new()),
+                attempts: AtomicUsize::new(0),
+                drops: Arc::new(AtomicUsize::new(0)),
+                releases: Arc::new(AtomicUsize::new(0)),
+            }
         }
     }
 
@@ -459,12 +700,17 @@ mod tests {
             })
         }
 
-        fn reserve<'a>(&'a self, _target: Multiaddr) -> BoxFuture<'a, Result<(), Libp2pError>> {
+        fn reserve<'a>(&'a self, _target: Multiaddr) -> BoxFuture<'a, Result<ReservationHandle, Libp2pError>> {
             Box::pin(async move {
                 self.attempts.fetch_add(1, Ordering::SeqCst);
                 let mut guard = self.responses.lock().expect("responses");
                 let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
-                resp
+                let releases = self.releases.clone();
+                resp.map(|_| {
+                    ReservationHandle::new(async move {
+                        releases.fetch_add(1, Ordering::SeqCst);
+                    })
+                })
             })
         }
     }

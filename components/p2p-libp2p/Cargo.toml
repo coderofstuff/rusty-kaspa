@@ -24,9 +24,11 @@ tonic.workspace = true
 libp2p = { version = "0.56.0", default-features = false, features = ["tokio", "tcp", "dns", "noise", "yamux", "macros", "ping", "identify", "relay", "dcutr", "autonat"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tempfile = "3.12.0"
+triggered.workspace = true
 
 [features]
 default = []
+libp2p = []
 
 [dev-dependencies]
 futures = { workspace = true }
@@ -34,3 +36,7 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "dcutr_harness"
+required-features = ["libp2p"]

@@ -260,7 +260,12 @@ impl AsyncService for Libp2pInitService {
     fn signal_exit(self: Arc<Self>) {}
 
     fn stop(self: Arc<Self>) -> AsyncServiceFuture {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            if let Some(provider) = self.provider_cell.get() {
+                provider.shutdown().await;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -312,7 +317,8 @@ impl AsyncService for Libp2pNodeService {
                 sleep(Duration::from_millis(50)).await;
             };
 
-            let svc = kaspa_p2p_libp2p::Libp2pService::with_provider(self.config.clone(), provider);
+            let svc = kaspa_p2p_libp2p::Libp2pService::with_provider(self.config.clone(), provider)
+                .with_shutdown(self.shutdown.listener.clone());
             svc.start().await.map_err(|e| AsyncServiceError::Service(e.to_string()))?;
             if let Err(err) = svc.start_inbound(Arc::new(handler)).await {
                 log::error!("libp2p inbound bridge failed to start: {err}");
@@ -321,6 +327,7 @@ impl AsyncService for Libp2pNodeService {
             log::info!("libp2p node service started: bridging libp2p streams into Kaspa");
 
             self.shutdown.listener.clone().await;
+            svc.shutdown().await;
             Ok(())
         })
     }
@@ -330,7 +337,12 @@ impl AsyncService for Libp2pNodeService {
     }
 
     fn stop(self: Arc<Self>) -> AsyncServiceFuture {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            if let Some(provider) = self.provider_cell.get() {
+                provider.shutdown().await;
+            }
+            Ok(())
+        })
     }
 }
 
