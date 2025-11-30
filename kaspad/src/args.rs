@@ -13,7 +13,7 @@ use std::{ffi::OsString, fs};
 use toml::from_str;
 
 #[cfg(feature = "libp2p")]
-use crate::libp2p::{Libp2pArgs as Libp2pCliArgs, Libp2pMode};
+use crate::libp2p::{Libp2pArgs as Libp2pCliArgs, Libp2pMode, Libp2pRole};
 #[cfg(feature = "devnet-prealloc")]
 use kaspa_addresses::Address;
 #[cfg(feature = "devnet-prealloc")]
@@ -463,7 +463,17 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .default_value("off")
                 .require_equals(true)
                 .value_parser(clap::value_parser!(Libp2pMode))
-                .help("Libp2p mode: off, full, helper (helper is an alias for full until a narrower helper-only mode exists)."),
+                .help("Libp2p mode: off, bridge (hybrid with TCP fallback), full, helper (helper is an alias for full until a narrower helper-only mode exists)."),
+        )
+        .arg(
+            Arg::new("libp2p-role")
+                .long("libp2p-role")
+                .env("KASPAD_LIBP2P_ROLE")
+                .value_name("ROLE")
+                .default_value("auto")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(Libp2pRole))
+                .help("Libp2p role: public, private, or auto (auto defaults to private unless helper listen is set)."),
         )
         .arg(
             Arg::new("libp2p-identity-path")
@@ -629,6 +639,7 @@ impl Args {
             #[cfg(feature = "libp2p")]
             libp2p: Libp2pCliArgs {
                 libp2p_mode: arg_match_unwrap_or::<Libp2pMode>(&m, "libp2p-mode", defaults.libp2p.libp2p_mode),
+                libp2p_role: arg_match_unwrap_or::<Libp2pRole>(&m, "libp2p-role", defaults.libp2p.libp2p_role),
                 libp2p_identity_path: m
                     .get_one::<String>("libp2p-identity-path")
                     .cloned()

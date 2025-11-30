@@ -2,10 +2,16 @@
 
 ## Modes and defaults
 - **off** (default): libp2p disabled; transport is plain TCP. No libp2p deps pulled in unless compiled with `--features libp2p`.
-- **full/helper**: libp2p stack enabled (helper == full for now). Requires explicit `--libp2p-mode full|helper`.
+- **bridge**: hybrid; libp2p runtime runs (helper/reservations/DCUtR) but outbound Kaspa dials use TCP, with a libp2p attempt/cooldown path available in the connector for future hybrid work. Safe for mainnet nodes that need TCP peers.
+- **full/helper**: libp2p stack enabled (helper == full for now) and used for outbound; overlay-only mode for the NAT lab.
 - Helper API binds only when `--libp2p-helper-listen <addr>` is set (e.g., `127.0.0.1:38080`).
 - Ports: TCP P2P port stays unchanged (`--listen`/default p2p port); libp2p uses a dedicated port (`--libp2p-listen-port` or `KASPAD_LIBP2P_LISTEN_PORT`, default `p2p_port+1`). Libp2p is intentionally **not** multiplexed on the P2P TCP port.
 - AutoNAT posture: client+server enabled in full/helper modes; server is public-only by default (`server_only_if_public=true`). Labs can opt into private IP reachability with `--libp2p-autonat-allow-private` / `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true`.
+
+## Roles
+- `--libp2p-role=public|private|auto` (default `auto`; auto currently resolves to private unless a helper listen address is configured).
+- **public**: advertises the libp2p relay service bit/relay_port and keeps the existing libp2p inbound split alongside TCP inbound peers.
+- **private/auto**: does **not** advertise relay capability; libp2p inbound peers are capped (default 16) while TCP inbound limits stay unchanged.
 
 ## Identity & privacy
 - Default identity is **ephemeral**. Persist only when `--libp2p-identity-path <path>` is provided (or `KASPAD_LIBP2P_IDENTITY_PATH`).
@@ -16,10 +22,11 @@
 - Libp2p inbound soft caps: per-relay bucket and an “unknown relay” bucket (defaults 4 / 8). Override via CLI/env:
   - `--libp2p-relay-inbound-cap`, `--libp2p-relay-inbound-unknown-cap`
   - `KASPAD_LIBP2P_RELAY_INBOUND_CAP`, `KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP`
+- Private role adds a libp2p-specific inbound cap (default 16) applied **only** to libp2p peers; TCP inbound is unaffected.
 - Reservation refresh uses exponential backoff to avoid relay spam; failed attempts delay retries, successful reservations refresh on a timer.
 
 ## Config surface (env/CLI highlights)
-- `--libp2p-mode`, `--libp2p-identity-path`, `--libp2p-helper-listen`, `--libp2p-listen-port`
+- `--libp2p-mode`, `--libp2p-role`, `--libp2p-identity-path`, `--libp2p-helper-listen`, `--libp2p-listen-port`
 - `--libp2p-autonat-allow-private`: Allow AutoNAT to discover and verify private IPs (e.g. for labs). Default: off (global only).
 - Reservations: `--libp2p-reservations` (comma-separated) or `KASPAD_LIBP2P_RESERVATIONS`
 - External announce: `--libp2p-external-multiaddrs`, `--libp2p-advertise-addresses`
@@ -33,16 +40,23 @@
 
 ## Examples
 - Plain TCP public node (libp2p off): default build/run (no flags).
-- Private relay (ephemeral ID): `--features libp2p --libp2p-mode full --libp2p-helper-listen 0.0.0.0:38080`
-- **Lab / Private Relay:** Use `--libp2p-autonat-allow-private` if your relay or peers are on private IPs (e.g. 10.x.x.x, 192.168.x.x). Do NOT use this on public mainnet relays.
-- Public relay with persistent ID + advertised addresses:
+- Mainnet node with bridge mode (default private role, keeps TCP outbound): `kaspad --libp2p-mode=bridge`
+- Public relay with persistent ID + advertised addresses (bridge or full):
   ```
-  target/debug/kaspad --simnet --libp2p-mode=full --libp2p-helper-listen=0.0.0.0:38080 \
+  target/debug/kaspad --simnet --libp2p-mode=bridge --libp2p-role=public --libp2p-helper-listen=0.0.0.0:38080 \
     --libp2p-identity-path=/var/lib/kaspad/libp2p.id \
     --libp2p-reservations=/ip4/203.0.113.10/tcp/16111/p2p/12D3KooWRelayPeer \
     --libp2p-external-multiaddrs=/ip4/198.51.100.50/tcp/16111 \
     --libp2p-advertise-addresses=198.51.100.50:16111
   ```
+- Private node behind NAT using DCUtR (no relay advertisement):
+  ```
+  kaspad --libp2p-mode=bridge --libp2p-role=private \
+    --libp2p-helper-listen=127.0.0.1:38080 \
+    --libp2p-reservations=/ip4/RELAY_IP/tcp/16112/p2p/RELAY_PEER_ID \
+    --libp2p-external-multiaddrs=/ip4/MY_PUBLIC_IP/tcp/16112
+  ```
+- **Lab / Private Relay:** Use `--libp2p-autonat-allow-private` if your relay or peers are on private IPs (e.g. 10.x.x.x, 192.168.x.x). Do NOT use this on public mainnet relays.
 
 ## Disable libp2p
 - Build: omit `--features libp2p` (or use `--no-default-features` when libp2p is not a default member).

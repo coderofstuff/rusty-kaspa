@@ -2,7 +2,7 @@ use std::{
     cmp::min,
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr, ToSocketAddrs},
-    sync::Arc,
+    sync::{Arc, OnceLock, RwLock},
     time::{Duration, SystemTime},
 };
 
@@ -24,6 +24,30 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 
+const DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE: usize = 16;
+
+#[derive(Clone, Debug)]
+pub struct Libp2pRoleConfig {
+    pub is_private: bool,
+    pub libp2p_inbound_cap_private: usize,
+}
+
+static ROLE_CONFIG: OnceLock<RwLock<Libp2pRoleConfig>> = OnceLock::new();
+
+fn role_config() -> &'static RwLock<Libp2pRoleConfig> {
+    ROLE_CONFIG.get_or_init(|| {
+        RwLock::new(Libp2pRoleConfig { is_private: false, libp2p_inbound_cap_private: DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE })
+    })
+}
+
+pub fn set_libp2p_role_config(config: Libp2pRoleConfig) {
+    *role_config().write().unwrap() = config;
+}
+
+fn current_role_config() -> Libp2pRoleConfig {
+    role_config().read().unwrap().clone()
+}
+
 pub struct ConnectionManager {
     p2p_adaptor: Arc<kaspa_p2p_lib::Adaptor>,
     outbound_target: usize,
@@ -32,6 +56,8 @@ pub struct ConnectionManager {
     relay_inbound_cap: usize,
     /// Soft cap for inbound libp2p connections without a parsed relay id.
     relay_inbound_unknown_cap: usize,
+    is_private_role: bool,
+    libp2p_inbound_cap_private: usize,
     dns_seeders: &'static [&'static str],
     default_port: u16,
     address_manager: Arc<ParkingLotMutex<AddressManager>>,
@@ -65,12 +91,15 @@ impl ConnectionManager {
         address_manager: Arc<ParkingLotMutex<AddressManager>>,
     ) -> Arc<Self> {
         let (tx, rx) = unbounded_channel::<()>();
+        let role_config = current_role_config();
         let manager = Arc::new(Self {
             p2p_adaptor,
             outbound_target,
             inbound_limit,
             relay_inbound_cap: relay_inbound_cap.unwrap_or(4),
             relay_inbound_unknown_cap: relay_inbound_unknown_cap.unwrap_or(8),
+            is_private_role: role_config.is_private,
+            libp2p_inbound_cap_private: role_config.libp2p_inbound_cap_private,
             address_manager,
             connection_requests: Default::default(),
             force_next_iteration: tx,
@@ -267,12 +296,22 @@ impl ConnectionManager {
             libp2p_peers.retain(|p| !keep.contains(&p.key()));
         }
 
-        let libp2p_cap = (self.inbound_limit / 2).max(1);
-        if libp2p_peers.len() > libp2p_cap {
-            let drop_count = libp2p_peers.len() - libp2p_cap;
-            let to_drop = libp2p_peers.choose_multiple(&mut thread_rng(), drop_count).cloned().collect_vec();
-            Self::terminate_peers(&self.p2p_adaptor, &to_drop).await;
-            libp2p_peers.retain(|p| !to_drop.iter().any(|d| d.key() == p.key()));
+        if self.is_private_role {
+            let private_cap = self.libp2p_inbound_cap_private.min(self.inbound_limit.max(1));
+            let to_drop = Self::drop_libp2p_over_cap(&libp2p_peers, private_cap);
+            if !to_drop.is_empty() {
+                let drop_keys: HashSet<_> = to_drop.iter().map(|peer| peer.key()).collect();
+                Self::terminate_peers(&self.p2p_adaptor, &to_drop).await;
+                libp2p_peers.retain(|p| !drop_keys.contains(&p.key()));
+            }
+        } else {
+            let libp2p_cap = (self.inbound_limit / 2).max(1);
+            let to_drop = Self::drop_libp2p_over_cap(&libp2p_peers, libp2p_cap);
+            if !to_drop.is_empty() {
+                let drop_keys: HashSet<_> = to_drop.iter().map(|peer| peer.key()).collect();
+                Self::terminate_peers(&self.p2p_adaptor, &to_drop).await;
+                libp2p_peers.retain(|p| !drop_keys.contains(&p.key()));
+            }
         }
 
         let total = libp2p_peers.len() + direct_peers.len();
@@ -306,6 +345,14 @@ impl ConnectionManager {
     async fn terminate_peers(adaptor: &kaspa_p2p_lib::Adaptor, peers: &[&Peer]) {
         let futures = peers.iter().map(|peer| adaptor.terminate(peer.key()));
         join_all(futures).await;
+    }
+
+    fn drop_libp2p_over_cap<'a>(peers: &'a [&Peer], cap: usize) -> Vec<&'a Peer> {
+        if peers.len() > cap {
+            peers.choose_multiple(&mut thread_rng(), peers.len() - cap).cloned().collect_vec()
+        } else {
+            Vec::new()
+        }
     }
 
     fn relay_overflow<'a>(peers: &'a [&Peer], per_relay_cap: usize, unknown_cap: usize) -> Vec<&'a Peer> {
@@ -502,17 +549,33 @@ mod tests {
     #[test]
     fn libp2p_classification_detects_capability_and_relay_path() {
         // Direct path + libp2p capability => libp2p
-        let direct_libp2p =
-            make_peer_with_path(PathKind::Direct, Ipv4Addr::new(10, 0, 2, 1), Capabilities { libp2p: true });
+        let direct_libp2p = make_peer_with_path(PathKind::Direct, Ipv4Addr::new(10, 0, 2, 1), Capabilities { libp2p: true });
         assert!(ConnectionManager::is_libp2p_peer(&direct_libp2p));
 
         // Relay path without capability still counts as libp2p for accounting.
-        let relay_path = make_peer_with_path(PathKind::Relay { relay_id: None }, Ipv4Addr::new(10, 0, 2, 2), Capabilities { libp2p: false });
+        let relay_path =
+            make_peer_with_path(PathKind::Relay { relay_id: None }, Ipv4Addr::new(10, 0, 2, 2), Capabilities { libp2p: false });
         assert!(ConnectionManager::is_libp2p_peer(&relay_path));
 
         // Direct path with no capability => non-libp2p.
-        let direct_plain =
-            make_peer_with_path(PathKind::Direct, Ipv4Addr::new(10, 0, 2, 3), Capabilities { libp2p: false });
+        let direct_plain = make_peer_with_path(PathKind::Direct, Ipv4Addr::new(10, 0, 2, 3), Capabilities { libp2p: false });
         assert!(!ConnectionManager::is_libp2p_peer(&direct_plain));
+    }
+
+    #[test]
+    fn drop_libp2p_over_cap_limits_set() {
+        let peers =
+            vec![make_relay_peer(Some("r1")), make_relay_peer(Some("r2")), make_relay_peer(Some("r3")), make_relay_peer(Some("r4"))];
+        let refs: Vec<&Peer> = peers.iter().collect();
+        let to_drop = ConnectionManager::drop_libp2p_over_cap(&refs, 2);
+        assert_eq!(to_drop.len(), 2);
+    }
+
+    #[test]
+    fn drop_libp2p_over_cap_no_drop_when_under_cap() {
+        let peers = vec![make_relay_peer(Some("r1")), make_relay_peer(Some("r2"))];
+        let refs: Vec<&Peer> = peers.iter().collect();
+        let to_drop = ConnectionManager::drop_libp2p_over_cap(&refs, 4);
+        assert!(to_drop.is_empty());
     }
 }

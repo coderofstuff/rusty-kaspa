@@ -31,12 +31,14 @@ impl Default for AutoNatConfig {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub mode: Mode,
+    pub role: Role,
     pub identity: Identity,
     pub helper_listen: Option<SocketAddr>,
     /// Socket addresses to bind libp2p listeners to.
     pub listen_addresses: Vec<SocketAddr>,
     pub relay_inbound_cap: Option<usize>,
     pub relay_inbound_unknown_cap: Option<usize>,
+    pub libp2p_inbound_cap_private: usize,
     /// Optional list of relay reservation multiaddrs.
     pub reservations: Vec<String>,
     /// External multiaddrs to announce.
@@ -51,11 +53,13 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mode: Mode::Off,
+            role: Role::Auto,
             identity: Identity::Ephemeral,
             helper_listen: None,
             listen_addresses: Vec::new(),
             relay_inbound_cap: None,
             relay_inbound_unknown_cap: None,
+            libp2p_inbound_cap_private: 16,
             reservations: Vec::new(),
             external_multiaddrs: Vec::new(),
             advertise_addresses: Vec::new(),
@@ -87,6 +91,11 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn role(mut self, role: Role) -> Self {
+        self.config.role = role;
+        self
+    }
+
     pub fn identity(mut self, identity: Identity) -> Self {
         self.config.identity = identity;
         self
@@ -109,6 +118,11 @@ impl ConfigBuilder {
 
     pub fn relay_inbound_unknown_cap(mut self, cap: Option<usize>) -> Self {
         self.config.relay_inbound_unknown_cap = cap;
+        self
+    }
+
+    pub fn libp2p_inbound_cap_private(mut self, cap: usize) -> Self {
+        self.config.libp2p_inbound_cap_private = cap;
         self
     }
 
@@ -145,12 +159,14 @@ pub enum Mode {
     Full,
     /// Helper-only is currently an alias for full until a narrower mode is defined.
     Helper,
+    Bridge,
 }
 
 impl Mode {
     pub fn effective(self) -> Self {
         match self {
             Mode::Helper => Mode::Full,
+            Mode::Bridge => Mode::Bridge,
             other => other,
         }
     }
@@ -158,4 +174,12 @@ impl Mode {
     pub fn is_enabled(self) -> bool {
         !matches!(self.effective(), Mode::Off)
     }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum Role {
+    Public,
+    Private,
+    #[default]
+    Auto,
 }

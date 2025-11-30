@@ -6,7 +6,7 @@ use kaspa_p2p_lib::{OutboundConnector, TcpConnector};
 use kaspa_p2p_libp2p::SwarmStreamProvider;
 use kaspa_p2p_libp2p::{
     AutoNatConfig, Config as AdapterConfig, ConfigBuilder as AdapterConfigBuilder, Identity as AdapterIdentity,
-    Libp2pOutboundConnector, Mode as AdapterMode,
+    Libp2pOutboundConnector, Mode as AdapterMode, Role as AdapterRole,
 };
 use kaspa_rpc_core::{GetLibp2pStatusResponse, RpcLibp2pIdentity, RpcLibp2pMode};
 #[cfg(feature = "libp2p")]
@@ -23,6 +23,8 @@ use tokio::sync::OnceCell;
 #[cfg(feature = "libp2p")]
 use tokio::time::{sleep, Duration};
 
+pub(crate) const DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE: usize = 16;
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Libp2pMode {
@@ -31,6 +33,7 @@ pub enum Libp2pMode {
     Full,
     /// Alias for full until a narrower helper-only mode is introduced.
     Helper,
+    Bridge,
 }
 
 impl From<Libp2pMode> for AdapterMode {
@@ -39,6 +42,26 @@ impl From<Libp2pMode> for AdapterMode {
             Libp2pMode::Off => AdapterMode::Off,
             Libp2pMode::Full => AdapterMode::Full,
             Libp2pMode::Helper => AdapterMode::Helper,
+            Libp2pMode::Bridge => AdapterMode::Bridge,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Libp2pRole {
+    Public,
+    Private,
+    #[default]
+    Auto,
+}
+
+impl From<Libp2pRole> for AdapterRole {
+    fn from(value: Libp2pRole) -> Self {
+        match value {
+            Libp2pRole::Public => AdapterRole::Public,
+            Libp2pRole::Private => AdapterRole::Private,
+            Libp2pRole::Auto => AdapterRole::Auto,
         }
     }
 }
@@ -49,6 +72,8 @@ impl From<Libp2pMode> for AdapterMode {
 pub struct Libp2pArgs {
     #[serde(default)]
     pub libp2p_mode: Libp2pMode,
+    #[serde(default)]
+    pub libp2p_role: Libp2pRole,
     pub libp2p_identity_path: Option<PathBuf>,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
@@ -72,6 +97,7 @@ impl Default for Libp2pArgs {
     fn default() -> Self {
         Self {
             libp2p_mode: Libp2pMode::Off,
+            libp2p_role: Libp2pRole::Auto,
             libp2p_identity_path: None,
             libp2p_helper_listen: None,
             libp2p_listen_port: None,
@@ -88,6 +114,7 @@ impl Default for Libp2pArgs {
 /// Translate CLI/config args into the adapter config.
 pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: SocketAddr) -> AdapterConfig {
     let env_mode = env::var("KASPAD_LIBP2P_MODE").ok().and_then(|s| parse_libp2p_mode(&s));
+    let env_role = env::var("KASPAD_LIBP2P_ROLE").ok().and_then(|s| parse_libp2p_role(&s));
     let env_identity_path = env::var("KASPAD_LIBP2P_IDENTITY_PATH").ok().map(PathBuf::from);
     let env_helper_listen = env::var("KASPAD_LIBP2P_HELPER_LISTEN").ok().and_then(|s| s.parse::<SocketAddr>().ok());
     let env_listen_port = env::var("KASPAD_LIBP2P_LISTEN_PORT").ok().and_then(|s| s.parse::<u16>().ok());
@@ -95,6 +122,7 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
         env::var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE").ok().map(|s| s == "1" || s.eq_ignore_ascii_case("true")).unwrap_or(false);
 
     let mode = if args.libp2p_mode != Libp2pMode::default() { args.libp2p_mode } else { env_mode.unwrap_or(args.libp2p_mode) };
+    let role = if args.libp2p_role != Libp2pRole::default() { args.libp2p_role } else { env_role.unwrap_or(args.libp2p_role) };
 
     let identity_path = args.libp2p_identity_path.clone().or(env_identity_path);
     let helper_listen = args.libp2p_helper_listen.or(env_helper_listen);
@@ -116,6 +144,7 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
             s.parse::<SocketAddr>().ok()
         });
     let autonat_allow_private = args.libp2p_autonat_allow_private || env_autonat_allow_private;
+    let resolved_role = resolve_role(role, &reservations, helper_listen);
 
     let identity = identity_path
         .as_ref()
@@ -128,11 +157,13 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
 
     AdapterConfigBuilder::new()
         .mode(AdapterMode::from(mode).effective())
+        .role(AdapterRole::from(resolved_role))
         .identity(identity)
         .helper_listen(helper_listen)
         .listen_addresses(vec![listen_addr])
         .relay_inbound_cap(relay_inbound_cap)
         .relay_inbound_unknown_cap(relay_inbound_unknown_cap)
+        .libp2p_inbound_cap_private(DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE)
         .reservations(reservations)
         .external_multiaddrs(external_multiaddrs)
         .advertise_addresses(advertise_addresses)
@@ -150,6 +181,7 @@ pub fn libp2p_status_from_config(config: &AdapterConfig, peer_id: Option<String>
         AdapterMode::Off => RpcLibp2pMode::Off,
         AdapterMode::Full => RpcLibp2pMode::Full,
         AdapterMode::Helper => RpcLibp2pMode::Helper,
+        AdapterMode::Bridge => RpcLibp2pMode::Full,
     };
 
     GetLibp2pStatusResponse { mode, peer_id, identity }
@@ -215,7 +247,32 @@ fn parse_libp2p_mode(s: &str) -> Option<Libp2pMode> {
         "off" => Some(Libp2pMode::Off),
         "full" => Some(Libp2pMode::Full),
         "helper" => Some(Libp2pMode::Helper),
+        "bridge" => Some(Libp2pMode::Bridge),
         _ => None,
+    }
+}
+
+fn parse_libp2p_role(s: &str) -> Option<Libp2pRole> {
+    match s.to_ascii_lowercase().as_str() {
+        "public" => Some(Libp2pRole::Public),
+        "private" => Some(Libp2pRole::Private),
+        "auto" => Some(Libp2pRole::Auto),
+        _ => None,
+    }
+}
+
+fn resolve_role(role: Libp2pRole, reservations: &[String], helper_listen: Option<SocketAddr>) -> Libp2pRole {
+    match role {
+        Libp2pRole::Auto => {
+            if !reservations.is_empty() {
+                Libp2pRole::Private
+            } else if helper_listen.is_some() {
+                Libp2pRole::Public
+            } else {
+                Libp2pRole::Private
+            }
+        }
+        other => other,
     }
 }
 
@@ -372,6 +429,8 @@ mod tests {
         assert_eq!(cfg.relay_inbound_cap, Some(5));
         assert_eq!(cfg.relay_inbound_unknown_cap, Some(7));
         assert_eq!(cfg.autonat.server_only_if_public, false); // allow_private=true -> server_only_if_public=false
+        assert_eq!(cfg.role, AdapterRole::Public);
+        assert_eq!(cfg.libp2p_inbound_cap_private, DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE);
 
         env::remove_var("KASPAD_LIBP2P_MODE");
         env::remove_var("KASPAD_LIBP2P_IDENTITY_PATH");
@@ -379,6 +438,7 @@ mod tests {
         env::remove_var("KASPAD_LIBP2P_RELAY_INBOUND_CAP");
         env::remove_var("KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP");
         env::remove_var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE");
+        env::remove_var("KASPAD_LIBP2P_ROLE");
     }
 
     #[test]
@@ -393,5 +453,27 @@ mod tests {
         assert_eq!(cfg.mode, AdapterMode::Full);
 
         env::remove_var("KASPAD_LIBP2P_MODE");
+        env::remove_var("KASPAD_LIBP2P_ROLE");
+    }
+
+    #[test]
+    fn libp2p_role_auto_resolution() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut args_public = Libp2pArgs::default();
+        args_public.libp2p_mode = Libp2pMode::Full;
+        args_public.libp2p_helper_listen = Some("127.0.0.1:12345".parse().unwrap());
+        let cfg_public = libp2p_config_from_args(&args_public, Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
+        assert_eq!(cfg_public.role, AdapterRole::Public);
+
+        let mut args_private = Libp2pArgs::default();
+        args_private.libp2p_mode = Libp2pMode::Full;
+        args_private.libp2p_reservations = vec!["/ip4/10.0.0.1/tcp/4001/p2p/peer".into()];
+        let cfg_private = libp2p_config_from_args(&args_private, Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
+        assert_eq!(cfg_private.role, AdapterRole::Private);
+
+        let mut args_default = Libp2pArgs::default();
+        args_default.libp2p_mode = Libp2pMode::Full;
+        let cfg_default = libp2p_config_from_args(&args_default, Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
+        assert_eq!(cfg_default.role, AdapterRole::Private);
     }
 }

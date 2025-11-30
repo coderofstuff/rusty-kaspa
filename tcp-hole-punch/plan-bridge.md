@@ -22,8 +22,8 @@ Use it as a living tracker: change `[ ]` → `[x]` as you complete items, and ad
 
 ### 0.1 Repository and base
 
-- [ ] Ensure you have a local checkout of `rusty-kaspa`.
-- [ ] Check out the base branch and create your working branch:
+- [x] Ensure you have a local checkout of `rusty-kaspa`.
+- [x] Check out the base branch and create your working branch:
 
   ```bash
   git checkout tcp-hole-punch-clean
@@ -31,29 +31,32 @@ Use it as a living tracker: change `[ ]` → `[x]` as you complete items, and ad
   git checkout -b tcp-hole-punch-bridge-mode
 ````
 
-* [ ] Run baseline tests to confirm a clean starting point:
+  - Note: Branch created from `tcp-hole-punch-clean` at `b0f4224b` (merge-base `222eba4068`).
+
+* [x] Run baseline tests to confirm a clean starting point:
 
   ```bash
   cargo test -q -p kaspa-p2p-libp2p
   cargo test -q -p kaspad
   ```
+  - Note: `cargo test -q -p kaspad` needed an extended timeout but passed.
 
 ### 0.2 Required reading
 
 Tick these once you have read and understood them (take notes separately if needed):
 
-* [ ] `CODE-DEEP-DIVE.md` – current libp2p/DCUtR integration and why `libp2p-mode=full` strands mainnet (0/8 outbound).
-* [ ] `HYBRID-INTEGRATION-PROPOSAL.md` – high‑level hybrid/bridge design.
-* [ ] `HYBRID-INTEGRATION-PROPOSAL-CODEX.md` – companion hybrid design with very tight scope to the current code. 
-* [ ] `MAINNET-SOAK-REPORT.md` – mainnet soak showing `libp2p-mode=full` cannot sync mainnet and pointing at the need for hybrid/fallback.
-* [ ] `STRESS-TEST-REPORT.md` – DCUtR stress tests and stability.
-* [ ] `NAT-LAB-HANDOVER.md` – Proxmox NAT lab topology and commands.
-* [ ] `tcp-hole-punch/PLAN-CLEANUP.md` – clean‑slate scope and guardrails. 
-* [ ] `components/p2p-libp2p/docs/lifecycle.md` – lifecycle invariants for pending dials, DCUtR handoff, shutdown, backpressure, helper, reservations.
+* [x] `CODE-DEEP-DIVE.md` – current libp2p/DCUtR integration and why `libp2p-mode=full` strands mainnet (0/8 outbound).
+* [x] `HYBRID-INTEGRATION-PROPOSAL.md` – high‑level hybrid/bridge design.
+* [x] `HYBRID-INTEGRATION-PROPOSAL-CODEX.md` – companion hybrid design with very tight scope to the current code. 
+* [x] `MAINNET-SOAK-REPORT.md` – mainnet soak showing `libp2p-mode=full` cannot sync mainnet and pointing at the need for hybrid/fallback.
+* [x] `STRESS-TEST-REPORT.md` – DCUtR stress tests and stability.
+* [x] `NAT-LAB-HANDOVER.md` – Proxmox NAT lab topology and commands.
+* [x] `tcp-hole-punch/PLAN-CLEANUP.md` – clean‑slate scope and guardrails. 
+* [x] `components/p2p-libp2p/docs/lifecycle.md` – lifecycle invariants for pending dials, DCUtR handoff, shutdown, backpressure, helper, reservations.
 
 ### 0.3 Guardrails (must hold at the end)
 
-* [ ] Confirm you understand and will respect the **allowed change surface** from `PLAN-CLEANUP.md`: 
+* [x] Confirm you understand and will respect the **allowed change surface** from `PLAN-CLEANUP.md`: 
 
   * `components/p2p-libp2p/**`
   * `kaspad/src/libp2p.rs`
@@ -64,13 +67,15 @@ Tick these once you have read and understood them (take notes separately if need
   * `utils/src/networking.rs` (NetAddress `services` / `relay_port` only)
   * `tcp-hole-punch/**` docs and reports
 
-* [ ] Confirm you will *not* touch:
+  - Note: Changes will stay within the allowed surface; consensus/IBD/mempool remain untouched.
+
+* [x] Confirm you will *not* touch:
 
   * Consensus and IBD (`consensus/**`, `protocol/flows/src/ibd/**`).
   * Mempool, mining, pruning, hashing, merkle.
   * Any other area not explicitly listed as allowed.
 
-* [ ] Confirm **default node behaviour** (no libp2p flags, feature off) must remain identical to upstream/master.
+* [x] Confirm **default node behaviour** (no libp2p flags, feature off) must remain identical to upstream/master.
 
 ---
 
@@ -86,7 +91,7 @@ Tick these once you have read and understood them (take notes separately if need
 
 **File:** `components/p2p-libp2p/src/config.rs`
 
-* [ ] Add a `Bridge` variant to the libp2p mode enum:
+* [x] Add a `Bridge` variant to the libp2p mode enum:
 
   ```rust
   pub enum Mode {
@@ -102,22 +107,22 @@ Tick these once you have read and understood them (take notes separately if need
   * `Helper` still maps to `Full`.
   * `Bridge` maps to itself.
 
-* [ ] Update `Mode::is_enabled()` so it returns `true` for `Full`, `Helper`, and `Bridge`, and `false` only for `Off`.
+* [x] Update `Mode::is_enabled()` so it returns `true` for `Full`, `Helper`, and `Bridge`, and `false` only for `Off`.
 
 ### 1.2 CLI support for `bridge`
 
 **File:** `kaspad/src/args.rs`
 
-* [ ] Extend `--libp2p-mode` parsing to accept `bridge` and map it to `Mode::Bridge`.
-* [ ] Confirm default mode remains `off`.
-* [ ] Confirm `full` and `helper` behave as before.
+* [x] Extend `--libp2p-mode` parsing to accept `bridge` and map it to `Mode::Bridge`.
+* [x] Confirm default mode remains `off`.
+* [x] Confirm `full` and `helper` behave as before.
 
 ### 1.3 Config plumbing
 
 **File:** `kaspad/src/libp2p.rs`
 
-* [ ] Ensure the config builder passes the new `Mode::Bridge` through unchanged to the adapter config.
-* [ ] Confirm no code assumes a closed set `{Off, Full, Helper}`.
+* [x] Ensure the config builder passes the new `Mode::Bridge` through unchanged to the adapter config.
+* [x] Confirm no code assumes a closed set `{Off, Full, Helper}`.
 
 ### 1.4 Daemon outbound connector wiring
 
@@ -127,25 +132,25 @@ Current wiring (summarised) chooses libp2p connector whenever `mode.is_enabled()
 
 You will:
 
-* [ ] Replace the `if libp2p_config.mode.is_enabled()` with an explicit `match`:
+* [x] Replace the `if libp2p_config.mode.is_enabled()` with an explicit `match`:
 
   * `Mode::Off` → outbound connector is plain `TcpConnector`.
   * `Mode::Full | Mode::Helper` → outbound connector is `Libp2pOutboundConnector` (unchanged behaviour).
   * `Mode::Bridge` → outbound connector is **plain `TcpConnector`** (libp2p still runs, but TCP is used for outbound Kaspad dials).
 
-* [ ] Ensure the libp2p runtime (swarm, helper, reservations, inbound bridge) is created whenever `mode.is_enabled()` is true so both `Full` and `Bridge` still run libp2p services.
+* [x] Ensure the libp2p runtime (swarm, helper, reservations, inbound bridge) is created whenever `mode.is_enabled()` is true so both `Full` and `Bridge` still run libp2p services.
 
 > Notes (add here):
 >
-> * …
+> * Bridge mode uses TCP outbound from the daemon while `Libp2pOutboundConnector` adds a bridge fallback path (with a 10m per-address cooldown) for future hybrid attempts; RPC status reports bridge as `full` because the existing RPC enum has no bridge variant.
 
 ### 1.5 Phase A sanity tests
 
 **A.1 – Compilation & unit tests**
 
-* [ ] `cargo check`
-* [ ] `cargo test -q -p kaspa-p2p-libp2p`
-* [ ] `cargo test -q -p kaspad`
+* [x] `cargo check`
+* [x] `cargo test -q -p kaspa-p2p-libp2p`
+* [x] `cargo test -q -p kaspad`
 
 **A.2 – Mainnet node with `bridge` mode**
 
@@ -189,7 +194,7 @@ Using the same general environment as the mainnet soak report:
 
 Tasks:
 
-* [ ] Add a `Role` enum to the libp2p config:
+* [x] Add a `Role` enum to the libp2p config:
 
   ```rust
   pub enum Role {
@@ -199,15 +204,16 @@ Tasks:
   }
   ```
 
-* [ ] Add CLI flag `--libp2p-role=public|private|auto` (default `auto` when libp2p is enabled).
+* [x] Add CLI flag `--libp2p-role=public|private|auto` (default `auto` when libp2p is enabled).
 
-* [ ] In `kaspad/src/libp2p.rs`, resolve `Role::Auto` to either `Public` or `Private` using a simple rule (for now), for example:
+* [x] In `kaspad/src/libp2p.rs`, resolve `Role::Auto` to either `Public` or `Private` using a simple rule (for now), for example:
 
   * If `--libp2p-reservations` is set → `Private`.
   * Else if `--libp2p-helper-listen` is set → `Public`.
   * Else → `Private`.
 
-* [ ] Pass the resolved role into the libp2p config.
+* [x] Pass the resolved role into the libp2p config.
+  - Note: Auto defaults to private unless a helper listen address is set; bridge status is reported as `full` over RPC because the RPC enum has no bridge variant.
 
 ### 2.2 Role‑aware NetAddress service bits and `relay_port`
 
@@ -221,12 +227,12 @@ Today the daemon sets `NET_ADDRESS_SERVICE_LIBP2P_RELAY` and `relay_port` when l
 
 Tasks:
 
-* [ ] Find where the local `NetAddress` values for Version are built and where:
+* [x] Find where the local `NetAddress` values for Version are built and where:
 
   * `services` is ORed with `NET_ADDRESS_SERVICE_LIBP2P_RELAY`.
   * `relay_port` is set from the libp2p helper/listen configuration.
 
-* [ ] Change this so that:
+* [x] Change this so that:
 
   * If role is `Public` and mode is `Full` or `Bridge`:
 
@@ -238,7 +244,8 @@ Tasks:
     * Do **not** set `NET_ADDRESS_SERVICE_LIBP2P_RELAY`.
     * Do **not** advertise `relay_port`.
 
-* [ ] Confirm the Version message layout is unchanged; only the values of `services` / `relay_port` differ by role.
+* [x] Confirm the Version message layout is unchanged; only the values of `services` / `relay_port` differ by role.
+  - Note: Advertisement is computed centrally (`libp2p_advertisement`) and only set for public roles with bridge/full/helper modes; private roles leave service bits and relay_port unset.
 
 ### 2.3 Private‑role libp2p inbound cap (ConnectionManager)
 
@@ -248,14 +255,14 @@ The ConnectionManager already splits inbound limits between TCP and libp2p and e
 
 Tasks:
 
-* [ ] Extend ConnectionManager’s configuration/struct to carry:
+* [x] Extend ConnectionManager’s configuration/struct to carry:
 
   * A flag or enum indicating whether the node is running as a private role.
   * A numeric `libp2p_inbound_cap_private` (e.g. 16 by default).
 
-* [ ] Thread the resolved role from the daemon into ConnectionManager at construction time.
+* [x] Thread the resolved role from the daemon into ConnectionManager at construction time.
 
-* [ ] In `handle_inbound_connections()`:
+* [x] In `handle_inbound_connections()`:
 
   * For private role:
 
@@ -266,20 +273,22 @@ Tasks:
   * For public role:
 
     * Preserve existing behaviour (half the inbound limit for libp2p, per‑relay buckets as currently implemented).
+  - Note: Private cap defaults to 16 and is set via a global role config seeded from daemon (only active when libp2p mode is enabled).
 
 ### 2.4 Phase B tests
 
 **B.1 – Unit tests**
 
-* [ ] Add/extend tests in `connectionmanager` to cover:
+* [x] Add/extend tests in `connectionmanager` to cover:
 
   * Private role with many libp2p inbound peers → ensure we drop down to `libp2p_inbound_cap_private` and keep TCP peers.
   * Public role → behaviour remains as before (same distributions and caps).
 
-* [ ] Add/extend tests for Version address building to validate:
+* [x] Add/extend tests for Version address building to validate:
 
   * Public role sets `NET_ADDRESS_SERVICE_LIBP2P_RELAY` and `relay_port`.
   * Private role does not.
+  - Note: Added tests for `libp2p_advertisement` (public vs private) and libp2p cap drop helper.
 
 **B.2 – Manual role verification**
 
@@ -381,14 +390,14 @@ Before you consider this work complete, confirm:
 
 ### 4.2 Tests
 
-* [ ] All relevant tests pass:
+* [x] All relevant tests pass:
 
   ```bash
   cargo test -q -p kaspa-p2p-libp2p
   cargo test -q -p kaspad
   ```
 
-* [ ] Any new unit tests for connection manager, libp2p config, and roles are in place and green.
+* [x] Any new unit tests for connection manager, libp2p config, and roles are in place and green.
 
 ### 4.3 Mainnet soak with `bridge` mode
 
@@ -409,7 +418,7 @@ Before you consider this work complete, confirm:
 
 ### 4.5 Operator documentation
 
-* [ ] Update `tcp-hole-punch/LIBP2P-OPERATOR.md` to describe:
+* [x] Update `tcp-hole-punch/LIBP2P-OPERATOR.md` to describe:
 
   * Modes: `off`, `bridge`, `full` (and `helper` as alias).
   * Roles: `public`, `private`, `auto`.
@@ -419,7 +428,8 @@ Before you consider this work complete, confirm:
     * Private node behind NAT using DCUtR.
     * Typical mainnet node in bridge mode.
 
-* [ ] Optionally add a short `BRIDGE-MODE-SUMMARY.md` summarising what changed and how to use it.
+* [x] Optionally add a short `BRIDGE-MODE-SUMMARY.md` summarising what changed and how to use it.
+  - Note: Added `BRIDGE-MODE-SUMMARY.md` as a quick reference alongside the updated operator notes.
 
 ---
 
