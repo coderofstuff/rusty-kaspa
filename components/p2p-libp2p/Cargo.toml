@@ -33,6 +33,8 @@ libp2p = []
 [dev-dependencies]
 futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
+async-trait.workspace = true
+kaspa-utils-tower.workspace = true
 
 [lints]
 workspace = true

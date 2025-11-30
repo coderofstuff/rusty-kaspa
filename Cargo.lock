@@ -3515,10 +3515,12 @@ dependencies = [
 name = "kaspa-p2p-libp2p"
 version = "1.0.1"
 dependencies = [
+ "async-trait",
  "futures",
  "futures-util",
  "kaspa-p2p-lib",
  "kaspa-utils",
+ "kaspa-utils-tower",
  "libp2p",
  "log",
  "serde",
@@ -4209,6 +4211,7 @@ dependencies = [
  "kaspa-addresses",
  "kaspa-addressmanager",
  "kaspa-alloc",
+ "kaspa-connectionmanager",
  "kaspa-consensus",
  "kaspa-consensus-core",
  "kaspa-consensus-notify",

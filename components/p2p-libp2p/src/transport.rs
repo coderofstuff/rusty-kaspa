@@ -82,8 +82,15 @@ impl TransportConnector for Libp2pConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use futures::executor::block_on;
+    use kaspa_utils_tower::counters::TowerConnectionCounters;
+    use std::collections::VecDeque;
     use std::str::FromStr;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use tempfile::tempdir;
     use tokio::sync::{mpsc, oneshot};
     use tokio::time::Duration;
@@ -198,6 +205,104 @@ mod tests {
             kaspa_p2p_lib::PathKind::Relay { relay_id } => assert_eq!(relay_id.as_deref(), Some(relay.to_string().as_str())),
             other => panic!("expected relay path, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn full_mode_uses_provider_without_tcp_fallback() {
+        let cfg = Config { mode: crate::Mode::Full, ..Config::default() };
+        let drops = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::with_responses(VecDeque::from([Err(Libp2pError::DialFailed("fail".into()))]), drops));
+        let fallback = Arc::new(CountingFallback::default());
+        let connector = Libp2pOutboundConnector::with_provider(cfg, fallback.clone(), provider.clone());
+        let handler = test_handler();
+
+        let res = connector.connect("127.0.0.1:16110".to_string(), CoreTransportMetadata::default(), &handler).await;
+        assert!(res.is_err());
+        assert_eq!(provider.attempts(), 1);
+        assert_eq!(fallback.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn bridge_mode_falls_back_and_cooldowns() {
+        let cfg = Config { mode: crate::Mode::Bridge, ..Config::default() };
+        let drops = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::with_responses(VecDeque::from([Err(Libp2pError::DialFailed("fail".into()))]), drops));
+        let fallback = Arc::new(CountingFallback::default());
+        let connector = Libp2pOutboundConnector::with_provider(cfg, fallback.clone(), provider.clone());
+        let handler = test_handler();
+
+        let res1 = connector.connect("127.0.0.1:16110".to_string(), CoreTransportMetadata::default(), &handler).await;
+        assert!(res1.is_err());
+        assert_eq!(provider.attempts(), 1);
+        assert_eq!(fallback.calls(), 1);
+
+        // Second attempt should be in cooldown and skip provider.
+        let res2 = connector.connect("127.0.0.1:16110".to_string(), CoreTransportMetadata::default(), &handler).await;
+        assert!(res2.is_err());
+        assert_eq!(provider.attempts(), 1);
+        assert_eq!(fallback.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn off_mode_delegates_to_tcp_fallback() {
+        let cfg = Config { mode: crate::Mode::Off, ..Config::default() };
+        let drops = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::with_responses(VecDeque::new(), drops));
+        let fallback = Arc::new(CountingFallback::default());
+        let connector = Libp2pOutboundConnector::with_provider(cfg, fallback.clone(), provider.clone());
+        let handler = test_handler();
+
+        let res = connector.connect("127.0.0.1:16110".to_string(), CoreTransportMetadata::default(), &handler).await;
+        assert!(res.is_err());
+        assert_eq!(provider.attempts(), 0);
+        assert_eq!(fallback.calls(), 1);
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingFallback {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingFallback {
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl OutboundConnector for CountingFallback {
+        fn connect<'a>(
+            &'a self,
+            _address: String,
+            _metadata: CoreTransportMetadata,
+            _handler: &'a kaspa_p2p_lib::ConnectionHandler,
+        ) -> BoxFuture<'a, Result<Arc<Router>, ConnectionError>> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(ConnectionError::ProtocolError(ProtocolError::Other("fallback".into())))
+            })
+        }
+    }
+
+    struct NoopInitializer;
+
+    #[async_trait]
+    impl kaspa_p2p_lib::ConnectionInitializer for NoopInitializer {
+        async fn initialize_connection(&self, _router: Arc<Router>) -> Result<(), kaspa_p2p_lib::common::ProtocolError> {
+            Ok(())
+        }
+    }
+
+    fn test_handler() -> kaspa_p2p_lib::ConnectionHandler {
+        let hub = kaspa_p2p_lib::Hub::new();
+        let adaptor = kaspa_p2p_lib::Adaptor::client_only(
+            hub,
+            Arc::new(NoopInitializer),
+            Arc::new(TowerConnectionCounters::default()),
+            Arc::new(kaspa_p2p_lib::DirectMetadataFactory::default()),
+            Arc::new(kaspa_p2p_lib::TcpConnector),
+        );
+        adaptor.connection_handler()
     }
 
     #[tokio::test]
@@ -381,6 +486,66 @@ impl Libp2pOutboundConnector {
         }
         handler.connect_with_stream(stream, md).await
     }
+
+    fn connect_libp2p_only<'a>(
+        &'a self,
+        address: String,
+        handler: &'a kaspa_p2p_lib::ConnectionHandler,
+    ) -> BoxFuture<'a, Result<Arc<Router>, ConnectionError>> {
+        let provider = self.resolve_provider();
+        let handler = handler.clone();
+        Box::pin(async move {
+            let provider = provider.ok_or_else(|| {
+                ConnectionError::ProtocolError(ProtocolError::Other(
+                    "libp2p outbound connector unavailable (provider not initialised)",
+                ))
+            })?;
+            let address = NetAddress::from_str(&address)
+                .map_err(|_| ConnectionError::ProtocolError(ProtocolError::Other("invalid libp2p address provided")))?;
+            Self::dial_via_provider(provider, address, handler).await
+        })
+    }
+
+    fn connect_bridge<'a>(
+        &'a self,
+        address: String,
+        mut metadata: CoreTransportMetadata,
+        handler: &'a kaspa_p2p_lib::ConnectionHandler,
+    ) -> BoxFuture<'a, Result<Arc<Router>, ConnectionError>> {
+        let provider = self.resolve_provider();
+        let fallback = self.fallback.clone();
+        let cooldowns = &self.bridge_cooldowns;
+        Box::pin(async move {
+            let parsed_address = NetAddress::from_str(&address);
+            let now = Instant::now();
+
+            if let Some(deadline) = cooldowns.lock().await.get(&address).cloned() {
+                if deadline > now {
+                    metadata.capabilities.libp2p = false;
+                    return fallback.connect(address, metadata, handler).await;
+                }
+            }
+
+            if let (Ok(net_addr), Some(provider)) = (parsed_address, provider.clone()) {
+                match Self::dial_via_provider(provider, net_addr, handler.clone()).await {
+                    Ok(router) => {
+                        cooldowns.lock().await.remove(&address);
+                        return Ok(router);
+                    }
+                    Err(err) => {
+                        debug!("bridge mode libp2p dial failed for {address}: {err}; falling back to TCP");
+                        cooldowns.lock().await.insert(address.clone(), now + BRIDGE_LIBP2P_RETRY_COOLDOWN);
+                    }
+                }
+            } else {
+                debug!("bridge mode libp2p unavailable for {address}; falling back to TCP");
+                cooldowns.lock().await.insert(address.clone(), now + BRIDGE_LIBP2P_RETRY_COOLDOWN);
+            }
+
+            metadata.capabilities.libp2p = false;
+            fallback.connect(address, metadata, handler).await
+        })
+    }
 }
 
 impl OutboundConnector for Libp2pOutboundConnector {
@@ -396,57 +561,8 @@ impl OutboundConnector for Libp2pOutboundConnector {
                 metadata.capabilities.libp2p = false;
                 self.fallback.connect(address, metadata, handler)
             }
-            crate::Mode::Full | crate::Mode::Helper => {
-                let provider = self.resolve_provider();
-                let handler = handler.clone();
-                Box::pin(async move {
-                    let provider = provider.ok_or_else(|| {
-                        ConnectionError::ProtocolError(ProtocolError::Other(
-                            "libp2p outbound connector unavailable (provider not initialised)",
-                        ))
-                    })?;
-                    let address = NetAddress::from_str(&address)
-                        .map_err(|_| ConnectionError::ProtocolError(ProtocolError::Other("invalid libp2p address provided")))?;
-                    Self::dial_via_provider(provider, address, handler).await
-                })
-            }
-            crate::Mode::Bridge => {
-                let provider = self.resolve_provider();
-                let handler = handler.clone();
-                let fallback = self.fallback.clone();
-                let cooldowns = &self.bridge_cooldowns;
-                Box::pin(async move {
-                    let mut metadata = metadata;
-                    let parsed_address = NetAddress::from_str(&address);
-                    let now = Instant::now();
-
-                    if let Some(deadline) = cooldowns.lock().await.get(&address).cloned() {
-                        if deadline > now {
-                            metadata.capabilities.libp2p = false;
-                            return fallback.connect(address, metadata, &handler).await;
-                        }
-                    }
-
-                    if let (Ok(net_addr), Some(provider)) = (parsed_address, provider.clone()) {
-                        match Self::dial_via_provider(provider, net_addr, handler.clone()).await {
-                            Ok(router) => {
-                                cooldowns.lock().await.remove(&address);
-                                return Ok(router);
-                            }
-                            Err(err) => {
-                                debug!("bridge mode libp2p dial failed for {address}: {err}; falling back to TCP");
-                                cooldowns.lock().await.insert(address.clone(), now + BRIDGE_LIBP2P_RETRY_COOLDOWN);
-                            }
-                        }
-                    } else {
-                        debug!("bridge mode libp2p unavailable for {address}; falling back to TCP");
-                        cooldowns.lock().await.insert(address.clone(), now + BRIDGE_LIBP2P_RETRY_COOLDOWN);
-                    }
-
-                    metadata.capabilities.libp2p = false;
-                    fallback.connect(address, metadata, &handler).await
-                })
-            }
+            crate::Mode::Full | crate::Mode::Helper => self.connect_libp2p_only(address, handler),
+            crate::Mode::Bridge => self.connect_bridge(address, metadata, handler),
         }
     }
 }

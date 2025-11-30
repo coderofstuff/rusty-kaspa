@@ -8,3 +8,7 @@
   - Mainnet-safe hybrid: `kaspad --libp2p-mode=bridge`
   - Public relay: `kaspad --libp2p-mode=bridge --libp2p-role=public --libp2p-helper-listen=0.0.0.0:38080`
   - Private/DCUtR node: `kaspad --libp2p-mode=bridge --libp2p-role=private --libp2p-reservations=... --libp2p-external-multiaddrs=...`
+
+## Regression fix note
+- Bridge refactor briefly let the bridge cooldown/TCP fallback path influence full-mode dials, breaking DCUtR in `--libp2p-mode=full`.
+- Full/Helper now use the pre-bridge libp2p-only dial path; bridge fallback remains bridge-only. Connector mode tests added to lock this in.
