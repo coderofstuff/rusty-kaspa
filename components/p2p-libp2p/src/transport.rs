@@ -1078,12 +1078,9 @@ impl SwarmDriver {
                     if !addr_uses_relay(&info.observed_addr) {
                         self.swarm.add_external_address(info.observed_addr.clone());
                     }
-                    for addr in &info.listen_addrs {
-                        if is_tcp_dialable(addr) && !addr_uses_relay(addr) {
-                            info!(target: "libp2p_identify", "adding listen addr as external candidate for DCUtR: {}", addr);
-                            self.swarm.add_external_address(addr.clone());
-                        }
-                    }
+                    // NOTE: We intentionally do NOT add info.listen_addrs as external addresses.
+                    // Those are the REMOTE peer's addresses, not ours. Adding them would pollute
+                    // our external address set with unreachable addresses, breaking DCUtR hole punch.
                     self.mark_dcutr_support(peer_id, supports_dcutr);
                     self.maybe_request_dialback(peer_id);
                 }
