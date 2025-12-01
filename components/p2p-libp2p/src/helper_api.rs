@@ -1,4 +1,4 @@
-use crate::transport::Libp2pStreamProvider;
+use crate::transport::{Libp2pStreamProvider, PeerSnapshot};
 use libp2p::Multiaddr;
 use serde::Deserialize;
 use serde_json::json;
@@ -29,6 +29,7 @@ struct HelperRequest {
 enum HelperAction {
     Status,
     Dial(Multiaddr),
+    Peers,
 }
 
 impl HelperApi {
@@ -45,6 +46,10 @@ impl HelperApi {
                 // Trigger the dial. We don't return the stream here, just success/failure of connection.
                 self.provider.dial_multiaddr(addr).await.map_err(|e| HelperError::DialFailed(e.to_string()))?;
                 json!({ "ok": true, "msg": "dial successful" })
+            }
+            HelperAction::Peers => {
+                let peers: Vec<HelperPeer> = self.provider.peers_snapshot().await.into_iter().map(HelperPeer::from).collect();
+                json!({ "ok": true, "peers": peers })
             }
         };
 
@@ -67,7 +72,35 @@ impl TryFrom<HelperRequest> for HelperAction {
                 let addr = Multiaddr::from_str(&addr_str).map_err(|e| HelperError::Invalid(e.to_string()))?;
                 Ok(Self::Dial(addr))
             }
+            "peers" => Ok(Self::Peers),
             _ => Err(HelperError::UnknownAction),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct HelperPeer {
+    peer_id: String,
+    state: &'static str,
+    path: String,
+    relay_id: Option<String>,
+    direction: String,
+    since_ms: u128,
+    libp2p: bool,
+    dcutr_upgraded: bool,
+}
+
+impl From<PeerSnapshot> for HelperPeer {
+    fn from(snap: PeerSnapshot) -> Self {
+        Self {
+            peer_id: snap.peer_id,
+            state: "connected",
+            path: snap.path,
+            relay_id: snap.relay_id,
+            direction: snap.direction,
+            since_ms: snap.duration_ms,
+            libp2p: snap.libp2p,
+            dcutr_upgraded: snap.dcutr_upgraded,
         }
     }
 }
@@ -81,7 +114,10 @@ mod tests {
     use futures_util::future::BoxFuture;
     use kaspa_utils::networking::NetAddress;
 
-    struct MockProvider;
+    #[derive(Default)]
+    struct MockProvider {
+        peers: Vec<PeerSnapshot>,
+    }
     impl Libp2pStreamProvider for MockProvider {
         fn dial<'a>(&'a self, _: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
             Box::pin(async { Err(Libp2pError::Disabled) })
@@ -98,19 +134,43 @@ mod tests {
         fn reserve<'a>(&'a self, _: Multiaddr) -> BoxFuture<'a, Result<ReservationHandle, Libp2pError>> {
             Box::pin(async { Ok(ReservationHandle::noop()) })
         }
+        fn peers_snapshot<'a>(&'a self) -> BoxFuture<'a, Vec<PeerSnapshot>> {
+            let peers = self.peers.clone();
+            Box::pin(async move { peers })
+        }
     }
 
     #[tokio::test]
     async fn helper_status_ok() {
-        let api = HelperApi::new(Arc::new(MockProvider));
+        let api = HelperApi::new(Arc::new(MockProvider::default()));
         let resp = api.handle_json(r#"{"action":"status"}"#).await.unwrap();
         assert!(resp.contains(r#""ok":true"#));
     }
 
     #[tokio::test]
     async fn helper_unknown_action_errors() {
-        let api = HelperApi::new(Arc::new(MockProvider));
+        let api = HelperApi::new(Arc::new(MockProvider::default()));
         let resp = api.handle_json(r#"{"action":"refresh"}"#).await;
         assert!(matches!(resp, Err(HelperError::UnknownAction)));
+    }
+
+    #[tokio::test]
+    async fn helper_peers_returns_snapshot() {
+        let snap = PeerSnapshot {
+            peer_id: "peer1".into(),
+            path: "direct".into(),
+            relay_id: None,
+            direction: "outbound".into(),
+            duration_ms: 123,
+            libp2p: true,
+            dcutr_upgraded: true,
+        };
+        let api = HelperApi::new(Arc::new(MockProvider { peers: vec![snap] }));
+        let resp = api.handle_json(r#"{"action":"peers"}"#).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let peers = value.get("peers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        assert_eq!(peers.len(), 1);
+        let peer = peers.first().unwrap();
+        assert_eq!(peer.get("peer_id").and_then(|v| v.as_str()), Some("peer1"));
     }
 }

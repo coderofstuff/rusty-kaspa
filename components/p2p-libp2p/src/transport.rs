@@ -4,7 +4,7 @@ use futures_util::future::BoxFuture;
 use futures_util::StreamExt;
 use kaspa_p2p_lib::common::ProtocolError;
 use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
-use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PeerKey, Router, TransportConnector};
+use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PathKind, PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
 use libp2p::core::transport::ListenerId;
 use libp2p::dcutr;
@@ -16,6 +16,7 @@ use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{identity, relay, PeerId};
 use log::{debug, info, warn};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -609,6 +610,9 @@ pub trait Libp2pStreamProvider: Send + Sync {
     fn shutdown(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
     }
+    fn peers_snapshot<'a>(&'a self) -> BoxFuture<'a, Vec<PeerSnapshot>> {
+        Box::pin(async { Vec::new() })
+    }
 }
 
 /// Libp2p identity wrapper (ed25519).
@@ -835,6 +839,17 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
         })
     }
 
+    fn peers_snapshot<'a>(&'a self) -> BoxFuture<'a, Vec<PeerSnapshot>> {
+        let tx = self.command_tx.clone();
+        Box::pin(async move {
+            let (respond_to, rx) = oneshot::channel();
+            if tx.send(SwarmCommand::PeersSnapshot { respond_to }).await.is_err() {
+                return Vec::new();
+            }
+            rx.await.unwrap_or_default()
+        })
+    }
+
     fn shutdown(&self) -> BoxFuture<'_, ()> {
         let trigger = self.shutdown.clone();
         let task = &self.task;
@@ -853,6 +868,17 @@ struct IncomingStream {
     stream: BoxedLibp2pStream,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct PeerSnapshot {
+    pub peer_id: String,
+    pub path: String,
+    pub relay_id: Option<String>,
+    pub direction: String,
+    pub duration_ms: u128,
+    pub libp2p: bool,
+    pub dcutr_upgraded: bool,
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 struct ReservationTarget {
@@ -865,6 +891,7 @@ enum SwarmCommand {
     EnsureListening { respond_to: oneshot::Sender<Result<(), Libp2pError>> },
     Reserve { target: Multiaddr, respond_to: oneshot::Sender<Result<ListenerId, Libp2pError>> },
     ReleaseReservation { listener_id: ListenerId, respond_to: oneshot::Sender<()> },
+    PeersSnapshot { respond_to: oneshot::Sender<Vec<PeerSnapshot>> },
 }
 
 struct DialRequest {
@@ -892,6 +919,7 @@ struct SwarmDriver {
     active_relay: Option<RelayInfo>,
     listening: bool,
     shutdown: Listener,
+    connections: HashMap<StreamRequestId, ConnectionEntry>,
 }
 
 impl SwarmDriver {
@@ -932,6 +960,7 @@ impl SwarmDriver {
             active_relay,
             listening: false,
             shutdown,
+            connections: HashMap::new(),
         }
     }
 
@@ -1057,6 +1086,9 @@ impl SwarmDriver {
                 let _ = self.swarm.remove_listener(listener_id);
                 let _ = respond_to.send(());
             }
+            SwarmCommand::PeersSnapshot { respond_to } => {
+                let _ = respond_to.send(self.peers_snapshot());
+            }
         }
     }
 
@@ -1169,13 +1201,16 @@ impl SwarmDriver {
                     // initiate a bidirectional dial-back via the active relay so we become a dialer too.
                     self.maybe_request_dialback(peer_id);
                 }
+                self.record_connection(connection_id, peer_id, &endpoint, had_pending_relay);
             }
             SwarmEvent::ConnectionClosed { peer_id, connection_id, endpoint, .. } => {
                 self.fail_pending(connection_id, "connection closed before stream");
                 self.track_closed(peer_id, &endpoint);
+                self.connections.remove(&connection_id);
             }
             SwarmEvent::OutgoingConnectionError { connection_id, error, .. } => {
                 self.fail_pending(connection_id, error.to_string());
+                self.connections.remove(&connection_id);
             }
             _ => {}
         }
@@ -1222,6 +1257,23 @@ impl SwarmDriver {
                 state.connected_via_relay = false;
             }
         }
+    }
+
+    fn record_connection(
+        &mut self,
+        connection_id: StreamRequestId,
+        peer_id: PeerId,
+        endpoint: &libp2p::core::ConnectedPoint,
+        dcutr_upgraded: bool,
+    ) {
+        let path = if endpoint_uses_relay(endpoint) { PathKind::Relay { relay_id: None } } else { PathKind::Direct };
+        let relay_id = match endpoint {
+            libp2p::core::ConnectedPoint::Dialer { address, .. } => relay_id_from_multiaddr(address),
+            libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => relay_id_from_multiaddr(send_back_addr),
+        };
+        let outbound = endpoint.is_dialer();
+        self.connections
+            .insert(connection_id, ConnectionEntry { peer_id, path, relay_id, outbound, since: Instant::now(), dcutr_upgraded });
     }
 
     async fn handle_stream_event(&mut self, event: StreamEvent) {
@@ -1346,6 +1398,26 @@ impl SwarmDriver {
             }
         }
     }
+
+    fn peers_snapshot(&self) -> Vec<PeerSnapshot> {
+        let now = Instant::now();
+        self.connections
+            .values()
+            .map(|entry| PeerSnapshot {
+                peer_id: entry.peer_id.to_string(),
+                path: match &entry.path {
+                    PathKind::Direct => "direct".to_string(),
+                    PathKind::Relay { .. } => "relay".to_string(),
+                    PathKind::Unknown => "unknown".to_string(),
+                },
+                relay_id: entry.relay_id.clone(),
+                direction: if entry.outbound { "outbound".to_string() } else { "inbound".to_string() },
+                duration_ms: now.saturating_duration_since(entry.since).as_millis(),
+                libp2p: true,
+                dcutr_upgraded: entry.dcutr_upgraded,
+            })
+            .collect()
+    }
 }
 
 fn metadata_from_endpoint(peer_id: &PeerId, endpoint: &libp2p::core::ConnectedPoint) -> TransportMetadata {
@@ -1452,14 +1524,28 @@ struct PeerState {
     connected_via_relay: bool,
 }
 
+#[derive(Clone, Debug)]
+struct ConnectionEntry {
+    peer_id: PeerId,
+    path: PathKind,
+    relay_id: Option<String>,
+    outbound: bool,
+    since: Instant,
+    dcutr_upgraded: bool,
+}
+
 fn extract_relay_peer(addr: &Multiaddr) -> Option<PeerId> {
     let components: Vec<_> = addr.iter().collect();
     for window in components.windows(2) {
         if let [Protocol::P2p(peer), Protocol::P2pCircuit] = window {
-            return Some(peer.to_owned());
+            return Some(peer.clone());
         }
     }
     None
+}
+
+fn relay_id_from_multiaddr(addr: &Multiaddr) -> Option<String> {
+    extract_relay_peer(addr).map(|p| p.to_string())
 }
 
 /// Extracts the target peer from a relay circuit address.
@@ -1630,5 +1716,9 @@ impl Libp2pStreamProvider for MockProvider {
             let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
             resp.map(|_| ReservationHandle::noop())
         })
+    }
+
+    fn peers_snapshot<'a>(&'a self) -> BoxFuture<'a, Vec<PeerSnapshot>> {
+        Box::pin(async { Vec::new() })
     }
 }
