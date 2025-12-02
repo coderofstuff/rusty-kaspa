@@ -1290,9 +1290,15 @@ impl SwarmDriver {
     async fn handle_stream_event(&mut self, event: StreamEvent) {
         match event {
             StreamEvent::Inbound { peer_id, _connection_id: connection_id, endpoint, stream } => {
-                if matches!(endpoint, libp2p::core::ConnectedPoint::Dialer { .. }) {
-                    debug!("libp2p_bridge: skipping inbound stream on dialed connection to {peer_id} to avoid duplicate bridging");
-                    return;
+                // For dialed connections, we normally skip inbound streams to avoid duplicates.
+                // However, for DCUtR-upgraded connections where this node has role_override = Listener,
+                // we ARE the server and MUST accept inbound streams - the remote will send us data.
+                if let libp2p::core::ConnectedPoint::Dialer { role_override, .. } = &endpoint {
+                    if !matches!(role_override, libp2p::core::Endpoint::Listener) {
+                        debug!("libp2p_bridge: skipping inbound stream on dialed connection to {peer_id} (no role_override)");
+                        return;
+                    }
+                    info!("libp2p_bridge: accepting inbound stream on DCUtR connection (role_override=Listener) from {peer_id}");
                 }
                 info!(
                     "libp2p_bridge: StreamEvent::Inbound peer={} endpoint={:?}",
