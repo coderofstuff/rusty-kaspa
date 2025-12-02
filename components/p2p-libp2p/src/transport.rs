@@ -1301,10 +1301,12 @@ impl SwarmDriver {
                     libp2p::core::ConnectedPoint::Dialer { role_override, .. }
                         if matches!(role_override, libp2p::core::Endpoint::Listener) =>
                     {
+                        info!("libp2p_bridge: DCUtR role_override detected, treating outbound stream as inbound (h2 server) for {peer_id}");
                         StreamDirection::Inbound
                     }
                     _ => StreamDirection::Outbound,
                 };
+                debug!("libp2p_bridge: StreamEvent::Outbound for {peer_id}: endpoint={:?}, direction={:?}", endpoint, direction);
                 if let Some(pending) = self.pending_dials.remove(&request_id) {
                     let _ = pending.respond_to.send(Ok((metadata, direction, Box::new(stream.compat()))));
                 } else {
