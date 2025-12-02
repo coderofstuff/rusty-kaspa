@@ -1290,6 +1290,10 @@ impl SwarmDriver {
                     debug!("libp2p_bridge: skipping inbound stream on dialed connection to {peer_id} to avoid duplicate bridging");
                     return;
                 }
+                info!(
+                    "libp2p_bridge: StreamEvent::Inbound peer={} endpoint={:?}",
+                    peer_id, endpoint
+                );
                 let metadata = metadata_from_endpoint(&peer_id, &endpoint);
                 info!("libp2p_bridge: inbound stream from {peer_id} over {:?}, handing to Kaspa", metadata.path);
                 let incoming = IncomingStream { metadata, direction: StreamDirection::Inbound, stream: Box::new(stream.compat()) };
@@ -1306,7 +1310,10 @@ impl SwarmDriver {
                     }
                     _ => StreamDirection::Outbound,
                 };
-                debug!("libp2p_bridge: StreamEvent::Outbound for {peer_id}: endpoint={:?}, direction={:?}", endpoint, direction);
+                info!(
+                    "libp2p_bridge: StreamEvent::Outbound peer={} req_id={:?} endpoint={:?} direction={:?}",
+                    peer_id, request_id, endpoint, direction
+                );
                 if let Some(pending) = self.pending_dials.remove(&request_id) {
                     let _ = pending.respond_to.send(Ok((metadata, direction, Box::new(stream.compat()))));
                 } else {
@@ -1329,6 +1336,10 @@ impl SwarmDriver {
             self.swarm.behaviour_mut().streams.request_stream(peer_id, connection_id, connection_id);
             return;
         }
+        info!(
+            "libp2p_bridge: request_stream_bridge peer={} conn_id={:?} (requesting substream)",
+            peer_id, connection_id
+        );
 
         let (respond_to, rx) = oneshot::channel();
         self.pending_dials.insert(connection_id, DialRequest { respond_to, started_at: Instant::now(), via: DialVia::Direct });
