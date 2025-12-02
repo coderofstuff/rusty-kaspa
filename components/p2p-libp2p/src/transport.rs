@@ -1114,7 +1114,11 @@ impl SwarmDriver {
                         info.protocols,
                         info.listen_addrs
                     );
-                    if !addr_uses_relay(&info.observed_addr) {
+                    // Only add observed address if it's a valid TCP address (has IP+TCP).
+                    // Relay circuit peers may report observed addresses like `/p2p/<peer_id>` without
+                    // any IP information, which are useless for DCUtR hole punching and pollute
+                    // the external address set.
+                    if !addr_uses_relay(&info.observed_addr) && is_tcp_dialable(&info.observed_addr) {
                         self.swarm.add_external_address(info.observed_addr.clone());
                     }
                     // NOTE: We intentionally do NOT add info.listen_addrs as external addresses.
