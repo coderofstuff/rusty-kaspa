@@ -1476,7 +1476,21 @@ fn metadata_from_endpoint(peer_id: &PeerId, endpoint: &libp2p::core::ConnectedPo
 fn connected_point_to_metadata(endpoint: &libp2p::core::ConnectedPoint) -> (Option<NetAddress>, kaspa_p2p_lib::PathKind) {
     match endpoint {
         libp2p::core::ConnectedPoint::Dialer { address, .. } => multiaddr_to_metadata(address),
-        libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => multiaddr_to_metadata(send_back_addr),
+        libp2p::core::ConnectedPoint::Listener { local_addr, send_back_addr } => {
+            // For relay circuit listeners, send_back_addr may be just "/p2p/<peer_id>" without
+            // the circuit marker. Check local_addr for circuit information since it contains
+            // the full relay path (e.g., "/ip4/.../p2p-circuit").
+            let (_, local_path) = multiaddr_to_metadata(local_addr);
+            if matches!(local_path, kaspa_p2p_lib::PathKind::Relay { .. }) {
+                // local_addr has circuit info; use its path. Address from send_back_addr is
+                // typically unusable for relay circuits (just peer ID, no IP).
+                let (addr, _) = multiaddr_to_metadata(send_back_addr);
+                (addr, local_path)
+            } else {
+                // No circuit in local_addr; use send_back_addr as before
+                multiaddr_to_metadata(send_back_addr)
+            }
+        }
     }
 }
 
