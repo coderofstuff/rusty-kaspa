@@ -334,7 +334,7 @@ mod tests {
     fn insert_relay_pending(
         driver: &mut SwarmDriver,
         peer_id: PeerId,
-    ) -> (StreamRequestId, oneshot::Receiver<Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>) {
+    ) -> (StreamRequestId, oneshot::Receiver<Result<(TransportMetadata, StreamDirection, BoxedLibp2pStream), Libp2pError>>) {
         let (tx, rx) = oneshot::channel();
         let req_id = make_request_id();
         driver
@@ -352,10 +352,10 @@ mod tests {
         let (req2, rx2) = insert_relay_pending(&mut driver, peer);
 
         driver.pending_dials.remove(&req1).map(|pending| {
-            let _ = pending.respond_to.send(Ok((TransportMetadata::default(), make_test_stream(drops.clone()))));
+            let _ = pending.respond_to.send(Ok((TransportMetadata::default(), StreamDirection::Outbound, make_test_stream(drops.clone()))));
         });
         driver.pending_dials.remove(&req2).map(|pending| {
-            let _ = pending.respond_to.send(Ok((TransportMetadata::default(), make_test_stream(drops.clone()))));
+            let _ = pending.respond_to.send(Ok((TransportMetadata::default(), StreamDirection::Outbound, make_test_stream(drops.clone()))));
         });
 
         assert!(driver.pending_dials.is_empty(), "all pending dials should be cleared");
@@ -373,7 +373,7 @@ mod tests {
 
         driver.fail_pending(req1, "first failed");
         driver.pending_dials.remove(&req2).map(|pending| {
-            let _ = pending.respond_to.send(Ok((TransportMetadata::default(), make_test_stream(drops.clone()))));
+            let _ = pending.respond_to.send(Ok((TransportMetadata::default(), StreamDirection::Outbound, make_test_stream(drops.clone()))));
         });
 
         assert!(driver.pending_dials.is_empty());
@@ -767,7 +767,9 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
                 .await
                 .map_err(|_| Libp2pError::DialFailed("libp2p driver stopped".into()))?;
 
-            rx.await.unwrap_or_else(|_| Err(Libp2pError::DialFailed("libp2p dial cancelled".into())))
+            rx.await
+                .unwrap_or_else(|_| Err(Libp2pError::DialFailed("libp2p dial cancelled".into())))
+                .map(|(metadata, _, stream)| (metadata, stream))
         })
     }
 
@@ -787,7 +789,9 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
                 .await
                 .map_err(|_| Libp2pError::DialFailed("libp2p driver stopped".into()))?;
 
-            rx.await.unwrap_or_else(|_| Err(Libp2pError::DialFailed("libp2p dial cancelled".into())))
+            rx.await
+                .unwrap_or_else(|_| Err(Libp2pError::DialFailed("libp2p dial cancelled".into())))
+                .map(|(metadata, _, stream)| (metadata, stream))
         })
     }
 
@@ -887,7 +891,10 @@ struct ReservationTarget {
 }
 
 enum SwarmCommand {
-    Dial { address: Multiaddr, respond_to: oneshot::Sender<Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> },
+    Dial {
+        address: Multiaddr,
+        respond_to: oneshot::Sender<Result<(TransportMetadata, StreamDirection, BoxedLibp2pStream), Libp2pError>>,
+    },
     EnsureListening { respond_to: oneshot::Sender<Result<(), Libp2pError>> },
     Reserve { target: Multiaddr, respond_to: oneshot::Sender<Result<ListenerId, Libp2pError>> },
     ReleaseReservation { listener_id: ListenerId, respond_to: oneshot::Sender<()> },
@@ -895,7 +902,7 @@ enum SwarmCommand {
 }
 
 struct DialRequest {
-    respond_to: oneshot::Sender<Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>,
+    respond_to: oneshot::Sender<Result<(TransportMetadata, StreamDirection, BoxedLibp2pStream), Libp2pError>>,
     started_at: Instant,
     via: DialVia,
 }
@@ -1290,12 +1297,22 @@ impl SwarmDriver {
             }
             StreamEvent::Outbound { peer_id, request_id, endpoint, stream, .. } => {
                 let metadata = metadata_from_endpoint(&peer_id, &endpoint);
+                let direction = match &endpoint {
+                    libp2p::core::ConnectedPoint::Dialer { role_override, .. }
+                        if matches!(role_override, libp2p::core::Endpoint::Listener) =>
+                    {
+                        StreamDirection::Inbound
+                    }
+                    _ => StreamDirection::Outbound,
+                };
                 if let Some(pending) = self.pending_dials.remove(&request_id) {
-                    let _ = pending.respond_to.send(Ok((metadata, Box::new(stream.compat()))));
+                    let _ = pending.respond_to.send(Ok((metadata, direction, Box::new(stream.compat()))));
                 } else {
-                    info!("libp2p_bridge: outbound stream with no pending dial (req {request_id:?}) from {peer_id}; handing to Kaspa");
-                    let incoming =
-                        IncomingStream { metadata, direction: StreamDirection::Outbound, stream: Box::new(stream.compat()) };
+                    info!(
+                        "libp2p_bridge: outbound stream with no pending dial (req {request_id:?}) from {peer_id}; handing to Kaspa (direction={:?})",
+                        direction
+                    );
+                    let incoming = IncomingStream { metadata, direction, stream: Box::new(stream.compat()) };
                     let _ = self.incoming_tx.send(incoming).await;
                 }
             }
@@ -1317,9 +1334,12 @@ impl SwarmDriver {
 
         let tx = self.incoming_tx.clone();
         spawn(async move {
-            if let Ok(Ok((metadata, stream))) = rx.await {
-                info!("libp2p_bridge: established stream with {peer_id} (req {connection_id:?}); handing to Kaspa");
-                let incoming = IncomingStream { metadata, direction: StreamDirection::Outbound, stream };
+            if let Ok(Ok((metadata, direction, stream))) = rx.await {
+                info!(
+                    "libp2p_bridge: established stream with {peer_id} (req {connection_id:?}); handing to Kaspa (direction={:?})",
+                    direction
+                );
+                let incoming = IncomingStream { metadata, direction, stream };
                 if let Err(err) = tx.try_send(incoming) {
                     match err {
                         TrySendError::Full(_) => {
