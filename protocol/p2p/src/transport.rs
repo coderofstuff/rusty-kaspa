@@ -52,6 +52,11 @@ impl TransportMetadata {
 
         let mut hasher = DefaultHasher::new();
         peer_id.hash(&mut hasher);
+        // Include path kind to avoid treating relay and direct libp2p paths as the same
+        // synthetic address. This allows a direct DCUtR-upgraded connection to coexist
+        // (or replace) a relay path without triggering duplicate peer detection purely
+        // due to identical synthetic addresses.
+        self.path.hash(&mut hasher);
         let hash = hasher.finish();
 
         // Use a unique-local IPv6 prefix to avoid clashing with real addresses.
