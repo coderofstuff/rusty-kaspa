@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 /// How a connection reached us; used for accounting and relay budgeting.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathKind {
     Direct,
     Relay { relay_id: Option<String> },
@@ -77,18 +77,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn synthetic_socket_addr_is_stable_and_relay_agnostic() {
-        let base = TransportMetadata {
-            libp2p_peer_id: Some("12D3KooWAJ7gBypRelayAgnostic".to_string()),
+    fn synthetic_socket_addr_differs_by_path_kind() {
+        let direct = TransportMetadata {
+            libp2p_peer_id: Some("12D3KooWAJ7gBypTestPeer".to_string()),
             path: PathKind::Direct,
             ..Default::default()
         };
-        let with_relay = TransportMetadata { path: PathKind::Relay { relay_id: Some("relay-1".into()) }, ..base.clone() };
+        let relay = TransportMetadata { path: PathKind::Relay { relay_id: Some("relay-1".into()) }, ..direct.clone() };
+        let unknown = TransportMetadata { path: PathKind::Unknown, ..direct.clone() };
 
-        let addr1 = base.synthetic_socket_addr().expect("peer id should produce address");
-        let addr2 = with_relay.synthetic_socket_addr().expect("peer id should produce address");
+        let addr_direct = direct.synthetic_socket_addr().expect("peer id should produce address");
+        let addr_relay = relay.synthetic_socket_addr().expect("peer id should produce address");
+        let addr_unknown = unknown.synthetic_socket_addr().expect("peer id should produce address");
 
-        assert_eq!(addr1, addr2, "relay metadata must not affect synthetic address");
+        // All three path kinds should produce different addresses to allow
+        // DCUtR-upgraded connections to coexist with or replace relay paths
+        assert_ne!(addr_direct, addr_relay, "Direct and Relay should differ");
+        assert_ne!(addr_direct, addr_unknown, "Direct and Unknown should differ");
+        assert_ne!(addr_relay, addr_unknown, "Relay and Unknown should differ");
     }
 
     #[test]

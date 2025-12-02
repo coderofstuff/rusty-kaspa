@@ -1285,7 +1285,7 @@ impl SwarmDriver {
 
     async fn handle_stream_event(&mut self, event: StreamEvent) {
         match event {
-            StreamEvent::Inbound { peer_id, endpoint, stream, .. } => {
+            StreamEvent::Inbound { peer_id, _connection_id: connection_id, endpoint, stream } => {
                 if matches!(endpoint, libp2p::core::ConnectedPoint::Dialer { .. }) {
                     debug!("libp2p_bridge: skipping inbound stream on dialed connection to {peer_id} to avoid duplicate bridging");
                     return;
@@ -1294,7 +1294,16 @@ impl SwarmDriver {
                     "libp2p_bridge: StreamEvent::Inbound peer={} endpoint={:?}",
                     peer_id, endpoint
                 );
-                let metadata = metadata_from_endpoint(&peer_id, &endpoint);
+                let mut metadata = metadata_from_endpoint(&peer_id, &endpoint);
+                // If endpoint-based path detection returned Unknown, fall back to our
+                // connection records which track whether a connection uses a relay circuit.
+                // This is needed because the send_back_addr for relay circuit listeners
+                // may not contain the P2pCircuit protocol marker.
+                if matches!(metadata.path, kaspa_p2p_lib::PathKind::Unknown) {
+                    if let Some(conn) = self.connections.get(&connection_id) {
+                        metadata.path = conn.path.clone();
+                    }
+                }
                 info!("libp2p_bridge: inbound stream from {peer_id} over {:?}, handing to Kaspa", metadata.path);
                 let incoming = IncomingStream { metadata, direction: StreamDirection::Inbound, stream: Box::new(stream.compat()) };
                 self.enqueue_incoming(incoming);
