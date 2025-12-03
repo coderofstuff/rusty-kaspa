@@ -59,7 +59,7 @@ impl Default for Config {
             listen_addresses: Vec::new(),
             relay_inbound_cap: None,
             relay_inbound_unknown_cap: None,
-            libp2p_inbound_cap_private: 16,
+            libp2p_inbound_cap_private: 8,
             reservations: Vec::new(),
             external_multiaddrs: Vec::new(),
             advertise_addresses: Vec::new(),

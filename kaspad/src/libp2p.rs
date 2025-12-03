@@ -23,7 +23,7 @@ use tokio::sync::OnceCell;
 #[cfg(feature = "libp2p")]
 use tokio::time::{sleep, Duration};
 
-pub(crate) const DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE: usize = 16;
+pub(crate) const DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE: usize = 8;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]

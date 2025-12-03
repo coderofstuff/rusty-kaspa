@@ -16,3 +16,4 @@ Servers.toml
 release
 package-sizes.js
 rustbridge_*.log
+tcp-hole-punch/NAT-LAB-HANDOVER.md

@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git ls-tree:*)"
+      "Bash(git ls-tree:*)",
+      "Bash(ssh -o StrictHostKeyChecking=no -J root@10.0.3.11 root@192.168.1.1 'echo \"\"=== Router A (192.168.1.1) ===\"\" && echo && echo \"\"--- Hostname/Version ---\"\" && cat /etc/banner 2>/dev/null || uname -a && echo && echo \"\"--- Network Interfaces ---\"\" && ip addr show 2>/dev/null || ifconfig && echo && echo \"\"--- Routing Table ---\"\" && ip route 2>/dev/null || route -n && echo && echo \"\"--- IPTables NAT Rules ---\"\" && iptables -t nat -L -n -v 2>/dev/null && echo && echo \"\"--- IPTables Filter Rules ---\"\" && iptables -L -n -v 2>/dev/null && echo && echo \"\"--- Firewall Config (if OpenWrt) ---\"\" && cat /etc/config/firewall 2>/dev/null | head -200')",
+      "Bash(ssh -o StrictHostKeyChecking=no -J root@10.0.3.11 root@192.168.2.1 'echo \"\"=== Router B (192.168.2.1) ===\"\" && echo && echo \"\"--- Hostname/Version ---\"\" && cat /etc/banner 2>/dev/null || uname -a && echo && echo \"\"--- Network Interfaces ---\"\" && ip addr show 2>/dev/null || ifconfig && echo && echo \"\"--- Routing Table ---\"\" && ip route 2>/dev/null || route -n && echo && echo \"\"--- IPTables NAT Rules ---\"\" && iptables -t nat -L -n -v 2>/dev/null && echo && echo \"\"--- IPTables Filter Rules ---\"\" && iptables -L -n -v 2>/dev/null && echo && echo \"\"--- Firewall Config (if OpenWrt) ---\"\" && cat /etc/config/firewall 2>/dev/null | head -200')",
+      "Bash(ssh:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(cargo build:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []

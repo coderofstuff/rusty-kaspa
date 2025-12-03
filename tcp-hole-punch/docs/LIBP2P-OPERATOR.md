@@ -12,7 +12,7 @@
 ## Roles
 - `--libp2p-role=public|private|auto` (default `auto`; auto currently resolves to private unless a helper listen address is configured).
 - **public**: advertises the libp2p relay service bit/relay_port and keeps the existing libp2p inbound split alongside TCP inbound peers.
-- **private/auto**: does **not** advertise relay capability; libp2p inbound peers are capped (default 16) while TCP inbound limits stay unchanged.
+- **private/auto**: does **not** advertise relay capability; libp2p inbound peers are capped (default 8) while TCP inbound limits stay unchanged.
 
 ## Identity & privacy
 - Default identity is **ephemeral**. Persist only when `--libp2p-identity-path <path>` is provided (or `KASPAD_LIBP2P_IDENTITY_PATH`).
@@ -23,7 +23,7 @@
 - Libp2p inbound soft caps: per-relay bucket and an “unknown relay” bucket (defaults 4 / 8). Override via CLI/env:
   - `--libp2p-relay-inbound-cap`, `--libp2p-relay-inbound-unknown-cap`
   - `KASPAD_LIBP2P_RELAY_INBOUND_CAP`, `KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP`
-- Private role adds a libp2p-specific inbound cap (default 16) applied **only** to libp2p peers; TCP inbound is unaffected.
+- Private role adds a libp2p-specific inbound cap (default 8) applied **only** to libp2p peers; TCP inbound is unaffected.
 - Reservation refresh uses exponential backoff to avoid relay spam; failed attempts delay retries, successful reservations refresh on a timer.
 
 ## Config surface (env/CLI highlights)

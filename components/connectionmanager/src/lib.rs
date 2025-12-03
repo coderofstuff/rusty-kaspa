@@ -24,7 +24,7 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 
-const DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE: usize = 16;
+const DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE: usize = 8;
 
 #[derive(Clone, Debug)]
 pub struct Libp2pRoleConfig {
