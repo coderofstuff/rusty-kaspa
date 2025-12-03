@@ -416,6 +416,7 @@ fn build_transport(
         let mut cfg = yamux::Config::default();
         cfg.set_receive_window_size(32 * 1024 * 1024); // 32 MiB
         cfg.set_max_buffer_size(32 * 1024 * 1024);
+        // TODO(libp2p upgrade): migrate to the replacement yamux config API once these setters are removed upstream.
         cfg
     };
 
@@ -438,6 +439,7 @@ fn build_tcp_transport(identity: &Libp2pIdentity) -> Result<(BoxedTransport, swa
         let mut cfg = yamux::Config::default();
         cfg.set_receive_window_size(32 * 1024 * 1024); // 32 MiB
         cfg.set_max_buffer_size(32 * 1024 * 1024);
+        // TODO(libp2p upgrade): migrate to the replacement yamux config API once these setters are removed upstream.
         cfg
     };
 
