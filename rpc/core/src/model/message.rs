@@ -2573,8 +2573,11 @@ impl GetLibp2pStatusResponse {
 impl Serializer for GetLibp2pStatusResponse {
     fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
         store!(u16, &1, writer)?;
-        serialize!(RpcLibp2pMode, &self.mode, writer)?;
-        serialize!(Option<String>, &self.peer_id, writer)?;
+        store!(u8, &(self.mode as u8), writer)?;
+        store!(bool, &self.peer_id.is_some(), writer)?;
+        if let Some(peer_id) = &self.peer_id {
+            store!(String, peer_id, writer)?;
+        }
         serialize!(RpcLibp2pIdentity, &self.identity, writer)?;
         Ok(())
     }
@@ -2583,9 +2586,15 @@ impl Serializer for GetLibp2pStatusResponse {
 impl Deserializer for GetLibp2pStatusResponse {
     fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
         let _version = load!(u16, reader)?;
-        let mode = load!(RpcLibp2pMode, reader)?;
-        let peer_id = load!(Option<String>, reader)?;
-        let identity = load!(RpcLibp2pIdentity, reader)?;
+        let mode = match load!(u8, reader)? {
+            0 => RpcLibp2pMode::Off,
+            1 => RpcLibp2pMode::Full,
+            2 => RpcLibp2pMode::Helper,
+            _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid libp2p mode")),
+        };
+        let has_peer_id = load!(bool, reader)?;
+        let peer_id = if has_peer_id { Some(load!(String, reader)?) } else { None };
+        let identity = deserialize!(RpcLibp2pIdentity, reader)?;
         Ok(Self { mode, peer_id, identity })
     }
 }
