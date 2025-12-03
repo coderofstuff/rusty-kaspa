@@ -1169,7 +1169,38 @@ impl SwarmDriver {
             SwarmEvent::Behaviour(Libp2pEvent::Dcutr(event)) => {
                 // Enhanced DCUtR logging to diagnose NoAddresses issue
                 let external_addrs: Vec<_> = self.swarm.external_addresses().collect();
-                info!("libp2p dcutr event: {:?} (swarm has {} external addrs: {:?})", event, external_addrs.len(), external_addrs);
+                match &event.result {
+                    Err(e) if is_attempts_exceeded(e) => {
+                        // Check if we have an active DIRECT connection that was upgraded via DCUtR
+                        let is_spurious = self.connections.values().any(|conn| {
+                            conn.peer_id == event.remote_peer_id
+                                && matches!(conn.path, PathKind::Direct)
+                                && conn.dcutr_upgraded
+                        });
+
+                        if is_spurious {
+                            debug!(
+                                "Ignored spurious DCUtR error for connected peer {}: {:?} (swarm has {} external addrs: {:?})",
+                                event.remote_peer_id, e, external_addrs.len(), external_addrs
+                            );
+                        } else {
+                            info!(
+                                "libp2p dcutr event: {:?} (swarm has {} external addrs: {:?})",
+                                event,
+                                external_addrs.len(),
+                                external_addrs
+                            );
+                        }
+                    }
+                    _ => {
+                        info!(
+                            "libp2p dcutr event: {:?} (swarm has {} external addrs: {:?})",
+                            event,
+                            external_addrs.len(),
+                            external_addrs
+                        );
+                    }
+                }
             }
             SwarmEvent::Behaviour(Libp2pEvent::Autonat(event)) => {
                 debug!("libp2p autonat event: {:?}", event);
@@ -1575,6 +1606,11 @@ fn default_listen_addr() -> Multiaddr {
 pub enum StreamDirection {
     Inbound,
     Outbound,
+}
+
+fn is_attempts_exceeded(err: &dcutr::Error) -> bool {
+    // Upstream error is opaque, relying on Display string for now
+    err.to_string().contains("AttemptsExceeded")
 }
 
 #[derive(Clone)]
