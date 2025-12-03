@@ -316,7 +316,7 @@ impl ConnectionManager {
 
         let total = libp2p_peers.len() + direct_peers.len();
         if total > self.inbound_limit {
-            let mut remaining_to_drop = total - self.inbound_limit;
+            let mut remaining_to_drop = total.saturating_sub(self.inbound_limit);
             let mut futures = Vec::new();
 
             if remaining_to_drop > 0 && !libp2p_peers.is_empty() {
@@ -324,7 +324,7 @@ impl ConnectionManager {
                     libp2p_peers.choose_multiple(&mut thread_rng(), remaining_to_drop.min(libp2p_peers.len())).cloned().collect_vec();
                 futures.extend(drop.iter().map(|peer| self.p2p_adaptor.terminate(peer.key())));
                 libp2p_peers.retain(|p| !drop.iter().any(|d| d.key() == p.key()));
-                remaining_to_drop = libp2p_peers.len() + direct_peers.len() - self.inbound_limit;
+                remaining_to_drop = libp2p_peers.len().saturating_add(direct_peers.len()).saturating_sub(self.inbound_limit);
             }
 
             if remaining_to_drop > 0 {
