@@ -158,9 +158,9 @@ pub fn generate_random_transaction_outpoint(rng: &mut SmallRng) -> TransactionOu
     TransactionOutpoint::new(generate_random_hash(rng), rng.gen())
 }
 
-//TODO: create `assert_eq_<kaspa-sturct>!()` helper macros in `consensus::test_helpers`
+//TODO: create `assert_eq_<kaspa-struct>!()` helper macros in `consensus::test_helpers`
 /// Utility to output a JSON representation of a DAG
-pub fn dag_to_json(genesis: u64, blocks: &Vec<(u64, Vec<u64>)>) -> serde_json::Value {
+pub fn dag_to_json(genesis: u64, blocks: &[(u64, Vec<u64>)]) -> serde_json::Value {
     let mut dag_data = serde_json::Map::new();
     dag_data.insert("genesis".to_string(), serde_json::Value::Number(genesis.into()));
 

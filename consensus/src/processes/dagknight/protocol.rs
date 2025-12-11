@@ -152,9 +152,9 @@ impl<
             // Pick a "winner" among these subgroups
             let (winning_conflict_genesis, winning_subgroup) = group_map
                 .iter()
-                .map(|(curr_conflict_genesis, value)| {
-                    let rank_value = self.rank(conflict_genesis, value, zone_work, curr_subgroup.clone());
-                    (rank_value, curr_conflict_genesis, value)
+                .map(|(curr_conflict_genesis, subgroup)| {
+                    let rank_value = self.rank(conflict_genesis, subgroup, zone_work, &curr_subgroup);
+                    (rank_value, curr_conflict_genesis, subgroup)
                 })
                 .min_by(|(a, _, _), (b, _, _)| a.cmp(b))
                 .map(|(rank, conflict_genesis, subgroup)| {
@@ -211,12 +211,12 @@ impl<
         */
     }
 
-    fn rank(&self, conflict_genesis: Hash, subgroup: &Vec<Hash>, zone_work: BlueWorkType, full_subgroup: Vec<Hash>) -> RankValue {
+    fn rank(&self, conflict_genesis: Hash, subgroup: &[Hash], zone_work: BlueWorkType, full_subgroup: &[Hash]) -> RankValue {
         // for k in 0, 1, ..., infinity:
         // tie breaking is assumed to be by comparing selected_parent
         let (k, subgroup_virtual) = (0..u16::MAX)
             .find_map(|curr_k| {
-                let subgroup_virtual_gd = self.fill_bounded_ghostdag_data(conflict_genesis, subgroup, &full_subgroup, curr_k);
+                let subgroup_virtual_gd = self.fill_bounded_ghostdag_data(conflict_genesis, subgroup, full_subgroup, curr_k);
                 let subgroup_virtual =
                     SortableBlock { hash: subgroup_virtual_gd.selected_parent, blue_work: subgroup_virtual_gd.blue_work };
 
@@ -240,7 +240,7 @@ impl<
     }
 
     /// Goes through all the blocks in the conflict zone and sums up all their work (not blue work)
-    fn calc_conflict_zone_work(&self, conflict_genesis: Hash, subgroup: &Vec<Hash>) -> Uint192 {
+    fn calc_conflict_zone_work(&self, conflict_genesis: Hash, subgroup: &[Hash]) -> Uint192 {
         let mut queue = VecDeque::new();
         let mut visited = BlockHashSet::new();
 
@@ -278,7 +278,7 @@ impl<
     // Calculates the rank of the subgroup over the region: <root, tips>
     // root = conflict genesis
     // subgroup = the current subgroup
-    // tips = all thips in this conflict. part of which is the subgroup
+    // tips = all tips in this conflict. part of which is the subgroup
     //
     // Returns the "virtual" GD of this subgroup where it's SP must be within subgroup
     //
@@ -286,7 +286,7 @@ impl<
     // "virtual" would represent the total blue work in the conflict zone from the POV of this subgroup
     // with the given K. Downside of the current implementation is that it will allow coloring
     // the blocks from the side that doesn't agree with the subgroup blue.
-    fn fill_bounded_ghostdag_data(&self, root: Hash, subgroup: &Vec<Hash>, tips: &Vec<Hash>, ghostdag_k: KType) -> GhostdagData {
+    fn fill_bounded_ghostdag_data(&self, root: Hash, subgroup: &[Hash], tips: &[Hash], ghostdag_k: KType) -> GhostdagData {
         let reachability_service = self.reachability_service.clone();
         let relations_store = self.relations_stores.read();
         let relations_service = RelationsStoreInFutureOfRoot::new(relations_store[0].clone(), reachability_service.clone(), root);
@@ -724,6 +724,7 @@ mod tests {
     /// 3. Runs DK over the blocks on it, fills the global GD store with the results
     /// 4. Generates a DOT file over that GD store showing the SPC and blocks colored
     ///    according to the global GD store
+    #[allow(clippy::arc_with_non_send_sync)]
     fn run_dagknight_test(k_max: KType, plan: DagPlan, base_name: &str) {
         let genesis_hash = plan.genesis.into();
 
@@ -747,8 +748,7 @@ mod tests {
 
         ghostdag_store.insert(genesis_hash, Arc::new(gd_manager.genesis_ghostdag_data())).unwrap();
 
-        let mut relations_stores = Vec::new();
-        relations_stores.push(relations.clone());
+        let relations_stores = vec![relations.clone()];
         let dk_executor = DagknightExecutor {
             genesis_hash,
             dagknight_store: dagknight_store.clone(),
