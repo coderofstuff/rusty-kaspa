@@ -88,7 +88,7 @@ pub struct DagknightExecutor<
     O: GhostdagStoreReader,
     D: HeaderStoreReader + 'static,
     E: RelationsStoreReader + Clone,
-    R: ReachabilityStoreReader + ?Sized + Clone,
+    R: ReachabilityStoreReader + Clone,
 > {
     genesis_hash: Hash,
     pub(super) dagknight_store: Arc<C>,
@@ -103,7 +103,7 @@ impl<
         O: GhostdagStoreReader,
         D: HeaderStoreReader,
         E: RelationsStoreReader + Clone,
-        R: ReachabilityStoreReader + ?Sized + Clone,
+        R: ReachabilityStoreReader + Clone,
     > DagknightExecutor<C, O, D, E, R>
 {
     pub fn dagknight(&self, parents: &[Hash]) -> Hash {
@@ -361,7 +361,7 @@ impl<
 
         // NOTE: This is how I'm doing the "conditioned" to be in agreement
         let selected_parent_in_group = conflict_manager.find_selected_parent(subgroup.iter().copied());
-        
+
         // This would represent the blue work covered by the diamond <root, tips>
         // where SP is guaranteed to be in subgroup
         conflict_manager.k_colouring(tips, ghostdag_k, Some(selected_parent_in_group))

@@ -35,7 +35,7 @@ use crate::{
 pub struct ConflictZoneManager<
     S: DagknightStore + DagknightStoreReader,
     Q: RelationsStoreReader,
-    R: ReachabilityStoreReader + ?Sized + Clone,
+    R: ReachabilityStoreReader + Clone,
     T: HeaderStoreReader,
 > {
     k: KType,
@@ -46,12 +46,8 @@ pub struct ConflictZoneManager<
     headers_store: Arc<T>,
 }
 
-impl<
-        S: DagknightStore + DagknightStoreReader,
-        Q: RelationsStoreReader,
-        R: ReachabilityStoreReader + ?Sized + Clone,
-        T: HeaderStoreReader,
-    > ConflictZoneManager<S, Q, R, T>
+impl<S: DagknightStore + DagknightStoreReader, Q: RelationsStoreReader, R: ReachabilityStoreReader + Clone, T: HeaderStoreReader>
+    ConflictZoneManager<S, Q, R, T>
 {
     pub fn new(
         k: KType,
