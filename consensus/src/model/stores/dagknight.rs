@@ -69,7 +69,7 @@ impl std::hash::Hash for DagknightKey {
 
 impl PartialEq for DagknightKey {
     fn eq(&self, other: &Self) -> bool {
-        return self.pov_hash == other.pov_hash && self.root_hash == other.root_hash && self.k == other.k;
+        self.pov_hash == other.pov_hash && self.root_hash == other.root_hash && self.k == other.k
     }
 }
 
@@ -91,10 +91,10 @@ impl DagknightStoreReader for MemoryDagknightStore {
 
     fn get_data(&self, key: DagknightKey) -> Result<Arc<GhostdagData>, StoreError> {
         if let Some(pov_block_dk_data) = self.dk_map.borrow().get(&key) {
-            return Ok(pov_block_dk_data.clone());
+            Ok(pov_block_dk_data.clone())
         } else {
-            return Err(StoreError::KeyNotFound(DbKey::new(DatabaseStorePrefixes::DagKnight.as_ref(), key)));
-        };
+            Err(StoreError::KeyNotFound(DbKey::new(DatabaseStorePrefixes::DagKnight.as_ref(), key)))
+        }
     }
 }
 

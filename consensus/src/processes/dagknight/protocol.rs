@@ -272,7 +272,7 @@ impl<
             }
         }
 
-        return zone_work;
+        zone_work
     }
 
     // Calculates the rank of the subgroup over the region: <root, tips>
@@ -361,10 +361,10 @@ impl<
 
         // NOTE: This is how I'm doing the "conditioned" to be in agreement
         let selected_parent_in_group = conflict_manager.find_selected_parent(subgroup.iter().copied());
-        let sp_virtual_gd = conflict_manager.k_colouring(&tips, ghostdag_k, Some(selected_parent_in_group));
+        
         // This would represent the blue work covered by the diamond <root, tips>
         // where SP is guaranteed to be in subgroup
-        sp_virtual_gd
+        conflict_manager.k_colouring(tips, ghostdag_k, Some(selected_parent_in_group))
     }
 }
 
@@ -613,7 +613,7 @@ impl Ord for RankValue {
             return ordering;
         }
 
-        return self.k.cmp(&other.k);
+        self.k.cmp(&other.k)
     }
 }
 

@@ -67,16 +67,13 @@ impl<
     pub fn has(&self, pov_hash: Hash) -> bool {
         let key = self.get_key(pov_hash);
 
-        match self.dagknight_store.get_data(key) {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        self.dagknight_store.get_data(key).is_ok()
     }
 
     pub fn insert(&self, pov_hash: Hash, gd: Arc<GhostdagData>) -> Result<(), StoreError> {
         let key = self.get_key(pov_hash);
 
-        Ok(self.dagknight_store.insert(key, gd)?)
+        self.dagknight_store.insert(key, gd)
     }
 
     fn get_key(&self, pov_hash: Hash) -> DagknightKey {
@@ -110,7 +107,7 @@ impl<
     pub fn get_data(&self, pov_hash: Hash) -> Result<Arc<GhostdagData>, StoreError> {
         let key = self.get_key(pov_hash);
 
-        Ok(self.dagknight_store.get_data(key)?)
+        self.dagknight_store.get_data(key)
     }
 
     pub fn k_colouring(&self, parents: &[Hash], k: KType, custom_selected_parent: Option<Hash>) -> GhostdagData {

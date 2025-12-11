@@ -14,7 +14,7 @@ pub trait ReachabilityService {
     fn is_chain_ancestor_of(&self, this: Hash, queried: Hash) -> bool;
 
     fn is_chain_ancestor_of_all(&self, this: Hash, queried: &[Hash]) -> bool;
-    
+
     /// Result version of [`Self::is_dag_ancestor_of`] (avoids unwrapping internally)
     fn is_dag_ancestor_of_result(&self, this: Hash, queried: Hash) -> Result<bool>;
 
