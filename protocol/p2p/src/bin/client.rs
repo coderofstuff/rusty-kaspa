@@ -12,7 +12,7 @@ async fn main() {
         kaspa_p2p_lib::Hub::new(),
         initializer,
         Default::default(),
-        Arc::new(DirectMetadataFactory::default()),
+        Arc::new(DirectMetadataFactory),
         Arc::new(kaspa_p2p_lib::TcpConnector),
     );
     // [1] - connect 128 peers + flows

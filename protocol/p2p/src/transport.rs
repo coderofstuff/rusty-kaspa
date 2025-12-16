@@ -8,17 +8,14 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 /// How a connection reached us; used for accounting and relay budgeting.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum PathKind {
     Direct,
-    Relay { relay_id: Option<String> },
+    Relay {
+        relay_id: Option<String>,
+    },
+    #[default]
     Unknown,
-}
-
-impl Default for PathKind {
-    fn default() -> Self {
-        PathKind::Unknown
-    }
 }
 
 /// Capabilities advertised by the remote transport.
@@ -72,6 +69,19 @@ impl TransportMetadata {
     }
 }
 
+/// Abstract transport connector used by the P2P connection handler.
+///
+/// This trait allows bridging different underlying transports (e.g., TCP, libp2p)
+/// into the Router without coupling the handler to a specific transport.
+pub trait TransportConnector: Send + Sync {
+    type Error: Send + 'static;
+    type Future<'a>: Future<Output = Result<(Arc<Router>, TransportMetadata, PeerKey), Self::Error>> + Send
+    where
+        Self: 'a;
+
+    fn connect<'a>(&'a self, address: NetAddress) -> Self::Future<'a>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,17 +125,4 @@ mod tests {
         let metadata = TransportMetadata::default();
         assert!(metadata.synthetic_socket_addr().is_none());
     }
-}
-
-/// Abstract transport connector used by the P2P connection handler.
-///
-/// This trait allows bridging different underlying transports (e.g., TCP, libp2p)
-/// into the Router without coupling the handler to a specific transport.
-pub trait TransportConnector: Send + Sync {
-    type Error: Send + 'static;
-    type Future<'a>: Future<Output = Result<(Arc<Router>, TransportMetadata, PeerKey), Self::Error>> + Send
-    where
-        Self: 'a;
-
-    fn connect<'a>(&'a self, address: NetAddress) -> Self::Future<'a>;
 }

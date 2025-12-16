@@ -139,7 +139,7 @@ impl NetworkBehaviour for DcutrBootstrapBehaviour {
         _: &libp2p::Multiaddr,
         _: &libp2p::Multiaddr,
     ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
-        Ok(DcutrAdvertiseHandler::default())
+        Ok(DcutrAdvertiseHandler)
     }
 
     fn handle_established_outbound_connection(
@@ -150,7 +150,7 @@ impl NetworkBehaviour for DcutrBootstrapBehaviour {
         _: libp2p::core::Endpoint,
         _: libp2p::core::transport::PortUse,
     ) -> Result<Self::ConnectionHandler, swarm::ConnectionDenied> {
-        Ok(DcutrAdvertiseHandler::default())
+        Ok(DcutrAdvertiseHandler)
     }
 
     fn on_swarm_event(&mut self, event: swarm::behaviour::FromSwarm) {
@@ -414,8 +414,11 @@ fn build_transport(
     // Configure yamux with large buffers to support high throughput (e.g. block sync) over hole-punched links
     let yamux_config = {
         let mut cfg = yamux::Config::default();
-        cfg.set_receive_window_size(32 * 1024 * 1024); // 32 MiB
-        cfg.set_max_buffer_size(32 * 1024 * 1024);
+        #[allow(deprecated)]
+        {
+            cfg.set_receive_window_size(32 * 1024 * 1024); // 32 MiB
+            cfg.set_max_buffer_size(32 * 1024 * 1024);
+        }
         // TODO(libp2p upgrade): migrate to the replacement yamux config API once these setters are removed upstream.
         cfg
     };
@@ -437,8 +440,11 @@ fn build_tcp_transport(identity: &Libp2pIdentity) -> Result<(BoxedTransport, swa
 
     let yamux_config = {
         let mut cfg = yamux::Config::default();
-        cfg.set_receive_window_size(32 * 1024 * 1024); // 32 MiB
-        cfg.set_max_buffer_size(32 * 1024 * 1024);
+        #[allow(deprecated)]
+        {
+            cfg.set_receive_window_size(32 * 1024 * 1024); // 32 MiB
+            cfg.set_max_buffer_size(32 * 1024 * 1024);
+        }
         // TODO(libp2p upgrade): migrate to the replacement yamux config API once these setters are removed upstream.
         cfg
     };

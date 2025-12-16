@@ -114,13 +114,13 @@ async fn dcutr_hole_punches_locally_via_relay() {
         if let Some(addr) = relay_addr.clone() {
             if a_circuit.is_none() {
                 let mut ma = addr.clone();
-                ma.push(Protocol::P2p(relay_id.peer_id.into()));
+                ma.push(Protocol::P2p(relay_id.peer_id));
                 ma.push(Protocol::P2pCircuit);
                 a.listen_on(ma.clone()).expect("a reservation listen");
             }
             if b_circuit.is_none() {
                 let mut ma = addr.clone();
-                ma.push(Protocol::P2p(relay_id.peer_id.into()));
+                ma.push(Protocol::P2p(relay_id.peer_id));
                 ma.push(Protocol::P2pCircuit);
                 b.listen_on(ma.clone()).expect("b reservation listen");
             }

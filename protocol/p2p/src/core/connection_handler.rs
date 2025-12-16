@@ -451,7 +451,7 @@ where
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "libp2p grpc handshake timed out"))?;
 
-    let (send_request, connection) = handshake.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+    let (send_request, connection) = handshake.map_err(std::io::Error::other)?;
 
     tokio::spawn(async move {
         if let Err(err) = connection.await {
@@ -584,13 +584,8 @@ mod tests {
         let hub = Hub::new();
         let (hub_tx, hub_rx) = mpsc::channel(Adaptor::hub_channel_size());
         hub.clone().start_event_loop(hub_rx, initializer.clone());
-        let handler = ConnectionHandler::new(
-            hub_tx,
-            initializer.clone(),
-            counters,
-            Arc::new(DirectMetadataFactory::default()),
-            Arc::new(TcpConnector),
-        );
+        let handler =
+            ConnectionHandler::new(hub_tx, initializer.clone(), counters, Arc::new(DirectMetadataFactory), Arc::new(TcpConnector));
 
         let (client_half, server_half) = duplex(8 * 1024);
         let remote_addr = SocketAddr::from(([127, 0, 0, 1], 4000));
@@ -598,7 +593,7 @@ mod tests {
         let (incoming_tx, incoming_rx) = mpsc::channel(1);
         incoming_tx.send(TestServerIo::new(server_half, remote_addr)).await.expect("send server stream");
         drop(incoming_tx);
-        let incoming_stream = ReceiverStream::new(incoming_rx).map(|io| Ok::<_, std::io::Error>(io));
+        let incoming_stream = ReceiverStream::new(incoming_rx).map(Ok::<_, std::io::Error>);
         handler.serve_with_incoming(incoming_stream);
 
         let metadata = TransportMetadata {
@@ -665,13 +660,8 @@ mod tests {
         let hub = Hub::new();
         let (hub_tx, hub_rx) = mpsc::channel(Adaptor::hub_channel_size());
         hub.clone().start_event_loop(hub_rx, initializer.clone());
-        let handler = ConnectionHandler::new(
-            hub_tx,
-            initializer.clone(),
-            counters,
-            Arc::new(DirectMetadataFactory::default()),
-            Arc::new(TcpConnector),
-        );
+        let handler =
+            ConnectionHandler::new(hub_tx, initializer.clone(), counters, Arc::new(DirectMetadataFactory), Arc::new(TcpConnector));
 
         let metadata = TransportMetadata {
             libp2p_peer_id: Some("peer-meta-test".to_string()),
@@ -688,7 +678,7 @@ mod tests {
         let info = MetadataConnectInfo::new(None, metadata.clone());
         incoming_tx.send(MetaServerIo::new(server_half, info)).await.expect("send server stream");
         drop(incoming_tx);
-        let incoming_stream = ReceiverStream::new(incoming_rx).map(|io| Ok::<_, std::io::Error>(io));
+        let incoming_stream = ReceiverStream::new(incoming_rx).map(Ok::<_, std::io::Error>);
         handler.serve_with_incoming(incoming_stream);
 
         let router = handler.connect_with_stream(client_half, metadata.clone()).await.expect("connect via stream");
@@ -731,20 +721,15 @@ mod tests {
             server_tx,
             server_initializer.clone(),
             counters.clone(),
-            Arc::new(DirectMetadataFactory::default()),
+            Arc::new(DirectMetadataFactory),
             Arc::new(TcpConnector),
         );
 
         let client_hub = Hub::new();
         let (client_tx, client_rx) = mpsc::channel(Adaptor::hub_channel_size());
         client_hub.clone().start_event_loop(client_rx, client_initializer.clone());
-        let client_handler = ConnectionHandler::new(
-            client_tx,
-            client_initializer,
-            counters,
-            Arc::new(DirectMetadataFactory::default()),
-            Arc::new(TcpConnector),
-        );
+        let client_handler =
+            ConnectionHandler::new(client_tx, client_initializer, counters, Arc::new(DirectMetadataFactory), Arc::new(TcpConnector));
 
         let (client_half, server_half) = duplex(8 * 1024);
         let metadata = TransportMetadata {
@@ -759,7 +744,7 @@ mod tests {
         let (incoming_tx, incoming_rx) = mpsc::channel(1);
         incoming_tx.send(MetaServerIo::new(server_half, info)).await.expect("send server stream");
         drop(incoming_tx);
-        let incoming_stream = ReceiverStream::new(incoming_rx).map(|io| Ok::<_, std::io::Error>(io));
+        let incoming_stream = ReceiverStream::new(incoming_rx).map(Ok::<_, std::io::Error>);
         server_handler.serve_with_incoming(incoming_stream);
 
         let start = std::time::Instant::now();
@@ -792,20 +777,15 @@ mod tests {
             server_tx,
             initializer.clone(),
             counters.clone(),
-            Arc::new(DirectMetadataFactory::default()),
+            Arc::new(DirectMetadataFactory),
             Arc::new(TcpConnector),
         );
 
         let client_hub = Hub::new();
         let (client_tx, client_rx) = mpsc::channel(Adaptor::hub_channel_size());
         client_hub.clone().start_event_loop(client_rx, initializer.clone());
-        let client_handler = ConnectionHandler::new(
-            client_tx,
-            initializer.clone(),
-            counters,
-            Arc::new(DirectMetadataFactory::default()),
-            Arc::new(TcpConnector),
-        );
+        let client_handler =
+            ConnectionHandler::new(client_tx, initializer.clone(), counters, Arc::new(DirectMetadataFactory), Arc::new(TcpConnector));
 
         let (client_half, server_half) = duplex(8 * 1024);
 
@@ -831,12 +811,12 @@ mod tests {
         let (incoming_tx, incoming_rx) = mpsc::channel(1);
         incoming_tx.send(MetaServerIo::new(server_half, info)).await.expect("send server stream");
         drop(incoming_tx);
-        let incoming_stream = ReceiverStream::new(incoming_rx).map(|io| Ok::<_, std::io::Error>(io));
+        let incoming_stream = ReceiverStream::new(incoming_rx).map(Ok::<_, std::io::Error>);
         server_handler.serve_with_incoming(incoming_stream);
 
         let router = client_handler.connect_with_stream(client_half, client_metadata.clone()).await.expect("handshake should succeed");
         assert_eq!(router.metadata().path, client_metadata.path);
-        assert_eq!(router.metadata().capabilities.libp2p, true);
+        assert!(router.metadata().capabilities.libp2p);
 
         router.close().await;
     }

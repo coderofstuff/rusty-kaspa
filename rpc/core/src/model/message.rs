@@ -2473,18 +2473,13 @@ impl Deserializer for GetSyncStatusResponse {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RpcLibp2pMode {
+    #[default]
     Off,
     Full,
     Helper,
-}
-
-impl Default for RpcLibp2pMode {
-    fn default() -> Self {
-        RpcLibp2pMode::Off
-    }
 }
 
 impl Serializer for RpcLibp2pMode {

@@ -50,15 +50,9 @@ pub enum Libp2pError {
 }
 
 /// Placeholder libp2p transport connector. Will be expanded with real libp2p dial/listen logic.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Libp2pConnector {
     pub config: Config,
-}
-
-impl Default for Libp2pConnector {
-    fn default() -> Self {
-        Self { config: Config::default() }
-    }
 }
 
 impl Libp2pConnector {
@@ -106,8 +100,7 @@ mod tests {
 
     #[test]
     fn libp2p_connect_enabled_stubbed() {
-        let mut cfg = Config::default();
-        cfg.mode = crate::Mode::Full;
+        let cfg = Config { mode: crate::Mode::Full, ..Config::default() };
         let connector = Libp2pConnector::new(cfg);
         let addr = kaspa_utils::networking::NetAddress::from_str("127.0.0.1:16110").unwrap();
         let res = block_on(connector.connect(addr));
@@ -134,8 +127,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let key_path = dir.path().join("id.key");
-        let mut cfg = Config::default();
-        cfg.identity = crate::Identity::Persisted(key_path.clone());
+        let cfg = Config { identity: crate::Identity::Persisted(key_path.clone()), ..Config::default() };
         let id1 = Libp2pIdentity::from_config(&cfg).expect("persisted identity");
         let id2 = Libp2pIdentity::from_config(&cfg).expect("persisted identity reload");
         assert_eq!(id1.peer_id, id2.peer_id);
@@ -280,7 +272,7 @@ mod tests {
             let calls = self.calls.clone();
             Box::pin(async move {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err(ConnectionError::ProtocolError(ProtocolError::Other("fallback".into())))
+                Err(ConnectionError::ProtocolError(ProtocolError::Other("fallback")))
             })
         }
     }
@@ -300,7 +292,7 @@ mod tests {
             hub,
             Arc::new(NoopInitializer),
             Arc::new(TowerConnectionCounters::default()),
-            Arc::new(kaspa_p2p_lib::DirectMetadataFactory::default()),
+            Arc::new(kaspa_p2p_lib::DirectMetadataFactory),
             Arc::new(kaspa_p2p_lib::TcpConnector),
         );
         adaptor.connection_handler()
@@ -331,10 +323,10 @@ mod tests {
         DialOpts::unknown_peer_id().address(default_listen_addr()).build().connection_id()
     }
 
-    fn insert_relay_pending(
-        driver: &mut SwarmDriver,
-        peer_id: PeerId,
-    ) -> (StreamRequestId, oneshot::Receiver<Result<(TransportMetadata, StreamDirection, BoxedLibp2pStream), Libp2pError>>) {
+    type PendingDialResult = Result<(TransportMetadata, StreamDirection, BoxedLibp2pStream), Libp2pError>;
+    type PendingDialReceiver = oneshot::Receiver<PendingDialResult>;
+
+    fn insert_relay_pending(driver: &mut SwarmDriver, peer_id: PeerId) -> (StreamRequestId, PendingDialReceiver) {
         let (tx, rx) = oneshot::channel();
         let req_id = make_request_id();
         driver
@@ -351,12 +343,20 @@ mod tests {
         let (req1, rx1) = insert_relay_pending(&mut driver, peer);
         let (req2, rx2) = insert_relay_pending(&mut driver, peer);
 
-        driver.pending_dials.remove(&req1).map(|pending| {
-            let _ = pending.respond_to.send(Ok((TransportMetadata::default(), StreamDirection::Outbound, make_test_stream(drops.clone()))));
-        });
-        driver.pending_dials.remove(&req2).map(|pending| {
-            let _ = pending.respond_to.send(Ok((TransportMetadata::default(), StreamDirection::Outbound, make_test_stream(drops.clone()))));
-        });
+        if let Some(pending) = driver.pending_dials.remove(&req1) {
+            let _ = pending.respond_to.send(Ok((
+                TransportMetadata::default(),
+                StreamDirection::Outbound,
+                make_test_stream(drops.clone()),
+            )));
+        }
+        if let Some(pending) = driver.pending_dials.remove(&req2) {
+            let _ = pending.respond_to.send(Ok((
+                TransportMetadata::default(),
+                StreamDirection::Outbound,
+                make_test_stream(drops.clone()),
+            )));
+        }
 
         assert!(driver.pending_dials.is_empty(), "all pending dials should be cleared");
         assert!(rx1.await.unwrap().is_ok());
@@ -372,9 +372,13 @@ mod tests {
         let (req2, rx2) = insert_relay_pending(&mut driver, peer);
 
         driver.fail_pending(req1, "first failed");
-        driver.pending_dials.remove(&req2).map(|pending| {
-            let _ = pending.respond_to.send(Ok((TransportMetadata::default(), StreamDirection::Outbound, make_test_stream(drops.clone()))));
-        });
+        if let Some(pending) = driver.pending_dials.remove(&req2) {
+            let _ = pending.respond_to.send(Ok((
+                TransportMetadata::default(),
+                StreamDirection::Outbound,
+                make_test_stream(drops.clone()),
+            )));
+        }
 
         assert!(driver.pending_dials.is_empty());
         assert!(rx1.await.unwrap().is_err());
@@ -468,7 +472,7 @@ impl Libp2pOutboundConnector {
             return Some(provider.clone());
         }
         if let Some(cell) = &self.provider_cell {
-            return cell.get().map(|p| p.clone());
+            return cell.get().cloned();
         }
         None
     }
@@ -598,14 +602,15 @@ impl ReservationHandle {
     }
 }
 
+pub type Libp2pListenStream = (TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream);
+pub type Libp2pListenFuture<'a> = BoxFuture<'a, Result<Libp2pListenStream, Libp2pError>>;
+
 /// A provider for libp2p streams (dialed or accepted). The real implementation
 /// will bridge to the libp2p swarm and return a stream plus transport metadata.
 pub trait Libp2pStreamProvider: Send + Sync {
     fn dial<'a>(&'a self, address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
     fn dial_multiaddr<'a>(&'a self, address: Multiaddr) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
-    fn listen<'a>(
-        &'a self,
-    ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>>;
+    fn listen<'a>(&'a self) -> Libp2pListenFuture<'a>;
     fn reserve<'a>(&'a self, target: Multiaddr) -> BoxFuture<'a, Result<ReservationHandle, Libp2pError>>;
     fn shutdown(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
@@ -660,7 +665,7 @@ fn load_or_generate_key(path: &Path) -> io::Result<Keypair> {
 }
 
 fn map_identity_err(err: impl ToString) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, err.to_string())
+    io::Error::other(err.to_string())
 }
 
 /// Translate a NetAddress (ip:port) into a libp2p multiaddr.
@@ -895,10 +900,20 @@ enum SwarmCommand {
         address: Multiaddr,
         respond_to: oneshot::Sender<Result<(TransportMetadata, StreamDirection, BoxedLibp2pStream), Libp2pError>>,
     },
-    EnsureListening { respond_to: oneshot::Sender<Result<(), Libp2pError>> },
-    Reserve { target: Multiaddr, respond_to: oneshot::Sender<Result<ListenerId, Libp2pError>> },
-    ReleaseReservation { listener_id: ListenerId, respond_to: oneshot::Sender<()> },
-    PeersSnapshot { respond_to: oneshot::Sender<Vec<PeerSnapshot>> },
+    EnsureListening {
+        respond_to: oneshot::Sender<Result<(), Libp2pError>>,
+    },
+    Reserve {
+        target: Multiaddr,
+        respond_to: oneshot::Sender<Result<ListenerId, Libp2pError>>,
+    },
+    ReleaseReservation {
+        listener_id: ListenerId,
+        respond_to: oneshot::Sender<()>,
+    },
+    PeersSnapshot {
+        respond_to: oneshot::Sender<Vec<PeerSnapshot>>,
+    },
 }
 
 struct DialRequest {
@@ -1173,15 +1188,16 @@ impl SwarmDriver {
                     Err(e) if is_attempts_exceeded(e) => {
                         // Check if we have an active DIRECT connection that was upgraded via DCUtR
                         let is_spurious = self.connections.values().any(|conn| {
-                            conn.peer_id == event.remote_peer_id
-                                && matches!(conn.path, PathKind::Direct)
-                                && conn.dcutr_upgraded
+                            conn.peer_id == event.remote_peer_id && matches!(conn.path, PathKind::Direct) && conn.dcutr_upgraded
                         });
 
                         if is_spurious {
                             debug!(
                                 "Ignored spurious DCUtR error for connected peer {}: {:?} (swarm has {} external addrs: {:?})",
-                                event.remote_peer_id, e, external_addrs.len(), external_addrs
+                                event.remote_peer_id,
+                                e,
+                                external_addrs.len(),
+                                external_addrs
                             );
                         } else {
                             info!(
@@ -1331,10 +1347,7 @@ impl SwarmDriver {
                     }
                     info!("libp2p_bridge: accepting inbound stream on DCUtR connection (role_override=Listener) from {peer_id}");
                 }
-                info!(
-                    "libp2p_bridge: StreamEvent::Inbound peer={} endpoint={:?}",
-                    peer_id, endpoint
-                );
+                info!("libp2p_bridge: StreamEvent::Inbound peer={} endpoint={:?}", peer_id, endpoint);
                 let mut metadata = metadata_from_endpoint(&peer_id, &endpoint);
                 // If endpoint-based path detection returned Unknown, fall back to our
                 // connection records which track whether a connection uses a relay circuit.
@@ -1352,9 +1365,7 @@ impl SwarmDriver {
             StreamEvent::Outbound { peer_id, request_id, endpoint, stream, .. } => {
                 let metadata = metadata_from_endpoint(&peer_id, &endpoint);
                 let direction = match &endpoint {
-                    libp2p::core::ConnectedPoint::Dialer { role_override, .. }
-                        if matches!(role_override, libp2p::core::Endpoint::Listener) =>
-                    {
+                    libp2p::core::ConnectedPoint::Dialer { role_override: libp2p::core::Endpoint::Listener, .. } => {
                         info!("libp2p_bridge: DCUtR role_override detected, treating outbound stream as inbound (h2 server) for {peer_id}");
                         StreamDirection::Inbound
                     }
@@ -1386,10 +1397,7 @@ impl SwarmDriver {
             self.swarm.behaviour_mut().streams.request_stream(peer_id, connection_id, connection_id);
             return;
         }
-        info!(
-            "libp2p_bridge: request_stream_bridge peer={} conn_id={:?} (requesting substream)",
-            peer_id, connection_id
-        );
+        info!("libp2p_bridge: request_stream_bridge peer={} conn_id={:?} (requesting substream)", peer_id, connection_id);
 
         let (respond_to, rx) = oneshot::channel();
         self.pending_dials.insert(connection_id, DialRequest { respond_to, started_at: Instant::now(), via: DialVia::Direct });
@@ -1640,7 +1648,7 @@ fn extract_relay_peer(addr: &Multiaddr) -> Option<PeerId> {
     let components: Vec<_> = addr.iter().collect();
     for window in components.windows(2) {
         if let [Protocol::P2p(peer), Protocol::P2pCircuit] = window {
-            return Some(peer.clone());
+            return Some(*peer);
         }
     }
     None
@@ -1783,7 +1791,7 @@ impl Libp2pStreamProvider for MockProvider {
         Box::pin(async move {
             self.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut guard = self.responses.lock().expect("responses");
-            let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+            let resp = guard.pop_front().unwrap_or(Err(Libp2pError::ProviderUnavailable));
             resp.map(|_| (TransportMetadata::default(), make_test_stream(self.drops.clone())))
         })
     }
@@ -1795,7 +1803,7 @@ impl Libp2pStreamProvider for MockProvider {
         Box::pin(async move {
             self.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut guard = self.responses.lock().expect("responses");
-            let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+            let resp = guard.pop_front().unwrap_or(Err(Libp2pError::ProviderUnavailable));
             resp.map(|_| (TransportMetadata::default(), make_test_stream(self.drops.clone())))
         })
     }
@@ -1815,7 +1823,7 @@ impl Libp2pStreamProvider for MockProvider {
         Box::pin(async move {
             self.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut guard = self.responses.lock().expect("responses");
-            let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+            let resp = guard.pop_front().unwrap_or(Err(Libp2pError::ProviderUnavailable));
             resp.map(|_| ReservationHandle::noop())
         })
     }

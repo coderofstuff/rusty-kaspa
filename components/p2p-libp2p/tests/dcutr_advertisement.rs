@@ -31,9 +31,8 @@ mod tests {
         swarm1.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
 
         let addr1 = loop {
-            match swarm1.select_next_some().await {
-                SwarmEvent::NewListenAddr { address, .. } => break address,
-                _ => {}
+            if let SwarmEvent::NewListenAddr { address, .. } = swarm1.select_next_some().await {
+                break address;
             }
         };
 

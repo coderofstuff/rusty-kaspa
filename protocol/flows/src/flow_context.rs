@@ -306,6 +306,7 @@ impl Deref for FlowContext {
 }
 
 impl FlowContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         consensus_manager: Arc<ConsensusManager>,
         address_manager: Arc<Mutex<AddressManager>>,

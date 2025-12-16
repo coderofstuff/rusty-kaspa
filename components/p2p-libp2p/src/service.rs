@@ -182,7 +182,7 @@ impl Libp2pService {
                     }
                     Err(err) => {
                         warn!("libp2p inbound listen error: {err}");
-                        let _ = tx.send(Err(io::Error::new(io::ErrorKind::Other, err.to_string()))).await;
+                        let _ = tx.send(Err(io::Error::other(err.to_string()))).await;
                         break;
                     }
                 }
@@ -200,50 +200,46 @@ async fn handle_helper_connection(mut stream: tokio::net::TcpStream, api: Helper
     let (reader, mut writer) = stream.split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
-    loop {
-        line.clear();
-        match tokio::time::timeout(HELPER_READ_TIMEOUT, reader.read_line(&mut line)).await {
-            Ok(Ok(bytes)) => {
-                if bytes == 0 {
-                    break;
-                }
+    match tokio::time::timeout(HELPER_READ_TIMEOUT, reader.read_line(&mut line)).await {
+        Ok(Ok(bytes)) => {
+            if bytes == 0 {
+                return;
             }
-            Ok(Err(err)) => {
-                warn!("libp2p helper read error: {err}");
-                if err.kind() == io::ErrorKind::InvalidData {
-                    let resp = HelperApi::error_response(&HelperError::Invalid("invalid utf-8".into()));
-                    let _ = writer.write_all(resp.as_bytes()).await;
-                    let _ = writer.write_all(b"\n").await;
-                }
-                break;
-            }
-            Err(_) => {
-                warn!("libp2p helper read timeout after {:?}", HELPER_READ_TIMEOUT);
-                let _ = writer.write_all(br#"{"ok":false,"error":"timeout waiting for request"}"#).await;
+        }
+        Ok(Err(err)) => {
+            warn!("libp2p helper read error: {err}");
+            if err.kind() == io::ErrorKind::InvalidData {
+                let resp = HelperApi::error_response(&HelperError::Invalid("invalid utf-8".into()));
+                let _ = writer.write_all(resp.as_bytes()).await;
                 let _ = writer.write_all(b"\n").await;
-                break;
             }
+            return;
         }
-
-        if line.len() > HELPER_MAX_LINE {
-            warn!("libp2p helper request exceeded max length ({} bytes)", HELPER_MAX_LINE);
-            let _ = writer.write_all(br#"{"ok":false,"error":"request too long"}"#).await;
+        Err(_) => {
+            warn!("libp2p helper read timeout after {:?}", HELPER_READ_TIMEOUT);
+            let _ = writer.write_all(br#"{"ok":false,"error":"timeout waiting for request"}"#).await;
             let _ = writer.write_all(b"\n").await;
-            break;
+            return;
         }
-
-        let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
-        let resp_str = match api.handle_json(trimmed).await {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("libp2p helper request error: {e}");
-                HelperApi::error_response(&e)
-            }
-        };
-        let _ = writer.write_all(resp_str.as_bytes()).await;
-        let _ = writer.write_all(b"\n").await;
-        break;
     }
+
+    if line.len() > HELPER_MAX_LINE {
+        warn!("libp2p helper request exceeded max length ({} bytes)", HELPER_MAX_LINE);
+        let _ = writer.write_all(br#"{"ok":false,"error":"request too long"}"#).await;
+        let _ = writer.write_all(b"\n").await;
+        return;
+    }
+
+    let trimmed = line.trim_end_matches(&['\r', '\n'][..]);
+    let resp_str = match api.handle_json(trimmed).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("libp2p helper request error: {e}");
+            HelperApi::error_response(&e)
+        }
+    };
+    let _ = writer.write_all(resp_str.as_bytes()).await;
+    let _ = writer.write_all(b"\n").await;
 }
 
 async fn reservation_worker(
@@ -670,7 +666,7 @@ mod tests {
             Box::pin(async move {
                 self.attempts.fetch_add(1, Ordering::SeqCst);
                 let mut guard = self.responses.lock().expect("responses");
-                let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+                let resp = guard.pop_front().unwrap_or(Err(Libp2pError::ProviderUnavailable));
                 resp.map(|_| (TransportMetadata::default(), make_stream(self.drops.clone())))
             })
         }
@@ -682,7 +678,7 @@ mod tests {
             Box::pin(async move {
                 self.attempts.fetch_add(1, Ordering::SeqCst);
                 let mut guard = self.responses.lock().expect("responses");
-                let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+                let resp = guard.pop_front().unwrap_or(Err(Libp2pError::ProviderUnavailable));
                 resp.map(|_| (TransportMetadata::default(), make_stream(self.drops.clone())))
             })
         }
@@ -704,7 +700,7 @@ mod tests {
             Box::pin(async move {
                 self.attempts.fetch_add(1, Ordering::SeqCst);
                 let mut guard = self.responses.lock().expect("responses");
-                let resp = guard.pop_front().unwrap_or_else(|| Err(Libp2pError::ProviderUnavailable));
+                let resp = guard.pop_front().unwrap_or(Err(Libp2pError::ProviderUnavailable));
                 let releases = self.releases.clone();
                 resp.map(|_| {
                     ReservationHandle::new(async move {

@@ -35,8 +35,10 @@ pub use workflow_wasm::serde::to_value;
 // When libp2p is not compiled in, provide dummy request/response types so the
 // generated interface still compiles under `--no-default-features`.
 #[cfg(not(feature = "libp2p"))]
+#[allow(dead_code)]
 type IGetLibp2pStatusRequest = ();
 #[cfg(not(feature = "libp2p"))]
+#[allow(dead_code)]
 type IGetLibp2pStatusResponse = ();
 
 declare! {

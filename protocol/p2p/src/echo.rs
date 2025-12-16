@@ -163,7 +163,7 @@ mod tests {
             Hub::new(),
             Arc::new(EchoFlowInitializer::new()),
             Default::default(),
-            Arc::new(DirectMetadataFactory::default()),
+            Arc::new(DirectMetadataFactory),
             Arc::new(kaspa_p2p_lib::TcpConnector),
         )
         .unwrap();
@@ -174,7 +174,7 @@ mod tests {
             Hub::new(),
             Arc::new(EchoFlowInitializer::new()),
             Default::default(),
-            Arc::new(DirectMetadataFactory::default()),
+            Arc::new(DirectMetadataFactory),
             Arc::new(kaspa_p2p_lib::TcpConnector),
         )
         .unwrap();
