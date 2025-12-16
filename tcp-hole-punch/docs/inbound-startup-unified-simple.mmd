@@ -1,0 +1,62 @@
+graph LR
+    %% Proposed wiring overview (simplified).
+
+    subgraph "kaspad"
+        Startup[Startup]
+        Runtime["P2pRuntime wiring"]
+        TCPIn[TcpInboundService]
+        OverlayIn[OverlayInboundService]
+        Upg[UpgradeCoordinator]
+    end
+
+    subgraph "protocol/flows"
+        Policy["FlowContext (P2pPolicy)"]
+    end
+
+    subgraph "protocol/p2p"
+        A[Adaptor]
+        CH[ConnectionHandler]
+        Hub[Hub]
+        OC{{OutboundConnector}}
+        CC{{ConnectionControl}}
+    end
+
+    subgraph "Tonic/TCP"
+        TonicServerTCP["Tonic server over TCP"]
+    end
+
+    subgraph "components/p2p-libp2p"
+        Lp2pSvc[Libp2pService]
+    end
+
+    subgraph "Tonic/Libp2p"
+        TonicServerLp2p["Tonic server over libp2p stream"]
+    end
+
+    Startup --> Runtime
+    Runtime --> Policy
+    Runtime --> A
+    A --> CH
+    A --> Hub
+
+    Policy -->|initializer + metadata| CH
+    Policy -->|initializer| Hub
+
+    CH -->|dial| OC
+
+    Runtime -->|inject CC handle| Policy
+    Runtime -->|inject CC handle| Upg
+    A -->|implements| CC
+    Policy -->|enqueue close or replace| CC
+    Upg -->|enqueue promote redial| CC
+
+    Runtime --> TCPIn
+    TCPIn --> TonicServerTCP
+    TonicServerTCP -->|stream + metadata| CH
+
+    Runtime -->|libp2p enabled| OverlayIn
+    OverlayIn --> Lp2pSvc
+    Lp2pSvc --> TonicServerLp2p
+    TonicServerLp2p -->|stream + metadata| CH
+
+    Lp2pSvc -->|path upgraded| Upg

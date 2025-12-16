@@ -1,0 +1,132 @@
+graph LR
+    %% Proposed architecture (aspirational): startup and wiring live in kaspad; core P2P stays transport-agnostic.
+
+    %% =========================
+    %% kaspad (composition root)
+    %% =========================
+    subgraph "kaspad"
+        Startup[Startup]
+        Runtime["P2pRuntime wiring"]
+        TCPIn["TcpInboundService"]
+        OverlayIn["OverlayInboundService"]
+        Upg["UpgradeCoordinator"]
+    end
+
+    %% =========================
+    %% protocol/flows (policy)
+    %% =========================
+    subgraph "protocol/flows"
+        Policy["FlowContext (P2pPolicy)"]
+    end
+
+    %% =========================
+    %% protocol/p2p (core)
+    %% =========================
+    subgraph "protocol/p2p"
+        A[Adaptor]
+        CH["ConnectionHandler stream + TransportMetadata"]
+        Hub[Hub]
+        R[Router]
+        Cntrs["TowerConnectionCounters"]
+        CC{{"ConnectionControl handle"}}
+    end
+
+    %% =========================
+    %% protocol/p2p/connect (outbound seam)
+    %% =========================
+    subgraph "protocol/p2p/connect"
+        DirectOC["DirectConnector"]
+        OverlayOC["OverlayConnector"]
+        CompositeOC["CompositeOutboundConnector select + fallback"]
+        OC{{OutboundConnector}}
+    end
+
+    %% =========================
+    %% transports
+    %% =========================
+    subgraph "Tonic/TCP"
+        TonicServerTCP["Tonic server over TCP"]
+    end
+
+    subgraph "components/p2p-libp2p"
+        direction TB
+        Lp2pSvc["Libp2pService"]
+        LSP{{Libp2pStreamProvider}}
+        SSP["SwarmStreamProvider"]
+        SD[SwarmDriver]
+        Swarm["Libp2p Swarm"]
+    end
+
+    subgraph "Tonic/Libp2p"
+        TonicServerLp2p["Tonic server over libp2p stream"]
+    end
+
+    %% =========================
+    %% Core contract (stable)
+    %% =========================
+    subgraph "types"
+        TM["TransportMetadata: libp2p_peer_id peer_id reported_ip path capabilities"]
+    end
+
+    %% =========================
+    %% startup and wiring
+    %% =========================
+    Startup --> Runtime
+    Runtime -->|create| Policy
+    Runtime -->|create| Cntrs
+
+    Runtime -->|build| DirectOC
+    Runtime -->|build| OverlayOC
+    DirectOC --> CompositeOC
+    OverlayOC --> CompositeOC
+    CompositeOC --> OC
+
+    Runtime -->|create| Hub
+    Runtime -->|create| CH
+    Runtime -->|create| A
+    A -->|owns| Hub
+    A -->|owns| CH
+
+    Runtime -->|inject initializer| Hub
+    Runtime -->|inject initializer + metadata| CH
+    Runtime -->|inject CC handle| Policy
+    Runtime -->|inject CC handle| Upg
+    A -->|implements| CC
+
+    Cntrs -->|counters| CH
+    CH -->|dial| OC
+
+    %% =========================
+    %% inbound sources converge on ConnectionHandler
+    %% =========================
+    Runtime -->|start| TCPIn
+    TCPIn -->|serve| TonicServerTCP
+    TonicServerTCP -->|new conn calls message_stream| CH
+
+    Runtime -->|libp2p enabled start| OverlayIn
+    OverlayIn -->|start| Lp2pSvc
+    Lp2pSvc -->|start_inbound uses| LSP
+    LSP -->|implemented by| SSP
+    SSP --> SD
+    SD --> Swarm
+
+    OverlayIn -->|serve_with_incoming| TonicServerLp2p
+    Lp2pSvc -->|incoming stream + metadata| TonicServerLp2p
+    TonicServerLp2p -->|new stream calls message_stream| CH
+
+    %% =========================
+    %% common core handling
+    %% =========================
+    CH -->|message_stream creates| R
+    R -->|NewPeer| Hub
+    Hub -->|initialize_connection| Policy
+    Policy -->|handshake ok| R
+
+    %% =========================
+    %% promotion / replacement hooks
+    %% =========================
+    Lp2pSvc -->|path upgraded event| Upg
+    Policy -->|enqueue close or replace| CC
+    Upg -->|enqueue promote redial| CC
+
+    CH -.-> TM
