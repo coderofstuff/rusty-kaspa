@@ -3,7 +3,10 @@
 
 use chrono::{TimeZone, Utc};
 use std::{
+    env,
     mem::size_of,
+    path::PathBuf,
+    process,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -30,62 +33,31 @@ use kaspad_lib::daemon::{get_app_dir, CONSENSUS_DB, DEFAULT_DATA_DIR, META_DB, U
 fn main() {
     kaspa_core::log::init_logger(None, "");
     let network = NetworkId::new(NetworkType::Mainnet);
-    let app_dir = get_app_dir();
-    let db_dir = app_dir.join(network.to_prefixed()).join(DEFAULT_DATA_DIR);
-    let consensus_db_dir = db_dir.join(CONSENSUS_DB).join("consensus-002"); // check your own index
-                                                                            // let utxoindex_db_dir = db_dir.join(UTXOINDEX_DB);
-                                                                            // let meta_db_dir = db_dir.join(META_DB);
+    // Require a consensus DB path as the first argument. If not provided, print usage and exit.
+    // Usage: cargo run --package rocknroll --bin rocknroll -- <path-to-consensus-db>
+    let consensus_db_dir: PathBuf = match env::args().nth(1) {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let prog = env::args().next().unwrap_or_else(|| "rocknroll".to_string());
+            eprintln!("Usage: {} <consensus-db-path>", prog);
+            eprintln!("Example: {} /home/user/.rusty-kaspa/kaspa-mainnet/datadir/consensus/consensus-001", prog);
+            process::exit(1);
+        }
+    };
 
     let config = Arc::new(ConfigBuilder::new(network.into()).adjust_perf_params_to_consensus_params().build());
     let db =
         kaspa_database::prelude::ConnBuilder::default().with_db_path(consensus_db_dir).with_files_limit(128).build_readonly().unwrap();
 
     let storage = ConsensusStorage::new(db.clone(), config.clone());
-    let services = ConsensusServices::new(db, storage.clone(), config, Default::default(), Default::default());
-
-    let start_datetime = Utc.with_ymd_and_hms(2025, 10, 5, 0, 0, 0).unwrap();
-    let end_datetime = Utc.with_ymd_and_hms(2025, 10, 6, 0, 0, 0).unwrap();
-    let start: SystemTime = start_datetime.into();
-    let end: SystemTime = end_datetime.into();
 
     let pp = storage.pruning_point_store.read().pruning_point().unwrap();
     let sink = storage.lkg_virtual_state.load().ghostdag_data.selected_parent;
+    let retention_root = storage.pruning_point_store.read().retention_period_root().unwrap();
 
-    let (start, end) =
-        (start.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64, end.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
-    let mut count = 0;
-
-    let mut fee = 0;
-
-    for cb in services.reachability_service.forward_chain_iterator(pp, sink, false) {
-        let timestamp = storage.headers_store.get_timestamp(cb).unwrap();
-        if start <= timestamp && timestamp < end {
-            let ad = storage.acceptance_data_store.get(cb).unwrap();
-            let (cb_accepted_fees, mergeset_accepted_txs_count) = ad
-                .iter()
-                .map(|d| {
-                    let cb_accepted_fees = calc_fees_in_cb(cb, d, ad.clone(), storage.clone());
-
-                    (cb_accepted_fees, d.accepted_transactions.len())
-                })
-                .reduce(|(a, b), (c, d)| (a + c, b + d))
-                .unwrap();
-
-            fee += cb_accepted_fees;
-            count += mergeset_accepted_txs_count;
-            if (count - mergeset_accepted_txs_count) / 10_000_000 != count / 10_000_000 {
-                info!("Accepted txs in range: {}", count);
-                info!("Fees paid: {}", fee);
-            }
-        }
-    }
-    info!(
-        "\n=======================================\n\tAccepted txs in range {} - {}: {}\n=======================================",
-        start_datetime.format("%d/%m/%Y %H:%M"),
-        end_datetime.format("%d/%m/%Y %H:%M"),
-        count
-    );
-    info!("Fees paid: {}", fee);
+    println!("Pruning Point: {}", pp);
+    println!("Sink: {}", sink);
+    println!("Retention Root: {}", retention_root);
 }
 
 fn calc_fees_in_cb(
