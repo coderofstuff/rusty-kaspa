@@ -5103,7 +5103,7 @@ version = "1.0.1"
 dependencies = [
  "async-channel 2.3.1",
  "chrono",
- "clap 4.5.19",
+ "clap 4.5.51",
  "faster-hex",
  "itertools 0.13.0",
  "kaspa-addresses",
