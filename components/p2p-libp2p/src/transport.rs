@@ -1467,13 +1467,12 @@ impl SwarmDriver {
             SwarmEvent::Behaviour(Libp2pEvent::Autonat(event)) => {
                 debug!("libp2p autonat event: {:?}", event);
                 if let Some(auto_role) = self.auto_role.as_mut() {
-                    if let autonat::Event::StatusChanged { new, .. } = &event {
-                        if matches!(new, autonat::NatStatus::Public(_)) {
-                            auto_role.record_autonat_public(Instant::now());
-                            let has_external_addr = self.swarm.external_addresses().next().is_some();
-                            if auto_role.maybe_promote(Instant::now(), has_external_addr) {
-                                info!("libp2p autonat: role auto-promoted to public");
-                            }
+                    let is_public_probe = matches!(event, autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Response { .. }));
+                    if is_public_probe {
+                        auto_role.record_autonat_public(Instant::now());
+                        let has_external_addr = self.swarm.external_addresses().next().is_some();
+                        if auto_role.maybe_promote(Instant::now(), has_external_addr) {
+                            info!("libp2p autonat: role auto-promoted to public");
                         }
                     }
                 }
