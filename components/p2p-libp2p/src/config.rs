@@ -39,6 +39,8 @@ pub struct Config {
     pub relay_inbound_cap: Option<usize>,
     pub relay_inbound_unknown_cap: Option<usize>,
     pub libp2p_inbound_cap_private: usize,
+    pub max_relays: usize,
+    pub max_peers_per_relay: usize,
     /// Optional list of relay reservation multiaddrs.
     pub reservations: Vec<String>,
     /// External multiaddrs to announce.
@@ -60,6 +62,8 @@ impl Default for Config {
             relay_inbound_cap: None,
             relay_inbound_unknown_cap: None,
             libp2p_inbound_cap_private: 8,
+            max_relays: 8,
+            max_peers_per_relay: 1,
             reservations: Vec::new(),
             external_multiaddrs: Vec::new(),
             advertise_addresses: Vec::new(),
@@ -123,6 +127,16 @@ impl ConfigBuilder {
 
     pub fn libp2p_inbound_cap_private(mut self, cap: usize) -> Self {
         self.config.libp2p_inbound_cap_private = cap;
+        self
+    }
+
+    pub fn max_relays(mut self, max_relays: usize) -> Self {
+        self.config.max_relays = max_relays;
+        self
+    }
+
+    pub fn max_peers_per_relay(mut self, max_peers_per_relay: usize) -> Self {
+        self.config.max_peers_per_relay = max_peers_per_relay;
         self
     }
 

@@ -473,7 +473,7 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .default_value("auto")
                 .require_equals(true)
                 .value_parser(clap::value_parser!(Libp2pRole))
-                .help("Libp2p role: public, private, or auto (auto defaults to private unless helper listen is set)."),
+                .help("Libp2p role: public, private, or auto (auto starts private and promotes after stable public reachability)."),
         )
         .arg(
             Arg::new("libp2p-identity-path")
@@ -492,6 +492,15 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .require_equals(true)
                 .value_parser(clap::value_parser!(SocketAddr))
                 .help("Enable the libp2p helper/control API on the specified socket address. Disabled unless set explicitly."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-listen-port")
+                .long("libp2p-relay-listen-port")
+                .env("KASPAD_LIBP2P_RELAY_LISTEN_PORT")
+                .value_name("PORT")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(u16))
+                .help("Dedicated libp2p relay listen port (defaults to the p2p port + 1)."),
         )
         .arg(
             Arg::new("libp2p-listen-port")
@@ -519,6 +528,33 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .require_equals(true)
                 .value_parser(clap::value_parser!(usize))
                 .help("Soft cap for inbound libp2p connections without parsed relay id."),
+        )
+        .arg(
+            Arg::new("libp2p-max-relays")
+                .long("libp2p-max-relays")
+                .env("KASPAD_LIBP2P_MAX_RELAYS")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Maximum number of active relay reservations for auto selection."),
+        )
+        .arg(
+            Arg::new("libp2p-max-peers-per-relay")
+                .long("libp2p-max-peers-per-relay")
+                .env("KASPAD_LIBP2P_MAX_PEERS_PER_RELAY")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Maximum peers per relay (eclipse guard)."),
+        )
+        .arg(
+            Arg::new("libp2p-inbound-cap-private")
+                .long("libp2p-inbound-cap-private")
+                .env("KASPAD_LIBP2P_INBOUND_CAP_PRIVATE")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Private-role inbound cap for libp2p connections."),
         )
         .arg(
             Arg::new("libp2p-reservations")
@@ -649,6 +685,10 @@ impl Args {
                     .get_one::<SocketAddr>("libp2p-helper-listen")
                     .copied()
                     .or(defaults.libp2p.libp2p_helper_listen),
+                libp2p_relay_listen_port: m
+                    .get_one::<u16>("libp2p-relay-listen-port")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_relay_listen_port),
                 libp2p_listen_port: m.get_one::<u16>("libp2p-listen-port").copied().or(defaults.libp2p.libp2p_listen_port),
                 libp2p_relay_inbound_cap: m
                     .get_one::<usize>("libp2p-relay-inbound-cap")
@@ -658,6 +698,15 @@ impl Args {
                     .get_one::<usize>("libp2p-relay-inbound-unknown-cap")
                     .copied()
                     .or(defaults.libp2p.libp2p_relay_inbound_unknown_cap),
+                libp2p_max_relays: m.get_one::<usize>("libp2p-max-relays").copied().or(defaults.libp2p.libp2p_max_relays),
+                libp2p_max_peers_per_relay: m
+                    .get_one::<usize>("libp2p-max-peers-per-relay")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_max_peers_per_relay),
+                libp2p_inbound_cap_private: m
+                    .get_one::<usize>("libp2p-inbound-cap-private")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_inbound_cap_private),
                 libp2p_reservations: m
                     .get_many::<String>("libp2p-reservations")
                     .map(|vals| vals.cloned().collect())

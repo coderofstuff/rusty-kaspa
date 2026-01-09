@@ -104,7 +104,7 @@ fn libp2p_advertisement(config: &kaspa_p2p_libp2p::Config) -> (u64, Option<u16>)
         )
         && matches!(config.role, kaspa_p2p_libp2p::Role::Public);
     let services = if advertise { NET_ADDRESS_SERVICE_LIBP2P_RELAY } else { 0 };
-    let relay_port = if advertise { config.helper_listen.map(|addr| addr.port()) } else { None };
+    let relay_port = if advertise { config.listen_addresses.first().map(|addr| addr.port()) } else { None };
     (services, relay_port)
 }
 
@@ -587,7 +587,12 @@ Do you confirm? (y/n)";
     #[cfg(feature = "libp2p")]
     let (libp2p_services, libp2p_relay_port, libp2p_relay_inbound_cap, libp2p_relay_inbound_unknown_cap) = {
         let (services, relay_port) = libp2p_advertisement(&libp2p_config);
-        (services, relay_port, libp2p_config.relay_inbound_cap, libp2p_config.relay_inbound_unknown_cap)
+        let relay_inbound_cap = if matches!(libp2p_config.role, kaspa_p2p_libp2p::Role::Private | kaspa_p2p_libp2p::Role::Auto) {
+            Some(libp2p_config.max_peers_per_relay)
+        } else {
+            libp2p_config.relay_inbound_cap
+        };
+        (services, relay_port, relay_inbound_cap, libp2p_config.relay_inbound_unknown_cap)
     };
     #[cfg(not(feature = "libp2p"))]
     let libp2p_status: GetLibp2pStatusResponse = GetLibp2pStatusResponse::disabled();
@@ -597,7 +602,8 @@ Do you confirm? (y/n)";
     let (libp2p_services, libp2p_relay_port, libp2p_relay_inbound_cap, libp2p_relay_inbound_unknown_cap) = (0, None, None, None);
     #[cfg(feature = "libp2p")]
     {
-        let is_private = libp2p_config.mode.is_enabled() && matches!(libp2p_config.role, kaspa_p2p_libp2p::Role::Private);
+        let is_private = libp2p_config.mode.is_enabled()
+            && matches!(libp2p_config.role, kaspa_p2p_libp2p::Role::Private | kaspa_p2p_libp2p::Role::Auto);
         set_libp2p_role_config(Libp2pRoleConfig { is_private, libp2p_inbound_cap_private: libp2p_config.libp2p_inbound_cap_private });
     }
 
@@ -833,7 +839,7 @@ mod tests {
         let cfg_public = AdapterConfigBuilder::new()
             .mode(AdapterMode::Bridge)
             .role(AdapterRole::Public)
-            .helper_listen(Some("127.0.0.1:18080".parse().unwrap()))
+            .listen_addresses(vec!["127.0.0.1:18080".parse().unwrap()])
             .build();
         let (services, relay_port) = libp2p_advertisement(&cfg_public);
         assert_eq!(services, NET_ADDRESS_SERVICE_LIBP2P_RELAY);

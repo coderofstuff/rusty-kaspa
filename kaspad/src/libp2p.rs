@@ -1,8 +1,16 @@
 use clap::ValueEnum;
+#[cfg(feature = "libp2p")]
+use futures_util::future::BoxFuture;
+#[cfg(feature = "libp2p")]
+use kaspa_addressmanager::AddressManager;
+#[cfg(feature = "libp2p")]
+use kaspa_connectionmanager::{set_libp2p_role_config, Libp2pRoleConfig};
 use kaspa_core::task::service::{AsyncService, AsyncServiceError, AsyncServiceFuture};
 #[cfg(feature = "libp2p")]
 use kaspa_p2p_flows::flow_context::FlowContext;
 use kaspa_p2p_lib::{OutboundConnector, TcpConnector};
+#[cfg(feature = "libp2p")]
+use kaspa_p2p_libp2p::relay_pool::{relay_update_from_netaddr, RelayCandidateSource, RelayCandidateUpdate, RelaySource};
 use kaspa_p2p_libp2p::SwarmStreamProvider;
 use kaspa_p2p_libp2p::{
     AutoNatConfig, Config as AdapterConfig, ConfigBuilder as AdapterConfigBuilder, Identity as AdapterIdentity,
@@ -10,7 +18,11 @@ use kaspa_p2p_libp2p::{
 };
 use kaspa_rpc_core::{GetLibp2pStatusResponse, RpcLibp2pIdentity, RpcLibp2pMode};
 #[cfg(feature = "libp2p")]
+use kaspa_utils::networking::NET_ADDRESS_SERVICE_LIBP2P_RELAY;
+#[cfg(feature = "libp2p")]
 use kaspa_utils::triggers::SingleTrigger;
+#[cfg(feature = "libp2p")]
+use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_with::{DisplayFromStr, serde_as};
 use std::{
@@ -24,6 +36,8 @@ use tokio::sync::OnceCell;
 use tokio::time::{Duration, sleep};
 
 pub(crate) const DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE: usize = 8;
+#[cfg(feature = "libp2p")]
+const DEFAULT_RELAY_CANDIDATE_TTL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -78,11 +92,19 @@ pub struct Libp2pArgs {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub libp2p_helper_listen: Option<SocketAddr>,
+    /// Optional dedicated libp2p relay listen port (defaults to the p2p port + 1).
+    pub libp2p_relay_listen_port: Option<u16>,
     /// Optional dedicated libp2p listen port (defaults to p2p port + 1).
     pub libp2p_listen_port: Option<u16>,
     /// Optional inbound caps for libp2p relay connections (per relay / unknown relay bucket).
     pub libp2p_relay_inbound_cap: Option<usize>,
     pub libp2p_relay_inbound_unknown_cap: Option<usize>,
+    /// Max relay reservations to keep active (auto selection).
+    pub libp2p_max_relays: Option<usize>,
+    /// Max peers per relay (eclipse guard).
+    pub libp2p_max_peers_per_relay: Option<usize>,
+    /// Private-role inbound cap for libp2p connections.
+    pub libp2p_inbound_cap_private: Option<usize>,
     /// Relay reservation multiaddrs.
     pub libp2p_reservations: Vec<String>,
     /// External multiaddrs to announce.
@@ -100,9 +122,13 @@ impl Default for Libp2pArgs {
             libp2p_role: Libp2pRole::Auto,
             libp2p_identity_path: None,
             libp2p_helper_listen: None,
+            libp2p_relay_listen_port: None,
             libp2p_listen_port: None,
             libp2p_relay_inbound_cap: None,
             libp2p_relay_inbound_unknown_cap: None,
+            libp2p_max_relays: None,
+            libp2p_max_peers_per_relay: None,
+            libp2p_inbound_cap_private: None,
             libp2p_reservations: Vec::new(),
             libp2p_external_multiaddrs: Vec::new(),
             libp2p_advertise_addresses: Vec::new(),
@@ -117,7 +143,11 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
     let env_role = env::var("KASPAD_LIBP2P_ROLE").ok().and_then(|s| parse_libp2p_role(&s));
     let env_identity_path = env::var("KASPAD_LIBP2P_IDENTITY_PATH").ok().map(PathBuf::from);
     let env_helper_listen = env::var("KASPAD_LIBP2P_HELPER_LISTEN").ok().and_then(|s| s.parse::<SocketAddr>().ok());
+    let env_relay_listen_port = env::var("KASPAD_LIBP2P_RELAY_LISTEN_PORT").ok().and_then(|s| s.parse::<u16>().ok());
     let env_listen_port = env::var("KASPAD_LIBP2P_LISTEN_PORT").ok().and_then(|s| s.parse::<u16>().ok());
+    let env_max_relays = env::var("KASPAD_LIBP2P_MAX_RELAYS").ok().and_then(|s| s.parse::<usize>().ok());
+    let env_max_peers_per_relay = env::var("KASPAD_LIBP2P_MAX_PEERS_PER_RELAY").ok().and_then(|s| s.parse::<usize>().ok());
+    let env_inbound_cap_private = env::var("KASPAD_LIBP2P_INBOUND_CAP_PRIVATE").ok().and_then(|s| s.parse::<usize>().ok());
     let env_autonat_allow_private =
         env::var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE").ok().map(|s| s == "1" || s.eq_ignore_ascii_case("true")).unwrap_or(false);
 
@@ -126,13 +156,22 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
 
     let identity_path = args.libp2p_identity_path.clone().or(env_identity_path);
     let helper_listen = args.libp2p_helper_listen.or(env_helper_listen);
-    let listen_port = args.libp2p_listen_port.or(env_listen_port).unwrap_or_else(|| p2p_listen.port().saturating_add(1));
+    let listen_port = args
+        .libp2p_relay_listen_port
+        .or(env_relay_listen_port)
+        .or(args.libp2p_listen_port)
+        .or(env_listen_port)
+        .unwrap_or_else(|| p2p_listen.port().saturating_add(1));
     let listen_addr = SocketAddr::new(p2p_listen.ip(), listen_port);
     let relay_inbound_cap =
         args.libp2p_relay_inbound_cap.or(env::var("KASPAD_LIBP2P_RELAY_INBOUND_CAP").ok().and_then(|s| s.parse().ok()));
     let relay_inbound_unknown_cap = args
         .libp2p_relay_inbound_unknown_cap
         .or(env::var("KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP").ok().and_then(|s| s.parse().ok()));
+    let inbound_cap_private =
+        args.libp2p_inbound_cap_private.or(env_inbound_cap_private).unwrap_or(DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE);
+    let max_relays = args.libp2p_max_relays.or(env_max_relays).unwrap_or(inbound_cap_private);
+    let max_peers_per_relay = args.libp2p_max_peers_per_relay.or(env_max_peers_per_relay).unwrap_or(1);
     let reservations =
         merge_list(&args.libp2p_reservations, env::var("KASPAD_LIBP2P_RESERVATIONS").ok().as_deref(), |s| Some(s.to_string()));
     let external_multiaddrs =
@@ -163,7 +202,9 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
         .listen_addresses(vec![listen_addr])
         .relay_inbound_cap(relay_inbound_cap)
         .relay_inbound_unknown_cap(relay_inbound_unknown_cap)
-        .libp2p_inbound_cap_private(DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE)
+        .libp2p_inbound_cap_private(inbound_cap_private)
+        .max_relays(max_relays)
+        .max_peers_per_relay(max_peers_per_relay)
         .reservations(reservations)
         .external_multiaddrs(external_multiaddrs)
         .advertise_addresses(advertise_addresses)
@@ -264,13 +305,8 @@ fn parse_libp2p_role(s: &str) -> Option<Libp2pRole> {
 fn resolve_role(role: Libp2pRole, reservations: &[String], helper_listen: Option<SocketAddr>) -> Libp2pRole {
     match role {
         Libp2pRole::Auto => {
-            if !reservations.is_empty() {
-                Libp2pRole::Private
-            } else if helper_listen.is_some() {
-                Libp2pRole::Public
-            } else {
-                Libp2pRole::Private
-            }
+            let _ = (reservations, helper_listen);
+            Libp2pRole::Auto
         }
         other => other,
     }
@@ -284,6 +320,51 @@ where
         return cli.to_vec();
     }
     env_val.map(|s| s.split(',').filter_map(|item| parse(item.trim())).collect()).unwrap_or_default()
+}
+
+#[cfg(feature = "libp2p")]
+struct AddressManagerRelaySource {
+    address_manager: Arc<Mutex<AddressManager>>,
+    ttl: Duration,
+}
+
+#[cfg(feature = "libp2p")]
+impl AddressManagerRelaySource {
+    fn new(address_manager: Arc<Mutex<AddressManager>>) -> Self {
+        Self { address_manager, ttl: DEFAULT_RELAY_CANDIDATE_TTL }
+    }
+}
+
+#[cfg(feature = "libp2p")]
+impl RelayCandidateSource for AddressManagerRelaySource {
+    fn fetch_candidates<'a>(&'a self) -> BoxFuture<'a, Vec<RelayCandidateUpdate>> {
+        Box::pin(async move {
+            let addresses = self.address_manager.lock().get_all_addresses();
+            let mut updates = Vec::new();
+            for addr in addresses {
+                if !addr.has_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY) {
+                    continue;
+                }
+                let Some(relay_port) = addr.relay_port else {
+                    continue;
+                };
+                match relay_update_from_netaddr(addr, relay_port, self.ttl, RelaySource::AddressGossip) {
+                    Ok(update) => updates.push(update),
+                    Err(err) => log::debug!("libp2p relay source: invalid relay candidate: {err}"),
+                }
+            }
+            updates
+        })
+    }
+}
+
+#[cfg(feature = "libp2p")]
+fn apply_role_update(flow_context: &FlowContext, role: AdapterRole, relay_port: Option<u16>, inbound_cap_private: usize) {
+    let (services, relay_port) =
+        if matches!(role, AdapterRole::Public) { (NET_ADDRESS_SERVICE_LIBP2P_RELAY, relay_port) } else { (0, None) };
+    flow_context.set_libp2p_advertisement(services, relay_port);
+    let is_private = !matches!(role, AdapterRole::Public);
+    set_libp2p_role_config(Libp2pRoleConfig { is_private, libp2p_inbound_cap_private: inbound_cap_private });
 }
 
 pub(crate) struct Libp2pInitService {
@@ -366,6 +447,28 @@ impl AsyncService for Libp2pNodeService {
                 sleep(Duration::from_millis(50)).await;
             };
 
+            if matches!(self.config.role, AdapterRole::Auto) {
+                if let Some(mut role_rx) = provider.role_updates() {
+                    let flow_context = self.flow_context.clone();
+                    let relay_port = self.config.listen_addresses.first().map(|addr| addr.port());
+                    let inbound_cap_private = self.config.libp2p_inbound_cap_private;
+                    tokio::spawn(async move {
+                        let mut current = *role_rx.borrow();
+                        loop {
+                            if role_rx.changed().await.is_err() {
+                                break;
+                            }
+                            let role = *role_rx.borrow();
+                            if role == current {
+                                continue;
+                            }
+                            current = role;
+                            apply_role_update(&flow_context, role, relay_port, inbound_cap_private);
+                        }
+                    });
+                }
+            }
+
             let handler = loop {
                 if let Some(handler) = self.flow_context.connection_handler() {
                     log::info!("libp2p connection handler available; wiring inbound bridge");
@@ -374,8 +477,12 @@ impl AsyncService for Libp2pNodeService {
                 sleep(Duration::from_millis(50)).await;
             };
 
-            let svc = kaspa_p2p_libp2p::Libp2pService::with_provider(self.config.clone(), provider)
+            let relay_source = AddressManagerRelaySource::new(self.flow_context.address_manager());
+            let mut svc = kaspa_p2p_libp2p::Libp2pService::with_provider(self.config.clone(), provider)
                 .with_shutdown(self.shutdown.listener.clone());
+            if matches!(self.config.role, AdapterRole::Private | AdapterRole::Auto) {
+                svc = svc.with_relay_source(Arc::new(relay_source));
+            }
             svc.start().await.map_err(|e| AsyncServiceError::Service(e.to_string()))?;
             if let Err(err) = svc.start_inbound(Arc::new(handler)).await {
                 log::error!("libp2p inbound bridge failed to start: {err}");
@@ -429,7 +536,7 @@ mod tests {
         assert_eq!(cfg.relay_inbound_cap, Some(5));
         assert_eq!(cfg.relay_inbound_unknown_cap, Some(7));
         assert_eq!(cfg.autonat.server_only_if_public, false); // allow_private=true -> server_only_if_public=false
-        assert_eq!(cfg.role, AdapterRole::Public);
+        assert_eq!(cfg.role, AdapterRole::Auto);
         assert_eq!(cfg.libp2p_inbound_cap_private, DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE);
 
         env::remove_var("KASPAD_LIBP2P_MODE");
@@ -463,17 +570,56 @@ mod tests {
         args_public.libp2p_mode = Libp2pMode::Full;
         args_public.libp2p_helper_listen = Some("127.0.0.1:12345".parse().unwrap());
         let cfg_public = libp2p_config_from_args(&args_public, Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
-        assert_eq!(cfg_public.role, AdapterRole::Public);
+        assert_eq!(cfg_public.role, AdapterRole::Auto);
 
         let mut args_private = Libp2pArgs::default();
         args_private.libp2p_mode = Libp2pMode::Full;
         args_private.libp2p_reservations = vec!["/ip4/10.0.0.1/tcp/4001/p2p/peer".into()];
         let cfg_private = libp2p_config_from_args(&args_private, Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
-        assert_eq!(cfg_private.role, AdapterRole::Private);
+        assert_eq!(cfg_private.role, AdapterRole::Auto);
 
         let mut args_default = Libp2pArgs::default();
         args_default.libp2p_mode = Libp2pMode::Full;
         let cfg_default = libp2p_config_from_args(&args_default, Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
-        assert_eq!(cfg_default.role, AdapterRole::Private);
+        assert_eq!(cfg_default.role, AdapterRole::Auto);
+    }
+
+    #[cfg(feature = "libp2p")]
+    mod relay_source_tests {
+        use super::*;
+        use kaspa_addressmanager::AddressManager;
+        use kaspa_consensus_core::config::{params::SIMNET_PARAMS, Config as ConsensusConfig};
+        use kaspa_core::task::tick::TickService;
+        use kaspa_database::create_temp_db;
+        use kaspa_database::prelude::ConnBuilder;
+        use kaspa_utils::networking::{IpAddress, NetAddress, NET_ADDRESS_SERVICE_LIBP2P_RELAY};
+        use std::str::FromStr;
+        use std::sync::Arc;
+
+        #[tokio::test]
+        async fn relay_source_filters_by_service_and_port() {
+            let db = create_temp_db!(ConnBuilder::default().with_files_limit(1));
+            let config = ConsensusConfig::new(SIMNET_PARAMS);
+            let (am, _) = AddressManager::new(Arc::new(config), db.1, Arc::new(TickService::default()));
+
+            {
+                let mut guard = am.lock();
+                let good = NetAddress::new(IpAddress::from_str("10.0.0.1").unwrap(), 16111)
+                    .with_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY)
+                    .with_relay_port(Some(16112));
+                let missing_port =
+                    NetAddress::new(IpAddress::from_str("10.0.0.2").unwrap(), 16111).with_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY);
+                let missing_service = NetAddress::new(IpAddress::from_str("10.0.0.3").unwrap(), 16111).with_relay_port(Some(16112));
+
+                guard.add_address(good);
+                guard.add_address(missing_port);
+                guard.add_address(missing_service);
+            }
+
+            let source = AddressManagerRelaySource::new(am);
+            let updates = source.fetch_candidates().await;
+            assert_eq!(updates.len(), 1);
+            assert_eq!(updates[0].key, "10.0.0.1:16112");
+        }
     }
 }

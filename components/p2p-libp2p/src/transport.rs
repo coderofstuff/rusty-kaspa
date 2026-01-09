@@ -6,6 +6,7 @@ use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
 use kaspa_p2p_lib::common::ProtocolError;
 use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PathKind, PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
+use libp2p::autonat;
 use libp2p::core::transport::ListenerId;
 use libp2p::dcutr;
 use libp2p::identify;
@@ -17,14 +18,13 @@ use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::{PeerId, identity, relay};
 use log::{debug, info, warn};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::{fs, io, path::Path};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::OnceCell;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, OnceCell, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::task::spawn;
 use tokio::time::{Duration, Instant, MissedTickBehavior, interval};
@@ -87,7 +87,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tempfile::tempdir;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::{mpsc, oneshot, watch};
     use tokio::time::Duration;
 
     #[test]
@@ -315,7 +315,8 @@ mod tests {
         let (_cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_BOUND);
         let (incoming_tx, incoming_rx) = mpsc::channel(incoming_capacity);
         let (_shutdown_tx, shutdown) = triggered::trigger();
-        let driver = SwarmDriver::new(swarm, cmd_rx, incoming_tx, vec![], vec![], vec![], shutdown);
+        let (role_tx, _role_rx) = watch::channel(crate::Role::Private);
+        let driver = SwarmDriver::new(swarm, cmd_rx, incoming_tx, vec![], vec![], vec![], role_tx, crate::Role::Private, 1, shutdown);
         (driver, incoming_rx)
     }
 
@@ -435,6 +436,32 @@ mod tests {
         }
         assert!(matches!(rx1.await, Ok(Err(_))));
         assert!(matches!(rx2.await, Ok(Err(_))));
+    }
+
+    #[test]
+    fn auto_role_promotes_after_signals() {
+        let (role_tx, role_rx) = watch::channel(crate::Role::Private);
+        let mut state = AutoRoleState::new(role_tx);
+        let now = Instant::now();
+
+        state.record_autonat_public(now);
+        assert!(!state.maybe_promote(now, true));
+
+        state.record_direct_inbound(now);
+        assert!(state.maybe_promote(now, true));
+        assert_eq!(*role_rx.borrow(), crate::Role::Public);
+    }
+
+    #[test]
+    fn auto_role_requires_external_addr() {
+        let (role_tx, role_rx) = watch::channel(crate::Role::Private);
+        let mut state = AutoRoleState::new(role_tx);
+        let now = Instant::now();
+
+        state.record_autonat_public(now);
+        state.record_direct_inbound(now);
+        assert!(!state.maybe_promote(now, false));
+        assert_eq!(*role_rx.borrow(), crate::Role::Private);
     }
 }
 
@@ -610,6 +637,9 @@ pub type Libp2pListenFuture<'a> = BoxFuture<'a, Result<Libp2pListenStream, Libp2
 pub trait Libp2pStreamProvider: Send + Sync {
     fn dial<'a>(&'a self, address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
     fn dial_multiaddr<'a>(&'a self, address: Multiaddr) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>>;
+    fn probe_relay<'a>(&'a self, _address: Multiaddr) -> BoxFuture<'a, Result<PeerId, Libp2pError>> {
+        Box::pin(async { Err(Libp2pError::DialFailed("relay probe unsupported".into())) })
+    }
     fn listen<'a>(&'a self) -> Libp2pListenFuture<'a>;
     fn reserve<'a>(&'a self, target: Multiaddr) -> BoxFuture<'a, Result<ReservationHandle, Libp2pError>>;
     fn shutdown(&self) -> BoxFuture<'_, ()> {
@@ -617,6 +647,9 @@ pub trait Libp2pStreamProvider: Send + Sync {
     }
     fn peers_snapshot<'a>(&'a self) -> BoxFuture<'a, Vec<PeerSnapshot>> {
         Box::pin(async { Vec::new() })
+    }
+    fn role_updates(&self) -> Option<watch::Receiver<crate::Role>> {
+        None
     }
 }
 
@@ -695,6 +728,7 @@ pub struct SwarmStreamProvider {
     incoming: Mutex<mpsc::Receiver<IncomingStream>>,
     shutdown: Trigger,
     task: Mutex<Option<JoinHandle<()>>>,
+    role_updates: Option<watch::Receiver<crate::Role>>,
 }
 
 impl SwarmStreamProvider {
@@ -737,12 +771,32 @@ impl SwarmStreamProvider {
             }
         }));
         let reservations = parse_reservation_targets(&config.reservations)?;
+        let effective_role = if matches!(config.role, crate::Role::Auto) { crate::Role::Private } else { config.role };
+        let (role_tx, role_rx) = watch::channel(effective_role);
         let task = handle.spawn(
-            SwarmDriver::new(swarm, command_rx, incoming_tx, listen_multiaddrs, external_multiaddrs, reservations, shutdown_listener)
-                .run(),
+            SwarmDriver::new(
+                swarm,
+                command_rx,
+                incoming_tx,
+                listen_multiaddrs,
+                external_multiaddrs,
+                reservations,
+                role_tx,
+                config.role,
+                config.max_peers_per_relay,
+                shutdown_listener,
+            )
+            .run(),
         );
 
-        Ok(Self { config, command_tx, incoming: Mutex::new(incoming_rx), shutdown, task: Mutex::new(Some(task)) })
+        Ok(Self {
+            config,
+            command_tx,
+            incoming: Mutex::new(incoming_rx),
+            shutdown,
+            task: Mutex::new(Some(task)),
+            role_updates: Some(role_rx),
+        })
     }
 
     async fn ensure_listening(&self) -> Result<(), Libp2pError> {
@@ -797,6 +851,23 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
             rx.await
                 .unwrap_or_else(|_| Err(Libp2pError::DialFailed("libp2p dial cancelled".into())))
                 .map(|(metadata, _, stream)| (metadata, stream))
+        })
+    }
+
+    fn probe_relay<'a>(&'a self, address: Multiaddr) -> BoxFuture<'a, Result<PeerId, Libp2pError>> {
+        let enabled = self.config.mode.is_enabled();
+        let tx = self.command_tx.clone();
+        Box::pin(async move {
+            if !enabled {
+                return Err(Libp2pError::Disabled);
+            }
+
+            let (respond_to, rx) = oneshot::channel();
+            tx.send(SwarmCommand::ProbeRelay { address, respond_to })
+                .await
+                .map_err(|_| Libp2pError::DialFailed("libp2p driver stopped".into()))?;
+
+            rx.await.unwrap_or_else(|_| Err(Libp2pError::DialFailed("relay probe cancelled".into())))
         })
     }
 
@@ -859,6 +930,10 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
         })
     }
 
+    fn role_updates(&self) -> Option<watch::Receiver<crate::Role>> {
+        self.role_updates.clone()
+    }
+
     fn shutdown(&self) -> BoxFuture<'_, ()> {
         let trigger = self.shutdown.clone();
         let task = &self.task;
@@ -900,6 +975,10 @@ enum SwarmCommand {
         address: Multiaddr,
         respond_to: oneshot::Sender<Result<(TransportMetadata, StreamDirection, BoxedLibp2pStream), Libp2pError>>,
     },
+    ProbeRelay {
+        address: Multiaddr,
+        respond_to: oneshot::Sender<Result<PeerId, Libp2pError>>,
+    },
     EnsureListening {
         respond_to: oneshot::Sender<Result<(), Libp2pError>>,
     },
@@ -922,6 +1001,65 @@ struct DialRequest {
     via: DialVia,
 }
 
+struct PendingProbe {
+    respond_to: oneshot::Sender<Result<PeerId, Libp2pError>>,
+    started_at: Instant,
+}
+
+const AUTO_ROLE_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+struct AutoRoleState {
+    current: crate::Role,
+    window: Duration,
+    autonat_public_at: Option<Instant>,
+    direct_inbound_hits: VecDeque<Instant>,
+    role_tx: watch::Sender<crate::Role>,
+}
+
+impl AutoRoleState {
+    fn new(role_tx: watch::Sender<crate::Role>) -> Self {
+        Self {
+            current: crate::Role::Private,
+            window: AUTO_ROLE_WINDOW,
+            autonat_public_at: None,
+            direct_inbound_hits: VecDeque::new(),
+            role_tx,
+        }
+    }
+
+    fn record_autonat_public(&mut self, now: Instant) {
+        self.autonat_public_at = Some(now);
+        self.prune(now);
+    }
+
+    fn record_direct_inbound(&mut self, now: Instant) {
+        self.direct_inbound_hits.push_back(now);
+        self.prune(now);
+    }
+
+    fn prune(&mut self, now: Instant) {
+        if self.autonat_public_at.map(|t| now.saturating_duration_since(t) > self.window).unwrap_or(false) {
+            self.autonat_public_at = None;
+        }
+        while self.direct_inbound_hits.front().map(|t| now.saturating_duration_since(*t) > self.window).unwrap_or(false) {
+            self.direct_inbound_hits.pop_front();
+        }
+    }
+
+    fn maybe_promote(&mut self, now: Instant, has_external_addr: bool) -> bool {
+        if self.current == crate::Role::Public {
+            return false;
+        }
+        self.prune(now);
+        if self.autonat_public_at.is_some() && !self.direct_inbound_hits.is_empty() && has_external_addr {
+            self.current = crate::Role::Public;
+            let _ = self.role_tx.send(crate::Role::Public);
+            return true;
+        }
+        false
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DialVia {
     Direct,
@@ -933,12 +1071,15 @@ struct SwarmDriver {
     command_rx: mpsc::Receiver<SwarmCommand>,
     incoming_tx: mpsc::Sender<IncomingStream>,
     pending_dials: HashMap<StreamRequestId, DialRequest>,
+    pending_probes: HashMap<StreamRequestId, PendingProbe>,
     dialback_cooldowns: HashMap<PeerId, Instant>,
     listen_addrs: Vec<Multiaddr>,
     external_addrs: Vec<Multiaddr>,
     peer_states: HashMap<PeerId, PeerState>,
     reservation_listeners: HashSet<ListenerId>,
     active_relay: Option<RelayInfo>,
+    auto_role: Option<AutoRoleState>,
+    max_peers_per_relay: usize,
     listening: bool,
     shutdown: Listener,
     connections: HashMap<StreamRequestId, ConnectionEntry>,
@@ -964,22 +1105,29 @@ impl SwarmDriver {
         listen_addrs: Vec<Multiaddr>,
         external_addrs: Vec<Multiaddr>,
         reservations: Vec<ReservationTarget>,
+        role_tx: watch::Sender<crate::Role>,
+        config_role: crate::Role,
+        max_peers_per_relay: usize,
         shutdown: Listener,
     ) -> Self {
         let local_peer_id = *swarm.local_peer_id();
         let active_relay = reservations.into_iter().find_map(|r| relay_info_from_multiaddr(&r.multiaddr, local_peer_id));
+        let auto_role = if matches!(config_role, crate::Role::Auto) { Some(AutoRoleState::new(role_tx)) } else { None };
 
         Self {
             swarm,
             command_rx,
             incoming_tx,
             pending_dials: HashMap::new(),
+            pending_probes: HashMap::new(),
             dialback_cooldowns: HashMap::new(),
             listen_addrs,
             external_addrs,
             peer_states: HashMap::new(),
             reservation_listeners: HashSet::new(),
             active_relay,
+            auto_role,
+            max_peers_per_relay: max_peers_per_relay.max(1),
             listening: false,
             shutdown,
             connections: HashMap::new(),
@@ -998,6 +1146,7 @@ impl SwarmDriver {
                 }
                 _ = cleanup.tick() => {
                     self.expire_pending_dials("dial timed out");
+                    self.expire_pending_probes("relay probe timed out");
                 }
                 cmd = self.command_rx.recv() => {
                     match cmd {
@@ -1017,6 +1166,9 @@ impl SwarmDriver {
         for (_, pending) in self.pending_dials.drain() {
             let _ = pending.respond_to.send(Err(Libp2pError::DialFailed("libp2p driver stopped".into())));
         }
+        for (_, pending) in self.pending_probes.drain() {
+            let _ = pending.respond_to.send(Err(Libp2pError::DialFailed("libp2p driver stopped".into())));
+        }
     }
 
     fn expire_pending_dials(&mut self, reason: &str) {
@@ -1032,8 +1184,27 @@ impl SwarmDriver {
         }
     }
 
+    fn expire_pending_probes(&mut self, reason: &str) {
+        let now = Instant::now();
+        let expired: Vec<_> = self
+            .pending_probes
+            .iter()
+            .filter(|(_, pending)| now.saturating_duration_since(pending.started_at) >= PENDING_DIAL_TIMEOUT)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            self.fail_probe(id, reason);
+        }
+    }
+
     fn fail_pending(&mut self, request_id: StreamRequestId, err: impl ToString) {
         if let Some(pending) = self.pending_dials.remove(&request_id) {
+            let _ = pending.respond_to.send(Err(Libp2pError::DialFailed(err.to_string())));
+        }
+    }
+
+    fn fail_probe(&mut self, request_id: StreamRequestId, err: impl ToString) {
+        if let Some(pending) = self.pending_probes.remove(&request_id) {
             let _ = pending.respond_to.send(Err(Libp2pError::DialFailed(err.to_string())));
         }
     }
@@ -1075,6 +1246,20 @@ impl SwarmDriver {
                 match self.swarm.dial(dial_opts) {
                     Ok(()) => {
                         self.pending_dials.insert(request_id, DialRequest { respond_to, started_at, via });
+                    }
+                    Err(err) => {
+                        let _ = respond_to.send(Err(Libp2pError::DialFailed(err.to_string())));
+                    }
+                }
+            }
+            SwarmCommand::ProbeRelay { address, respond_to } => {
+                info!("libp2p relay probe request to {address}");
+                let dial_opts = DialOpts::unknown_peer_id().address(address).build();
+                let request_id = dial_opts.connection_id();
+                let started_at = Instant::now();
+                match self.swarm.dial(dial_opts) {
+                    Ok(()) => {
+                        self.pending_probes.insert(request_id, PendingProbe { respond_to, started_at });
                     }
                     Err(err) => {
                         let _ = respond_to.send(Err(Libp2pError::DialFailed(err.to_string())));
@@ -1220,6 +1405,17 @@ impl SwarmDriver {
             }
             SwarmEvent::Behaviour(Libp2pEvent::Autonat(event)) => {
                 debug!("libp2p autonat event: {:?}", event);
+                if let Some(auto_role) = self.auto_role.as_mut() {
+                    if let autonat::Event::StatusChanged { new, .. } = &event {
+                        if matches!(new, autonat::NatStatus::Public(_)) {
+                            auto_role.record_autonat_public(Instant::now());
+                            let has_external_addr = self.swarm.external_addresses().next().is_some();
+                            if auto_role.maybe_promote(Instant::now(), has_external_addr) {
+                                info!("libp2p autonat: role auto-promoted to public");
+                            }
+                        }
+                    }
+                }
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("libp2p listening on {address}");
@@ -1233,6 +1429,23 @@ impl SwarmDriver {
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
                 debug!("libp2p connection established with {peer_id} on {connection_id:?}");
                 self.track_established(peer_id, &endpoint);
+
+                if let Some(auto_role) = self.auto_role.as_mut() {
+                    if !endpoint.is_dialer() && !endpoint_uses_relay(&endpoint) {
+                        auto_role.record_direct_inbound(Instant::now());
+                        let has_external_addr = self.swarm.external_addresses().next().is_some();
+                        if auto_role.maybe_promote(Instant::now(), has_external_addr) {
+                            info!("libp2p auto role: promoted to public after direct inbound");
+                        }
+                    }
+                }
+
+                if let Some(pending) = self.pending_probes.remove(&connection_id) {
+                    info!("libp2p relay probe connected to {peer_id}");
+                    self.record_connection(connection_id, peer_id, &endpoint, false);
+                    let _ = pending.respond_to.send(Ok(peer_id));
+                    return;
+                }
 
                 // For DCUtR direct connections spawned from relay dials, transfer the earliest
                 // pending relay dial for this peer onto the new connection_id.
@@ -1260,14 +1473,21 @@ impl SwarmDriver {
                     self.maybe_request_dialback(peer_id);
                 }
                 self.record_connection(connection_id, peer_id, &endpoint, had_pending_relay);
+                if endpoint_uses_relay(&endpoint) {
+                    self.enforce_relay_cap(connection_id);
+                } else {
+                    self.close_relay_connections_for_peer(peer_id, connection_id);
+                }
             }
             SwarmEvent::ConnectionClosed { peer_id, connection_id, endpoint, .. } => {
                 self.fail_pending(connection_id, "connection closed before stream");
+                self.fail_probe(connection_id, "relay probe connection closed");
                 self.track_closed(peer_id, &endpoint);
                 self.connections.remove(&connection_id);
             }
             SwarmEvent::OutgoingConnectionError { connection_id, error, .. } => {
                 self.fail_pending(connection_id, error.to_string());
+                self.fail_probe(connection_id, error.to_string());
                 self.connections.remove(&connection_id);
             }
             _ => {}
@@ -1332,6 +1552,42 @@ impl SwarmDriver {
         let outbound = endpoint.is_dialer();
         self.connections
             .insert(connection_id, ConnectionEntry { peer_id, path, relay_id, outbound, since: Instant::now(), dcutr_upgraded });
+    }
+
+    fn close_relay_connections_for_peer(&mut self, peer_id: PeerId, keep: StreamRequestId) {
+        let relay_ids: Vec<_> = self
+            .connections
+            .iter()
+            .filter(|(id, conn)| **id != keep && conn.peer_id == peer_id && matches!(conn.path, PathKind::Relay { .. }))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in relay_ids {
+            if self.swarm.close_connection(id) {
+                info!("libp2p: closing relay connection {id:?} to {peer_id} after direct path established");
+            }
+            self.connections.remove(&id);
+        }
+    }
+
+    fn enforce_relay_cap(&mut self, connection_id: StreamRequestId) {
+        let Some(conn) = self.connections.get(&connection_id) else {
+            return;
+        };
+        if !matches!(conn.path, PathKind::Relay { .. }) {
+            return;
+        }
+        let relay_id = conn.relay_id.clone();
+        let relay_count = self
+            .connections
+            .values()
+            .filter(|entry| matches!(entry.path, PathKind::Relay { .. }) && entry.relay_id == relay_id)
+            .count();
+        if relay_count > self.max_peers_per_relay {
+            if self.swarm.close_connection(connection_id) {
+                info!("libp2p: closing relay connection {connection_id:?} for relay cap");
+            }
+            self.connections.remove(&connection_id);
+        }
     }
 
     async fn handle_stream_event(&mut self, event: StreamEvent) {

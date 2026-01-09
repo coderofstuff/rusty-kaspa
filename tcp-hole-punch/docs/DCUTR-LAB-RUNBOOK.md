@@ -182,6 +182,169 @@ echo '{"action":"peers"}' | nc -w 5 127.0.0.1 38080
 
 Look for `"path":"direct"` connections to the other NAT'd node.
 
+## Step 6: Relay Auto-Selection (No Manual Reservations)
+
+This validates automatic relay selection via the Address Manager (new feature).
+
+### 6.1 Restart Relay as Public
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-relay /tmp/relay.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-relay \
+  --libp2p-mode=bridge \
+  --libp2p-role=public \
+  --libp2p-identity-path=/tmp/relay.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.26/tcp/16112 \
+  --nologfiles > /tmp/kaspa-relay.log 2>&1 &
+
+sleep 12
+grep "streaming swarm peer id" /tmp/kaspa-relay.log
+```
+
+### 6.2 Start Node A (auto role, no reservations)
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-a /tmp/node-a.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-a \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-max-relays=1 \
+  --libp2p-max-peers-per-relay=1 \
+  --libp2p-identity-path=/tmp/node-a.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.61/tcp/16112 \
+  --connect=10.0.3.26:16111 \
+  --nologfiles > /tmp/kaspa-a.log 2>&1 &
+
+sleep 12
+grep -E "relay auto|reservation" /tmp/kaspa-a.log
+```
+
+### 6.3 Start Node B (auto role, no reservations)
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-b /tmp/node-b.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-b \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-max-relays=1 \
+  --libp2p-max-peers-per-relay=1 \
+  --libp2p-identity-path=/tmp/node-b.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.62/tcp/16112 \
+  --connect=10.0.3.26:16111 \
+  --nologfiles > /tmp/kaspa-b.log 2>&1 &
+
+sleep 12
+grep -E "relay auto|reservation" /tmp/kaspa-b.log
+```
+
+**Expected indicators:**
+- `libp2p relay auto: reservation accepted for 10.0.3.26:16112`
+- `libp2p reservation accepted by RELAY_PEER_ID`
+
+Optional check:
+```bash
+echo '{"action":"peers"}' | nc -w 5 127.0.0.1 38080
+```
+Look for `"path":"relay"` connections to the relay.
+
+## Step 7: Auto Role Promotion (Relay Only)
+
+This validates automatic role promotion on the relay when AutoNAT confirms public reachability.
+
+1. Restart relay in `auto` role with external multiaddr:
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-relay /tmp/relay.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-relay \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-identity-path=/tmp/relay.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.26/tcp/16112 \
+  --nologfiles > /tmp/kaspa-relay.log 2>&1 &
+```
+
+2. Start Node A + Node B as in Steps 2–3 (manual reservations). Trigger DCUtR (Step 4).
+
+3. Verify relay log:
+```
+libp2p autonat: role auto-promoted to public
+```
+
+## Step 8: Max Peers Per Relay Cap
+
+This validates that private/auto nodes enforce the per‑relay inbound cap.
+
+1. Start relay as public (Step 6.1).
+2. Start Node A with a strict cap:
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-a /tmp/node-a.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-a \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-max-peers-per-relay=1 \
+  --libp2p-identity-path=/tmp/node-a.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-reservations=/ip4/10.0.3.26/tcp/16112/p2p/RELAY_PEER_ID \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.61/tcp/16112 \
+  --nologfiles > /tmp/kaspa-a.log 2>&1 &
+
+sleep 12
+grep -E "peer id|reservation" /tmp/kaspa-a.log
+```
+
+3. Start Node B (reservation to relay as usual).
+4. Start an extra node (Node C) on Node B host with unique ports:
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-c /tmp/node-c.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-c \
+  --listen=192.168.2.10:16121 \
+  --rpclisten=192.168.2.10:16120 \
+  --libp2p-relay-listen-port=16122 \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-identity-path=/tmp/node-c.key \
+  --libp2p-helper-listen=127.0.0.1:38081 \
+  --libp2p-reservations=/ip4/10.0.3.26/tcp/16112/p2p/RELAY_PEER_ID \
+  --nologfiles > /tmp/kaspa-c.log 2>&1 &
+
+sleep 12
+grep -E "peer id|reservation" /tmp/kaspa-c.log
+```
+
+5. Dial Node A via relay from Node B and Node C helper APIs.
+
+**Expected outcome:** Node A stabilizes with a single relay‑path peer (cap=1). Check Node A helper peers output and confirm only one `"path":"relay"` entry remains.
+
 ## Critical Configuration Notes
 
 ### Environment Variable is REQUIRED

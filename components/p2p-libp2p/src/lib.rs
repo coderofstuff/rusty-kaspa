@@ -7,6 +7,8 @@
 pub mod config;
 pub mod helper_api;
 pub mod metadata;
+pub mod relay_auto;
+pub mod relay_pool;
 pub mod reservations;
 pub mod service;
 pub mod swarm;

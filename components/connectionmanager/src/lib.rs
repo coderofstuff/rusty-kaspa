@@ -275,13 +275,9 @@ impl ConnectionManager {
 
     async fn handle_inbound_connections(self: &Arc<Self>, peer_by_address: &HashMap<SocketAddr, Peer>) {
         let inbound: Vec<&Peer> = peer_by_address.values().filter(|peer| !peer.is_outbound()).collect();
-        let inbound_len = inbound.len();
         if self.inbound_limit == 0 {
             let futures = inbound.iter().map(|peer| self.p2p_adaptor.terminate(peer.key()));
             join_all(futures).await;
-            return;
-        }
-        if self.inbound_limit >= inbound_len {
             return;
         }
 

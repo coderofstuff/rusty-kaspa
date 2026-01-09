@@ -38,7 +38,7 @@ use kaspa_p2p_lib::{
 };
 use kaspa_p2p_mining::rule_engine::MiningRuleEngine;
 use kaspa_utils::iter::IterExtensions;
-use kaspa_utils::networking::{IpAddress, PeerId};
+use kaspa_utils::networking::{IpAddress, NetAddress, PeerId, NET_ADDRESS_SERVICE_LIBP2P_RELAY};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -210,8 +210,8 @@ pub struct FlowContextInner {
     pub node_id: PeerId,
     pub consensus_manager: Arc<ConsensusManager>,
     pub config: Arc<Config>,
-    pub libp2p_services: u64,
-    pub libp2p_relay_port: Option<u16>,
+    libp2p_services: RwLock<u64>,
+    libp2p_relay_port: RwLock<Option<u16>>,
     pub libp2p_relay_inbound_cap: Option<usize>,
     pub libp2p_relay_inbound_unknown_cap: Option<usize>,
     hub: Hub,
@@ -352,8 +352,8 @@ impl FlowContext {
                 config,
                 mining_rule_engine,
                 outbound_connector,
-                libp2p_services,
-                libp2p_relay_port,
+                libp2p_services: RwLock::new(libp2p_services),
+                libp2p_relay_port: RwLock::new(libp2p_relay_port),
                 libp2p_relay_inbound_cap,
                 libp2p_relay_inbound_unknown_cap,
             }),
@@ -406,6 +406,17 @@ impl FlowContext {
         self.outbound_connector.clone()
     }
 
+    pub fn libp2p_advertisement(&self) -> (u64, Option<u16>) {
+        let services = *self.libp2p_services.read();
+        let relay_port = *self.libp2p_relay_port.read();
+        (services, relay_port)
+    }
+
+    pub fn set_libp2p_advertisement(&self, services: u64, relay_port: Option<u16>) {
+        *self.libp2p_services.write() = services;
+        *self.libp2p_relay_port.write() = relay_port;
+    }
+
     pub fn libp2p_relay_inbound_cap(&self) -> Option<usize> {
         self.libp2p_relay_inbound_cap
     }
@@ -420,6 +431,10 @@ impl FlowContext {
 
     pub fn hub(&self) -> &Hub {
         &self.hub
+    }
+
+    pub fn address_manager(&self) -> Arc<Mutex<AddressManager>> {
+        self.address_manager.clone()
     }
 
     pub fn mining_manager(&self) -> &MiningManagerProxy {
@@ -781,12 +796,13 @@ impl ConnectionInitializer for FlowContext {
         // Subnets are not currently supported
         let mut self_version_message = Version::new(local_address, self.node_id, network_name.clone(), None, PROTOCOL_VERSION);
         self_version_message.add_user_agent(name(), version(), &self.config.user_agent_comments);
-        self_version_message.services = self.libp2p_services;
+        let (libp2p_services, libp2p_relay_port) = self.libp2p_advertisement();
+        self_version_message.services = libp2p_services;
         if let Some(mut address) = self_version_message.address.take() {
-            if let Some(port) = self.libp2p_relay_port {
+            if let Some(port) = libp2p_relay_port {
                 address.relay_port = Some(port);
             }
-            address.services |= self.libp2p_services;
+            address.services |= libp2p_services;
             self_version_message.address = Some(address);
         }
         // TODO: get number of live services (non-libp2p)
@@ -847,10 +863,23 @@ impl ConnectionInitializer for FlowContext {
             let mut address_manager = self.address_manager.lock();
 
             if router.is_outbound() {
-                address_manager.add_address(router.net_address().into());
+                let mut outbound_address: NetAddress = router.net_address().into();
+                if peer_version.services != 0 {
+                    outbound_address.set_services(peer_version.services);
+                }
+                if peer_version.address.is_none()
+                    && outbound_address.relay_port.is_none()
+                    && (peer_version.services & NET_ADDRESS_SERVICE_LIBP2P_RELAY) != 0
+                {
+                    outbound_address.set_relay_port(Some(outbound_address.port.saturating_add(1)));
+                }
+                address_manager.add_address(outbound_address);
             }
 
-            if let Some(peer_ip_address) = peer_version.address {
+            if let Some(mut peer_ip_address) = peer_version.address {
+                if peer_ip_address.has_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY) && peer_ip_address.relay_port.is_none() {
+                    peer_ip_address.set_relay_port(Some(peer_ip_address.port.saturating_add(1)));
+                }
                 address_manager.add_address(peer_ip_address);
             }
         }

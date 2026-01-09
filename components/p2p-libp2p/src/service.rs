@@ -1,4 +1,6 @@
 use crate::helper_api::{HelperApi, HelperError};
+use crate::relay_auto::run_relay_auto_worker;
+use crate::relay_pool::RelayCandidateSource;
 use crate::reservations::ReservationManager;
 use crate::transport::{BoxedLibp2pStream, Libp2pStreamProvider, ReservationHandle, StreamDirection, multiaddr_to_metadata};
 use crate::{config::Config, transport::Libp2pError};
@@ -23,6 +25,7 @@ pub struct Libp2pService {
     config: Config,
     provider: Option<std::sync::Arc<dyn Libp2pStreamProvider>>,
     reservations: ReservationManager,
+    relay_source: Option<Arc<dyn RelayCandidateSource>>,
     shutdown: Option<Listener>,
 }
 
@@ -39,6 +42,7 @@ impl Libp2pService {
             config,
             provider: None,
             reservations: ReservationManager::new(RESERVATION_BASE_BACKOFF, RESERVATION_MAX_BACKOFF),
+            relay_source: None,
             shutdown: None,
         }
     }
@@ -48,8 +52,14 @@ impl Libp2pService {
             config,
             provider: Some(provider),
             reservations: ReservationManager::new(RESERVATION_BASE_BACKOFF, RESERVATION_MAX_BACKOFF),
+            relay_source: None,
             shutdown: None,
         }
+    }
+
+    pub fn with_relay_source(mut self, relay_source: Arc<dyn RelayCandidateSource>) -> Self {
+        self.relay_source = Some(relay_source);
+        self
     }
 
     pub fn with_shutdown(mut self, shutdown: Listener) -> Self {
@@ -76,6 +86,15 @@ impl Libp2pService {
             let provider_for_worker = provider.clone();
             let shutdown = self.shutdown.clone();
             tokio::spawn(async move { reservation_worker(provider_for_worker, reservations, state, shutdown).await });
+        }
+
+        if self.config.reservations.is_empty() {
+            if let Some(relay_source) = self.relay_source.clone() {
+                let provider_for_worker = provider.clone();
+                let config = self.config.clone();
+                let shutdown = self.shutdown.clone();
+                tokio::spawn(async move { run_relay_auto_worker(provider_for_worker, relay_source, config, shutdown).await });
+            }
         }
 
         if let Some(addr) = self.config.helper_listen {
