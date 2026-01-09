@@ -71,7 +71,7 @@ impl Default for Config {
             libp2p_inbound_cap_private: 8,
             max_relays: 1,
             max_peers_per_relay: 1,
-            relay_min_sources: 1,
+            relay_min_sources: 2,
             reservations: Vec::new(),
             relay_candidates: Vec::new(),
             external_multiaddrs: Vec::new(),

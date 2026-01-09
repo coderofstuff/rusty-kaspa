@@ -210,7 +210,7 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
     let autonat_allow_private = args.libp2p_autonat_allow_private || env_autonat_allow_private;
     let autonat_confidence_threshold =
         args.libp2p_autonat_confidence_threshold.or(env_autonat_confidence_threshold).filter(|value| *value > 0);
-    let relay_min_sources = if relay_candidates.is_empty() { 1 } else { 2 };
+    let relay_min_sources = env::var("KASPAD_LIBP2P_RELAY_MIN_SOURCES").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(2);
     let resolved_role = resolve_role(role, &reservations, helper_listen);
 
     let identity = identity_path
@@ -599,6 +599,7 @@ mod tests {
         env::set_var("KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP", "7");
         env::set_var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE", "true");
         env::set_var("KASPAD_LIBP2P_AUTONAT_CONFIDENCE_THRESHOLD", "2");
+        env::set_var("KASPAD_LIBP2P_RELAY_MIN_SOURCES", "3");
 
         let cfg = libp2p_config_from_args(&Libp2pArgs::default(), Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
         assert_eq!(cfg.mode, AdapterMode::Full);
@@ -610,6 +611,7 @@ mod tests {
         assert_eq!(cfg.autonat.confidence_threshold, 2);
         assert_eq!(cfg.role, AdapterRole::Auto);
         assert_eq!(cfg.libp2p_inbound_cap_private, DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE);
+        assert_eq!(cfg.relay_min_sources, 3);
 
         env::remove_var("KASPAD_LIBP2P_MODE");
         env::remove_var("KASPAD_LIBP2P_IDENTITY_PATH");
@@ -618,6 +620,7 @@ mod tests {
         env::remove_var("KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP");
         env::remove_var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE");
         env::remove_var("KASPAD_LIBP2P_AUTONAT_CONFIDENCE_THRESHOLD");
+        env::remove_var("KASPAD_LIBP2P_RELAY_MIN_SOURCES");
         env::remove_var("KASPAD_LIBP2P_ROLE");
     }
 

@@ -222,6 +222,7 @@ nohup ~/rusty-kaspa/target/release/kaspad \
   --libp2p-identity-path=/tmp/node-a.key \
   --libp2p-helper-listen=127.0.0.1:38080 \
   --libp2p-external-multiaddrs=/ip4/10.0.3.61/tcp/16112 \
+  --libp2p-relay-candidates=/ip4/10.0.3.26/tcp/16112/p2p/RELAY_PEER_ID \
   --connect=10.0.3.26:16111 \
   --nologfiles > /tmp/kaspa-a.log 2>&1 &
 
@@ -245,6 +246,7 @@ nohup ~/rusty-kaspa/target/release/kaspad \
   --libp2p-identity-path=/tmp/node-b.key \
   --libp2p-helper-listen=127.0.0.1:38080 \
   --libp2p-external-multiaddrs=/ip4/10.0.3.62/tcp/16112 \
+  --libp2p-relay-candidates=/ip4/10.0.3.26/tcp/16112/p2p/RELAY_PEER_ID \
   --connect=10.0.3.26:16111 \
   --nologfiles > /tmp/kaspa-b.log 2>&1 &
 
@@ -369,6 +371,12 @@ The `--libp2p-external-multiaddrs` must be the **NAT-translated IP**, not the pr
 |------|------------|----------------------------|
 | Node A | 192.168.1.10 | `/ip4/10.0.3.61/tcp/16112` |
 | Node B | 192.168.2.10 | `/ip4/10.0.3.62/tcp/16112` |
+
+### Relay Auto Requires Multiple Sources
+
+Relay auto-selection requires at least two independent sources for a relay candidate.
+In the lab, use `--libp2p-relay-candidates` plus AddressManager gossip from `--connect`
+to satisfy this requirement.
 
 ## Stopping Nodes
 

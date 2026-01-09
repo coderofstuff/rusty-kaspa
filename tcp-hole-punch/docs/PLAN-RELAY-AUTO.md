@@ -14,9 +14,9 @@ Status tags: [present] [partial] [missing]
 - Synthetic address suppression in address manager (prevents DCUtR pollution). [present]
 - Private inbound cap exists and enforced (default 8). [present]
 - Per‑relay inbound caps exist (config + enforcement). [present]
-- Relay capability advertisement (service bit + relay_port) exists. [partial: no relay pool/selection consumer]
-- Relay reservations rely on static config; backoff only. [present, but no auto selection]
-- Auto role detection is not implemented (auto resolves to private; AutoNAT logs only). [missing]
+- Relay capability advertisement (service bit + relay_port + capacity + ttl) exists and is consumed by relay pool. [present]
+- Relay reservations support static config and auto selection with backoff. [present]
+- Auto role detection wired to AutoNAT + direct reachability. [present]
 
 ## Decisions (from Michael + this thread)
 - Relay server: dedicated port already exists; enable for public nodes. If public detection unknown, start server but advertise only when public confirmed.
@@ -36,7 +36,7 @@ Status tags: [present] [partial] [missing]
      - For private peers, pick **distinct relay** per peer.
      - Enforce max peers per relay = 1 (default).
    - Diversity constraints: avoid same /16 (v4) or /48 (v6) where alternatives exist.
-   - Multi-source discovery: never rely on a single channel or the target peer for relay candidates.
+   - Multi-source discovery: never rely on a single channel or the target peer for relay candidates (min_sources enforced).
 
 3) Rotation
    - Rotate relay on: failures, timeouts, stale ttl, or long-lived bias.
@@ -73,6 +73,7 @@ Status tags: [present] [partial] [missing]
 - Relay listen port: existing libp2p relay port (lab uses 16112), override via flag if needed.
 - Private inbound cap: 8 (already default).
 - Max peers per relay: 1.
+- Relay min sources: 2.
 
 ## Work plan
 ### Phase 1: Relay discovery + pool

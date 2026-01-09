@@ -38,6 +38,7 @@ pub async fn run_relay_auto_worker(
     pool_config.backoff_base = AUTO_RELAY_BASE_BACKOFF;
     pool_config.backoff_max = AUTO_RELAY_MAX_BACKOFF;
     pool_config.min_sources = config.relay_min_sources.max(1);
+    let min_sources = pool_config.min_sources;
     let mut pool = RelayPool::new(pool_config);
     let mut backoff = ReservationManager::new(AUTO_RELAY_BASE_BACKOFF, AUTO_RELAY_MAX_BACKOFF);
     let mut active: HashMap<String, ActiveReservation> = HashMap::new();
@@ -45,6 +46,7 @@ pub async fn run_relay_auto_worker(
     loop {
         let now = Instant::now();
         let candidates = source.fetch_candidates().await;
+        let has_candidates = !candidates.is_empty();
         if candidates.is_empty() {
             debug!("libp2p relay auto: no relay candidates available");
         }
@@ -55,6 +57,8 @@ pub async fn run_relay_auto_worker(
         let desired_keys: HashSet<String> = desired.iter().map(|sel| sel.key.clone()).collect();
         if !desired_keys.is_empty() {
             debug!("libp2p relay auto: selected relays {:?}", desired_keys);
+        } else if has_candidates && min_sources > 1 {
+            debug!("libp2p relay auto: insufficient multi-source relay candidates (min_sources={})", min_sources);
         }
 
         // Release reservations that are no longer desired or are rotated out.

@@ -268,8 +268,13 @@ impl RelayPool {
             return Vec::new();
         }
 
+        let min_sources = self.config.min_sources.max(1);
         let high_confidence: Vec<&RelayEntry> =
-            eligible.iter().copied().filter(|entry| entry.sources.count_ones() as usize >= self.config.min_sources).collect();
+            eligible.iter().copied().filter(|entry| entry.sources.count_ones() as usize >= min_sources).collect();
+
+        if min_sources > 1 && high_confidence.is_empty() {
+            return Vec::new();
+        }
 
         if !high_confidence.is_empty() {
             eligible = high_confidence;
@@ -490,6 +495,28 @@ mod tests {
         let selected = pool.select_relays(now);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].key, b.key);
+    }
+
+    #[test]
+    fn selection_requires_min_sources() {
+        let mut config = RelayPoolConfig::new(1, 1);
+        config.min_sources = 2;
+        config.rng_seed = Some(9);
+        let mut pool = RelayPool::new(config);
+        let now = Instant::now();
+
+        let update = make_update(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 11)), 16112, RelaySource::AddressGossip);
+        let key = update.key.clone();
+        pool.update_candidates(now, vec![update]);
+        assert!(pool.select_relays(now).is_empty());
+
+        let mut update = make_update(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 11)), 16112, RelaySource::Config);
+        update.key = key.clone();
+        pool.update_candidates(now, vec![update]);
+
+        let selected = pool.select_relays(now);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].key, key);
     }
 
     #[test]
