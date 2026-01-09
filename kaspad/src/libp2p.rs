@@ -122,6 +122,8 @@ pub struct Libp2pArgs {
     pub libp2p_relay_advertise_ttl_ms: Option<u64>,
     /// Allow AutoNAT to discover private IPs (for lab environments).
     pub libp2p_autonat_allow_private: bool,
+    /// AutoNAT confidence threshold (successful probes required).
+    pub libp2p_autonat_confidence_threshold: Option<usize>,
 }
 
 impl Default for Libp2pArgs {
@@ -145,6 +147,7 @@ impl Default for Libp2pArgs {
             libp2p_relay_advertise_capacity: None,
             libp2p_relay_advertise_ttl_ms: None,
             libp2p_autonat_allow_private: false,
+            libp2p_autonat_confidence_threshold: None,
         }
     }
 }
@@ -164,6 +167,8 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
     let env_relay_advertise_ttl_ms = env::var("KASPAD_LIBP2P_RELAY_ADVERTISE_TTL_MS").ok().and_then(|s| s.parse::<u64>().ok());
     let env_autonat_allow_private =
         env::var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE").ok().map(|s| s == "1" || s.eq_ignore_ascii_case("true")).unwrap_or(false);
+    let env_autonat_confidence_threshold =
+        env::var("KASPAD_LIBP2P_AUTONAT_CONFIDENCE_THRESHOLD").ok().and_then(|s| s.parse::<usize>().ok());
 
     let mode = if args.libp2p_mode != Libp2pMode::default() { args.libp2p_mode } else { env_mode.unwrap_or(args.libp2p_mode) };
     let role = if args.libp2p_role != Libp2pRole::default() { args.libp2p_role } else { env_role.unwrap_or(args.libp2p_role) };
@@ -203,6 +208,8 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
     let relay_advertise_ttl_ms =
         args.libp2p_relay_advertise_ttl_ms.or(env_relay_advertise_ttl_ms).or(Some(DEFAULT_RELAY_CANDIDATE_TTL.as_millis() as u64));
     let autonat_allow_private = args.libp2p_autonat_allow_private || env_autonat_allow_private;
+    let autonat_confidence_threshold =
+        args.libp2p_autonat_confidence_threshold.or(env_autonat_confidence_threshold).filter(|value| *value > 0);
     let relay_min_sources = if relay_candidates.is_empty() { 1 } else { 2 };
     let resolved_role = resolve_role(role, &reservations, helper_listen);
 
@@ -214,6 +221,9 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
 
     let mut autonat_config = AutoNatConfig::default();
     autonat_config.server_only_if_public = !autonat_allow_private; // Default is true (global only), allow_private flips it.
+    if let Some(threshold) = autonat_confidence_threshold {
+        autonat_config.confidence_threshold = threshold;
+    }
 
     AdapterConfigBuilder::new()
         .mode(AdapterMode::from(mode).effective())
@@ -588,6 +598,7 @@ mod tests {
         env::set_var("KASPAD_LIBP2P_RELAY_INBOUND_CAP", "5");
         env::set_var("KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP", "7");
         env::set_var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE", "true");
+        env::set_var("KASPAD_LIBP2P_AUTONAT_CONFIDENCE_THRESHOLD", "2");
 
         let cfg = libp2p_config_from_args(&Libp2pArgs::default(), Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
         assert_eq!(cfg.mode, AdapterMode::Full);
@@ -596,6 +607,7 @@ mod tests {
         assert_eq!(cfg.relay_inbound_cap, Some(5));
         assert_eq!(cfg.relay_inbound_unknown_cap, Some(7));
         assert_eq!(cfg.autonat.server_only_if_public, false); // allow_private=true -> server_only_if_public=false
+        assert_eq!(cfg.autonat.confidence_threshold, 2);
         assert_eq!(cfg.role, AdapterRole::Auto);
         assert_eq!(cfg.libp2p_inbound_cap_private, DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE);
 
@@ -605,6 +617,7 @@ mod tests {
         env::remove_var("KASPAD_LIBP2P_RELAY_INBOUND_CAP");
         env::remove_var("KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP");
         env::remove_var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE");
+        env::remove_var("KASPAD_LIBP2P_AUTONAT_CONFIDENCE_THRESHOLD");
         env::remove_var("KASPAD_LIBP2P_ROLE");
     }
 

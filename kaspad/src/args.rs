@@ -620,6 +620,15 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .env("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE")
                 .action(ArgAction::SetTrue)
                 .help("Allow AutoNAT to discover and verify private IP addresses (useful for lab environments)."),
+        )
+        .arg(
+            Arg::new("libp2p-autonat-confidence-threshold")
+                .long("libp2p-autonat-confidence-threshold")
+                .env("KASPAD_LIBP2P_AUTONAT_CONFIDENCE_THRESHOLD")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("AutoNAT confidence threshold for public reachability (number of successful probes required)."),
         );
 
     #[cfg(feature = "devnet-prealloc")]
@@ -764,6 +773,10 @@ impl Args {
                     "libp2p-autonat-allow-private",
                     defaults.libp2p.libp2p_autonat_allow_private,
                 ),
+                libp2p_autonat_confidence_threshold: m
+                    .get_one::<usize>("libp2p-autonat-confidence-threshold")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_autonat_confidence_threshold),
             },
 
             #[cfg(feature = "devnet-prealloc")]
