@@ -1715,12 +1715,15 @@ impl SwarmDriver {
             return;
         }
         let relay_id = conn.relay_id.clone();
-        let relay_count = self
+        let mut relay_peers: HashSet<PeerId> = self
             .connections
-            .values()
-            .filter(|entry| matches!(entry.path, PathKind::Relay { .. }) && entry.relay_id == relay_id)
-            .count();
-        if relay_count > self.max_peers_per_relay {
+            .iter()
+            .filter(|(id, entry)| **id != connection_id && matches!(entry.path, PathKind::Relay { .. }) && entry.relay_id == relay_id)
+            .map(|(_, entry)| entry.peer_id)
+            .collect();
+        relay_peers.insert(conn.peer_id);
+        let unique_peers = relay_peers.len();
+        if unique_peers > self.max_peers_per_relay {
             if self.swarm.close_connection(connection_id) {
                 info!("libp2p: closing relay connection {connection_id:?} for relay cap");
             }
