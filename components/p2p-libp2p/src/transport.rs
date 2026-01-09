@@ -318,7 +318,15 @@ mod tests {
     }
 
     fn test_driver(incoming_capacity: usize) -> (SwarmDriver, mpsc::Receiver<IncomingStream>) {
-        let cfg = Config::default();
+        test_driver_with_allow_private(incoming_capacity, false)
+    }
+
+    fn test_driver_with_allow_private(
+        incoming_capacity: usize,
+        allow_private_addrs: bool,
+    ) -> (SwarmDriver, mpsc::Receiver<IncomingStream>) {
+        let mut cfg = Config::default();
+        cfg.autonat.server_only_if_public = !allow_private_addrs;
         let identity = Libp2pIdentity::from_config(&cfg).expect("identity");
         let protocol = default_stream_protocol();
         let swarm = build_streaming_swarm(&identity, &cfg, protocol).expect("swarm");
@@ -332,6 +340,7 @@ mod tests {
             incoming_tx,
             vec![],
             vec![],
+            allow_private_addrs,
             vec![],
             role_tx,
             crate::Role::Private,
@@ -502,6 +511,22 @@ mod tests {
         state.record_direct_inbound(now);
         assert!(state.maybe_promote(now, true));
         assert_eq!(*role_rx.borrow(), crate::Role::Public);
+    }
+
+    #[test]
+    fn usable_external_addr_respects_private_setting() {
+        let (driver_public, _) = test_driver_with_allow_private(1, false);
+        let global: Multiaddr = "/ip4/198.51.100.1/tcp/1234".parse().unwrap();
+        let private: Multiaddr = "/ip4/192.168.1.10/tcp/1234".parse().unwrap();
+        let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/1234".parse().unwrap();
+
+        assert!(driver_public.is_usable_external_addr(&global));
+        assert!(!driver_public.is_usable_external_addr(&private));
+        assert!(!driver_public.is_usable_external_addr(&loopback));
+
+        let (driver_private, _) = test_driver_with_allow_private(1, true);
+        assert!(driver_private.is_usable_external_addr(&private));
+        assert!(!driver_private.is_usable_external_addr(&loopback));
     }
 }
 
@@ -760,6 +785,7 @@ const INCOMING_CHANNEL_BOUND: usize = 32;
 const PENDING_DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 const PENDING_DIAL_CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
 const DIALBACK_COOLDOWN: Duration = Duration::from_secs(30);
+const DIRECT_UPGRADE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 /// Libp2p stream provider backed by a libp2p swarm.
 pub struct SwarmStreamProvider {
@@ -815,6 +841,7 @@ impl SwarmStreamProvider {
         let (role_tx, role_rx) = watch::channel(effective_role);
         let auto_role_required_autonat = config.autonat.confidence_threshold.max(1);
         let auto_role_required_direct = AUTO_ROLE_REQUIRED_DIRECT.max(1);
+        let allow_private_addrs = !config.autonat.server_only_if_public;
         let task = handle.spawn(
             SwarmDriver::new(
                 swarm,
@@ -822,6 +849,7 @@ impl SwarmStreamProvider {
                 incoming_tx,
                 listen_multiaddrs,
                 external_multiaddrs,
+                allow_private_addrs,
                 reservations,
                 role_tx,
                 config.role,
@@ -1126,8 +1154,10 @@ struct SwarmDriver {
     pending_dials: HashMap<StreamRequestId, DialRequest>,
     pending_probes: HashMap<StreamRequestId, PendingProbe>,
     dialback_cooldowns: HashMap<PeerId, Instant>,
+    direct_upgrade_cooldowns: HashMap<PeerId, Instant>,
     listen_addrs: Vec<Multiaddr>,
     external_addrs: Vec<Multiaddr>,
+    allow_private_addrs: bool,
     peer_states: HashMap<PeerId, PeerState>,
     reservation_listeners: HashSet<ListenerId>,
     active_relay: Option<RelayInfo>,
@@ -1158,6 +1188,7 @@ impl SwarmDriver {
         incoming_tx: mpsc::Sender<IncomingStream>,
         listen_addrs: Vec<Multiaddr>,
         external_addrs: Vec<Multiaddr>,
+        allow_private_addrs: bool,
         reservations: Vec<ReservationTarget>,
         role_tx: watch::Sender<crate::Role>,
         config_role: crate::Role,
@@ -1182,8 +1213,10 @@ impl SwarmDriver {
             pending_dials: HashMap::new(),
             pending_probes: HashMap::new(),
             dialback_cooldowns: HashMap::new(),
+            direct_upgrade_cooldowns: HashMap::new(),
             listen_addrs,
             external_addrs,
+            allow_private_addrs,
             peer_states: HashMap::new(),
             reservation_listeners: HashSet::new(),
             active_relay,
@@ -1379,7 +1412,7 @@ impl SwarmDriver {
                     // Relay circuit peers may report observed addresses like `/p2p/<peer_id>` without
                     // any IP information, which are useless for DCUtR hole punching and pollute
                     // the external address set.
-                    if !addr_uses_relay(&info.observed_addr) && is_tcp_dialable(&info.observed_addr) {
+                    if self.is_usable_external_addr(&info.observed_addr) {
                         self.swarm.add_external_address(info.observed_addr.clone());
                     }
                     // NOTE: We intentionally do NOT add info.listen_addrs as external addresses.
@@ -1466,11 +1499,11 @@ impl SwarmDriver {
             }
             SwarmEvent::Behaviour(Libp2pEvent::Autonat(event)) => {
                 debug!("libp2p autonat event: {:?}", event);
+                let has_external_addr = self.has_usable_external_addr();
                 if let Some(auto_role) = self.auto_role.as_mut() {
                     let is_public_probe = matches!(event, autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Response { .. }));
                     if is_public_probe {
                         auto_role.record_autonat_public(Instant::now());
-                        let has_external_addr = self.swarm.external_addresses().next().is_some();
                         if auto_role.maybe_promote(Instant::now(), has_external_addr) {
                             info!("libp2p autonat: role auto-promoted to public");
                         }
@@ -1490,10 +1523,10 @@ impl SwarmDriver {
                 debug!("libp2p connection established with {peer_id} on {connection_id:?}");
                 self.track_established(peer_id, &endpoint);
 
+                let has_external_addr = self.has_usable_external_addr();
                 if let Some(auto_role) = self.auto_role.as_mut() {
                     if !endpoint.is_dialer() && !endpoint_uses_relay(&endpoint) {
                         auto_role.record_direct_inbound(Instant::now());
-                        let has_external_addr = self.swarm.external_addresses().next().is_some();
                         if auto_role.maybe_promote(Instant::now(), has_external_addr) {
                             info!("libp2p auto role: promoted to public after direct inbound");
                         }
@@ -1533,6 +1566,9 @@ impl SwarmDriver {
                     self.maybe_request_dialback(peer_id);
                 }
                 self.record_connection(connection_id, peer_id, &endpoint, had_pending_relay);
+                if !endpoint_uses_relay(&endpoint) {
+                    self.note_direct_upgrade(peer_id, had_pending_relay);
+                }
                 if endpoint_uses_relay(&endpoint) {
                     self.enforce_relay_cap(connection_id);
                 } else {
@@ -1595,6 +1631,46 @@ impl SwarmDriver {
                 state.connected_via_relay = false;
             }
         }
+    }
+
+    fn has_usable_external_addr(&self) -> bool {
+        self.swarm.external_addresses().any(|addr| self.is_usable_external_addr(addr))
+    }
+
+    fn is_usable_external_addr(&self, addr: &Multiaddr) -> bool {
+        if !is_tcp_dialable(addr) {
+            return false;
+        }
+        let mut ip: Option<std::net::IpAddr> = None;
+        for protocol in addr.iter() {
+            match protocol {
+                Protocol::Ip4(v4) => ip = Some(std::net::IpAddr::V4(v4)),
+                Protocol::Ip6(v6) => ip = Some(std::net::IpAddr::V6(v6)),
+                Protocol::P2pCircuit => return false,
+                _ => {}
+            }
+        }
+        let Some(ip) = ip else {
+            return false;
+        };
+        if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+            return false;
+        }
+        if self.allow_private_addrs {
+            return true;
+        }
+        kaspa_utils::networking::IpAddress::new(ip).is_publicly_routable()
+    }
+
+    fn has_relay_connection(&self, peer_id: PeerId) -> bool {
+        self.connections.values().any(|conn| conn.peer_id == peer_id && matches!(conn.path, PathKind::Relay { .. }))
+    }
+
+    fn note_direct_upgrade(&mut self, peer_id: PeerId, had_pending_relay: bool) {
+        if !had_pending_relay && !self.has_relay_connection(peer_id) {
+            return;
+        }
+        self.direct_upgrade_cooldowns.insert(peer_id, Instant::now() + DIRECT_UPGRADE_COOLDOWN);
     }
 
     fn record_connection(
@@ -1777,6 +1853,17 @@ impl SwarmDriver {
             && *next_allowed > now
         {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: cooldown until {:?}", *next_allowed);
+            return;
+        }
+        if let Some(until) = self.direct_upgrade_cooldowns.get(&peer_id).copied() {
+            if until > now {
+                debug!("libp2p dcutr: skipping dial-back to {peer_id}: direct-upgrade cooldown until {:?}", until);
+                return;
+            }
+            self.direct_upgrade_cooldowns.remove(&peer_id);
+        }
+        if !self.has_usable_external_addr() {
+            debug!("libp2p dcutr: skipping dial-back to {peer_id}: no usable external address");
             return;
         }
 
