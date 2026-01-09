@@ -28,7 +28,7 @@ use kaspa_txscript::caches::TxScriptCacheCounters;
 use kaspa_utils::git;
 use kaspa_utils::networking::ContextualNetAddress;
 #[cfg(feature = "libp2p")]
-use kaspa_utils::networking::NET_ADDRESS_SERVICE_LIBP2P_RELAY;
+use kaspa_utils::networking::{RelayRole, NET_ADDRESS_SERVICE_LIBP2P_RELAY};
 use kaspa_utils::sysinfo::SystemInfo;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
 
@@ -96,7 +96,16 @@ pub fn get_app_dir() -> PathBuf {
 }
 
 #[cfg(feature = "libp2p")]
-fn libp2p_advertisement(config: &kaspa_p2p_libp2p::Config) -> (u64, Option<u16>) {
+struct Libp2pAdvertisement {
+    services: u64,
+    relay_port: Option<u16>,
+    relay_capacity: Option<u32>,
+    relay_ttl_ms: Option<u64>,
+    relay_role: Option<RelayRole>,
+}
+
+#[cfg(feature = "libp2p")]
+fn libp2p_advertisement(config: &kaspa_p2p_libp2p::Config) -> Libp2pAdvertisement {
     let advertise = config.mode.is_enabled()
         && matches!(
             config.mode.effective(),
@@ -105,7 +114,10 @@ fn libp2p_advertisement(config: &kaspa_p2p_libp2p::Config) -> (u64, Option<u16>)
         && matches!(config.role, kaspa_p2p_libp2p::Role::Public);
     let services = if advertise { NET_ADDRESS_SERVICE_LIBP2P_RELAY } else { 0 };
     let relay_port = if advertise { config.listen_addresses.first().map(|addr| addr.port()) } else { None };
-    (services, relay_port)
+    let relay_capacity = if advertise { config.relay_advertise_capacity } else { None };
+    let relay_ttl_ms = if advertise { config.relay_advertise_ttl_ms } else { None };
+    let relay_role = if advertise { Some(RelayRole::Public) } else { None };
+    Libp2pAdvertisement { services, relay_port, relay_capacity, relay_ttl_ms, relay_role }
 }
 
 pub fn validate_args(args: &Args) -> ConfigResult<()> {
@@ -585,21 +597,45 @@ Do you confirm? (y/n)";
         (cfg, status, outbound, runtime.init_service, runtime.provider_cell)
     };
     #[cfg(feature = "libp2p")]
-    let (libp2p_services, libp2p_relay_port, libp2p_relay_inbound_cap, libp2p_relay_inbound_unknown_cap) = {
-        let (services, relay_port) = libp2p_advertisement(&libp2p_config);
+    let (
+        libp2p_services,
+        libp2p_relay_port,
+        libp2p_relay_capacity,
+        libp2p_relay_ttl_ms,
+        libp2p_relay_role,
+        libp2p_relay_inbound_cap,
+        libp2p_relay_inbound_unknown_cap,
+    ) = {
+        let advert = libp2p_advertisement(&libp2p_config);
         let relay_inbound_cap = if matches!(libp2p_config.role, kaspa_p2p_libp2p::Role::Private | kaspa_p2p_libp2p::Role::Auto) {
             Some(libp2p_config.max_peers_per_relay)
         } else {
             libp2p_config.relay_inbound_cap
         };
-        (services, relay_port, relay_inbound_cap, libp2p_config.relay_inbound_unknown_cap)
+        (
+            advert.services,
+            advert.relay_port,
+            advert.relay_capacity,
+            advert.relay_ttl_ms,
+            advert.relay_role,
+            relay_inbound_cap,
+            libp2p_config.relay_inbound_unknown_cap,
+        )
     };
     #[cfg(not(feature = "libp2p"))]
     let libp2p_status: GetLibp2pStatusResponse = GetLibp2pStatusResponse::disabled();
     #[cfg(not(feature = "libp2p"))]
     let outbound_connector: Arc<dyn kaspa_p2p_lib::OutboundConnector> = Arc::new(kaspa_p2p_lib::TcpConnector);
     #[cfg(not(feature = "libp2p"))]
-    let (libp2p_services, libp2p_relay_port, libp2p_relay_inbound_cap, libp2p_relay_inbound_unknown_cap) = (0, None, None, None);
+    let (
+        libp2p_services,
+        libp2p_relay_port,
+        libp2p_relay_capacity,
+        libp2p_relay_ttl_ms,
+        libp2p_relay_role,
+        libp2p_relay_inbound_cap,
+        libp2p_relay_inbound_unknown_cap,
+    ) = (0, None, None, None, None, None, None);
     #[cfg(feature = "libp2p")]
     {
         let is_private = libp2p_config.mode.is_enabled()
@@ -713,6 +749,9 @@ Do you confirm? (y/n)";
         outbound_connector.clone(),
         libp2p_services,
         libp2p_relay_port,
+        libp2p_relay_capacity,
+        libp2p_relay_ttl_ms,
+        libp2p_relay_role,
         libp2p_relay_inbound_cap,
         libp2p_relay_inbound_unknown_cap,
     ));
@@ -841,13 +880,15 @@ mod tests {
             .role(AdapterRole::Public)
             .listen_addresses(vec!["127.0.0.1:18080".parse().unwrap()])
             .build();
-        let (services, relay_port) = libp2p_advertisement(&cfg_public);
-        assert_eq!(services, NET_ADDRESS_SERVICE_LIBP2P_RELAY);
-        assert_eq!(relay_port, Some(18080));
+        let advert = libp2p_advertisement(&cfg_public);
+        assert_eq!(advert.services, NET_ADDRESS_SERVICE_LIBP2P_RELAY);
+        assert_eq!(advert.relay_port, Some(18080));
+        assert_eq!(advert.relay_role, Some(RelayRole::Public));
 
         let cfg_private = AdapterConfig { role: AdapterRole::Private, ..cfg_public.clone() };
-        let (services_private, relay_port_private) = libp2p_advertisement(&cfg_private);
-        assert_eq!(services_private, 0);
-        assert_eq!(relay_port_private, None);
+        let advert_private = libp2p_advertisement(&cfg_private);
+        assert_eq!(advert_private.services, 0);
+        assert_eq!(advert_private.relay_port, None);
+        assert_eq!(advert_private.relay_role, None);
     }
 }

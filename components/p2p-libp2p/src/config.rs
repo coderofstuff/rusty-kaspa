@@ -41,12 +41,19 @@ pub struct Config {
     pub libp2p_inbound_cap_private: usize,
     pub max_relays: usize,
     pub max_peers_per_relay: usize,
+    pub relay_min_sources: usize,
     /// Optional list of relay reservation multiaddrs.
     pub reservations: Vec<String>,
+    /// Optional list of relay candidate multiaddrs for auto selection.
+    pub relay_candidates: Vec<String>,
     /// External multiaddrs to announce.
     pub external_multiaddrs: Vec<String>,
     /// Advertised socket addresses for non-libp2p awareness.
     pub advertise_addresses: Vec<SocketAddr>,
+    /// Optional relay capacity to advertise via gossip.
+    pub relay_advertise_capacity: Option<u32>,
+    /// Optional relay TTL (ms) to advertise via gossip.
+    pub relay_advertise_ttl_ms: Option<u64>,
     /// AutoNAT configuration.
     pub autonat: AutoNatConfig,
 }
@@ -62,11 +69,15 @@ impl Default for Config {
             relay_inbound_cap: None,
             relay_inbound_unknown_cap: None,
             libp2p_inbound_cap_private: 8,
-            max_relays: 8,
+            max_relays: 1,
             max_peers_per_relay: 1,
+            relay_min_sources: 1,
             reservations: Vec::new(),
+            relay_candidates: Vec::new(),
             external_multiaddrs: Vec::new(),
             advertise_addresses: Vec::new(),
+            relay_advertise_capacity: None,
+            relay_advertise_ttl_ms: None,
             autonat: AutoNatConfig::default(),
         }
     }
@@ -140,8 +151,18 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn relay_min_sources(mut self, relay_min_sources: usize) -> Self {
+        self.config.relay_min_sources = relay_min_sources;
+        self
+    }
+
     pub fn reservations(mut self, reservations: Vec<String>) -> Self {
         self.config.reservations = reservations;
+        self
+    }
+
+    pub fn relay_candidates(mut self, relay_candidates: Vec<String>) -> Self {
+        self.config.relay_candidates = relay_candidates;
         self
     }
 
@@ -152,6 +173,16 @@ impl ConfigBuilder {
 
     pub fn advertise_addresses(mut self, addrs: Vec<SocketAddr>) -> Self {
         self.config.advertise_addresses = addrs;
+        self
+    }
+
+    pub fn relay_advertise_capacity(mut self, relay_advertise_capacity: Option<u32>) -> Self {
+        self.config.relay_advertise_capacity = relay_advertise_capacity;
+        self
+    }
+
+    pub fn relay_advertise_ttl_ms(mut self, relay_advertise_ttl_ms: Option<u64>) -> Self {
+        self.config.relay_advertise_ttl_ms = relay_advertise_ttl_ms;
         self
     }
 

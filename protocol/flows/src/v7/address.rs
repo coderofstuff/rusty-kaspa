@@ -7,7 +7,6 @@ use kaspa_p2p_lib::{
     dequeue, dequeue_with_timeout, make_message,
     pb::{AddressesMessage, RequestAddressesMessage, kaspad_message::Payload},
 };
-use kaspa_utils::networking::IpAddress;
 use rand::seq::SliceRandom;
 use std::sync::Arc;
 
@@ -49,13 +48,13 @@ impl ReceiveAddressesFlow {
             .await?;
 
         let msg = dequeue_with_timeout!(self.incoming_route, Payload::Addresses)?;
-        let address_list: Vec<(IpAddress, u16)> = msg.try_into()?;
+        let address_list: Vec<NetAddress> = msg.try_into()?;
         if address_list.len() > MAX_ADDRESSES_RECEIVE {
             return Err(ProtocolError::OtherOwned(format!("address count {} exceeded {}", address_list.len(), MAX_ADDRESSES_RECEIVE)));
         }
         let mut amgr_lock = self.ctx.address_manager.lock();
-        for (ip, port) in address_list {
-            amgr_lock.add_address(NetAddress::new(ip, port))
+        for addr in address_list {
+            amgr_lock.add_address(addr)
         }
 
         Ok(())
@@ -88,10 +87,8 @@ impl SendAddressesFlow {
         loop {
             dequeue!(self.incoming_route, Payload::RequestAddresses)?;
             let addresses = self.ctx.address_manager.lock().iterate_addresses().collect_vec();
-            let address_list = addresses
-                .choose_multiple(&mut rand::thread_rng(), MAX_ADDRESSES_SEND)
-                .map(|addr| (addr.ip, addr.port).into())
-                .collect();
+            let address_list =
+                addresses.choose_multiple(&mut rand::thread_rng(), MAX_ADDRESSES_SEND).map(|addr| (*addr).into()).collect();
             self.router.enqueue(make_message!(Payload::Addresses, AddressesMessage { address_list })).await?;
         }
     }

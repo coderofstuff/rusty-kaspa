@@ -221,6 +221,14 @@ impl BorshDeserialize for IpAddress {
 /// Service flag indicating that an address supports acting as a libp2p relay bridge.
 pub const NET_ADDRESS_SERVICE_LIBP2P_RELAY: u64 = 1 << 0;
 
+/// Relay role advertised in relay capability gossip.
+#[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RelayRole {
+    Public,
+    Private,
+}
+
 /// A network address, equivalent of a [SocketAddr], enriched with service metadata.
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 pub struct NetAddress {
@@ -230,11 +238,17 @@ pub struct NetAddress {
     pub services: u64,
     #[serde(default)]
     pub relay_port: Option<u16>,
+    #[serde(default)]
+    pub relay_capacity: Option<u32>,
+    #[serde(default)]
+    pub relay_ttl_ms: Option<u64>,
+    #[serde(default)]
+    pub relay_role: Option<RelayRole>,
 }
 
 impl NetAddress {
     pub fn new(ip: IpAddress, port: u16) -> Self {
-        Self { ip, port, services: 0, relay_port: None }
+        Self { ip, port, services: 0, relay_port: None, relay_capacity: None, relay_ttl_ms: None, relay_role: None }
     }
 
     pub fn prefix_bucket(&self) -> PrefixBucket {
@@ -251,6 +265,21 @@ impl NetAddress {
         self
     }
 
+    pub fn with_relay_capacity(mut self, relay_capacity: Option<u32>) -> Self {
+        self.relay_capacity = relay_capacity;
+        self
+    }
+
+    pub fn with_relay_ttl_ms(mut self, relay_ttl_ms: Option<u64>) -> Self {
+        self.relay_ttl_ms = relay_ttl_ms;
+        self
+    }
+
+    pub fn with_relay_role(mut self, relay_role: Option<RelayRole>) -> Self {
+        self.relay_role = relay_role;
+        self
+    }
+
     pub fn set_services(&mut self, services: u64) {
         self.services = services;
     }
@@ -259,12 +288,33 @@ impl NetAddress {
         self.relay_port = relay_port;
     }
 
+    pub fn set_relay_capacity(&mut self, relay_capacity: Option<u32>) {
+        self.relay_capacity = relay_capacity;
+    }
+
+    pub fn set_relay_ttl_ms(&mut self, relay_ttl_ms: Option<u64>) {
+        self.relay_ttl_ms = relay_ttl_ms;
+    }
+
+    pub fn set_relay_role(&mut self, relay_role: Option<RelayRole>) {
+        self.relay_role = relay_role;
+    }
+
     /// Merge capability metadata from another address that refers to the same endpoint.
     /// Services are ORed; relay port is upgraded if provided by the other address.
     pub fn merge_metadata(&mut self, other: &NetAddress) {
         self.services |= other.services;
         if let Some(port) = other.relay_port {
             self.relay_port = Some(port);
+        }
+        if let Some(capacity) = other.relay_capacity {
+            self.relay_capacity = Some(capacity);
+        }
+        if let Some(ttl_ms) = other.relay_ttl_ms {
+            self.relay_ttl_ms = Some(ttl_ms);
+        }
+        if let Some(role) = other.relay_role {
+            self.relay_role = Some(role);
         }
     }
 
@@ -324,6 +374,9 @@ impl BorshSerialize for NetAddress {
         BorshSerialize::serialize(&self.port, writer)?;
         BorshSerialize::serialize(&self.services, writer)?;
         BorshSerialize::serialize(&self.relay_port, writer)?;
+        BorshSerialize::serialize(&self.relay_capacity, writer)?;
+        BorshSerialize::serialize(&self.relay_ttl_ms, writer)?;
+        BorshSerialize::serialize(&self.relay_role, writer)?;
         Ok(())
     }
 }
@@ -345,7 +398,25 @@ impl BorshDeserialize for NetAddress {
             Err(err) => return Err(err),
         };
 
-        Ok(Self { ip, port, services, relay_port })
+        let relay_capacity = match Option::<u32>::deserialize_reader(reader) {
+            Ok(capacity) => capacity,
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => None,
+            Err(err) => return Err(err),
+        };
+
+        let relay_ttl_ms = match Option::<u64>::deserialize_reader(reader) {
+            Ok(ttl_ms) => ttl_ms,
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => None,
+            Err(err) => return Err(err),
+        };
+
+        let relay_role = match Option::<RelayRole>::deserialize_reader(reader) {
+            Ok(role) => role,
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => None,
+            Err(err) => return Err(err),
+        };
+
+        Ok(Self { ip, port, services, relay_port, relay_capacity, relay_ttl_ms, relay_role })
     }
 }
 

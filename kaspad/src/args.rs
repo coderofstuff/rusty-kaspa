@@ -567,6 +567,34 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .help("Comma-separated relay reservation multiaddrs."),
         )
         .arg(
+            Arg::new("libp2p-relay-candidates")
+                .long("libp2p-relay-candidates")
+                .env("KASPAD_LIBP2P_RELAY_CANDIDATES")
+                .value_name("MULTIADDRS")
+                .require_equals(true)
+                .use_value_delimiter(true)
+                .value_parser(clap::value_parser!(String))
+                .help("Comma-separated static relay candidate multiaddrs for auto selection."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-advertise-capacity")
+                .long("libp2p-relay-advertise-capacity")
+                .env("KASPAD_LIBP2P_RELAY_ADVERTISE_CAPACITY")
+                .value_name("N")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(u32))
+                .help("Relay capacity to advertise via relay gossip."),
+        )
+        .arg(
+            Arg::new("libp2p-relay-advertise-ttl-ms")
+                .long("libp2p-relay-advertise-ttl-ms")
+                .env("KASPAD_LIBP2P_RELAY_ADVERTISE_TTL_MS")
+                .value_name("MS")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(u64))
+                .help("Relay TTL (ms) to advertise via relay gossip."),
+        )
+        .arg(
             Arg::new("libp2p-external-multiaddrs")
                 .long("libp2p-external-multiaddrs")
                 .env("KASPAD_LIBP2P_EXTERNAL_MULTIADDRS")
@@ -711,6 +739,10 @@ impl Args {
                     .get_many::<String>("libp2p-reservations")
                     .map(|vals| vals.cloned().collect())
                     .unwrap_or(defaults.libp2p.libp2p_reservations),
+                libp2p_relay_candidates: m
+                    .get_many::<String>("libp2p-relay-candidates")
+                    .map(|vals| vals.cloned().collect())
+                    .unwrap_or(defaults.libp2p.libp2p_relay_candidates),
                 libp2p_external_multiaddrs: m
                     .get_many::<String>("libp2p-external-multiaddrs")
                     .map(|vals| vals.cloned().collect())
@@ -719,6 +751,14 @@ impl Args {
                     .get_many::<SocketAddr>("libp2p-advertise-addresses")
                     .map(|vals| vals.copied().collect())
                     .unwrap_or(defaults.libp2p.libp2p_advertise_addresses),
+                libp2p_relay_advertise_capacity: m
+                    .get_one::<u32>("libp2p-relay-advertise-capacity")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_relay_advertise_capacity),
+                libp2p_relay_advertise_ttl_ms: m
+                    .get_one::<u64>("libp2p-relay-advertise-ttl-ms")
+                    .copied()
+                    .or(defaults.libp2p.libp2p_relay_advertise_ttl_ms),
                 libp2p_autonat_allow_private: arg_match_unwrap_or::<bool>(
                     &m,
                     "libp2p-autonat-allow-private",

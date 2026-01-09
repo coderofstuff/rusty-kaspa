@@ -119,6 +119,16 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_uses_relay_checks_local_addr_for_listener() {
+        let relay = PeerId::random();
+        let peer = PeerId::random();
+        let local_addr: Multiaddr = format!("/ip4/10.0.0.1/tcp/16112/p2p/{relay}/p2p-circuit").parse().unwrap();
+        let send_back_addr: Multiaddr = format!("/p2p/{peer}").parse().unwrap();
+        let endpoint = libp2p::core::ConnectedPoint::Listener { local_addr, send_back_addr };
+        assert!(endpoint_uses_relay(&endpoint));
+    }
+
+    #[test]
     fn identity_ephemeral_and_persisted() {
         let cfg = Config::default();
         let id = Libp2pIdentity::from_config(&cfg).expect("ephemeral identity");
@@ -316,7 +326,21 @@ mod tests {
         let (incoming_tx, incoming_rx) = mpsc::channel(incoming_capacity);
         let (_shutdown_tx, shutdown) = triggered::trigger();
         let (role_tx, _role_rx) = watch::channel(crate::Role::Private);
-        let driver = SwarmDriver::new(swarm, cmd_rx, incoming_tx, vec![], vec![], vec![], role_tx, crate::Role::Private, 1, shutdown);
+        let driver = SwarmDriver::new(
+            swarm,
+            cmd_rx,
+            incoming_tx,
+            vec![],
+            vec![],
+            vec![],
+            role_tx,
+            crate::Role::Private,
+            1,
+            AUTO_ROLE_WINDOW,
+            1,
+            1,
+            shutdown,
+        );
         (driver, incoming_rx)
     }
 
@@ -441,7 +465,7 @@ mod tests {
     #[test]
     fn auto_role_promotes_after_signals() {
         let (role_tx, role_rx) = watch::channel(crate::Role::Private);
-        let mut state = AutoRoleState::new(role_tx);
+        let mut state = AutoRoleState::new(role_tx, AUTO_ROLE_WINDOW, 1, 1);
         let now = Instant::now();
 
         state.record_autonat_public(now);
@@ -455,13 +479,29 @@ mod tests {
     #[test]
     fn auto_role_requires_external_addr() {
         let (role_tx, role_rx) = watch::channel(crate::Role::Private);
-        let mut state = AutoRoleState::new(role_tx);
+        let mut state = AutoRoleState::new(role_tx, AUTO_ROLE_WINDOW, 1, 1);
         let now = Instant::now();
 
         state.record_autonat_public(now);
         state.record_direct_inbound(now);
         assert!(!state.maybe_promote(now, false));
         assert_eq!(*role_rx.borrow(), crate::Role::Private);
+    }
+
+    #[test]
+    fn auto_role_requires_hysteresis_hits() {
+        let (role_tx, role_rx) = watch::channel(crate::Role::Private);
+        let mut state = AutoRoleState::new(role_tx, AUTO_ROLE_WINDOW, 2, 2);
+        let now = Instant::now();
+
+        state.record_autonat_public(now);
+        state.record_direct_inbound(now);
+        assert!(!state.maybe_promote(now, true));
+
+        state.record_autonat_public(now);
+        state.record_direct_inbound(now);
+        assert!(state.maybe_promote(now, true));
+        assert_eq!(*role_rx.borrow(), crate::Role::Public);
     }
 }
 
@@ -773,6 +813,8 @@ impl SwarmStreamProvider {
         let reservations = parse_reservation_targets(&config.reservations)?;
         let effective_role = if matches!(config.role, crate::Role::Auto) { crate::Role::Private } else { config.role };
         let (role_tx, role_rx) = watch::channel(effective_role);
+        let auto_role_required_autonat = config.autonat.confidence_threshold.max(1);
+        let auto_role_required_direct = AUTO_ROLE_REQUIRED_DIRECT.max(1);
         let task = handle.spawn(
             SwarmDriver::new(
                 swarm,
@@ -784,6 +826,9 @@ impl SwarmStreamProvider {
                 role_tx,
                 config.role,
                 config.max_peers_per_relay,
+                AUTO_ROLE_WINDOW,
+                auto_role_required_autonat,
+                auto_role_required_direct,
                 shutdown_listener,
             )
             .run(),
@@ -1007,28 +1052,33 @@ struct PendingProbe {
 }
 
 const AUTO_ROLE_WINDOW: Duration = Duration::from_secs(10 * 60);
+const AUTO_ROLE_REQUIRED_DIRECT: usize = 1;
 
 struct AutoRoleState {
     current: crate::Role,
     window: Duration,
-    autonat_public_at: Option<Instant>,
+    required_autonat: usize,
+    required_direct: usize,
+    autonat_public_hits: VecDeque<Instant>,
     direct_inbound_hits: VecDeque<Instant>,
     role_tx: watch::Sender<crate::Role>,
 }
 
 impl AutoRoleState {
-    fn new(role_tx: watch::Sender<crate::Role>) -> Self {
+    fn new(role_tx: watch::Sender<crate::Role>, window: Duration, required_autonat: usize, required_direct: usize) -> Self {
         Self {
             current: crate::Role::Private,
-            window: AUTO_ROLE_WINDOW,
-            autonat_public_at: None,
+            window,
+            required_autonat: required_autonat.max(1),
+            required_direct: required_direct.max(1),
+            autonat_public_hits: VecDeque::new(),
             direct_inbound_hits: VecDeque::new(),
             role_tx,
         }
     }
 
     fn record_autonat_public(&mut self, now: Instant) {
-        self.autonat_public_at = Some(now);
+        self.autonat_public_hits.push_back(now);
         self.prune(now);
     }
 
@@ -1038,8 +1088,8 @@ impl AutoRoleState {
     }
 
     fn prune(&mut self, now: Instant) {
-        if self.autonat_public_at.map(|t| now.saturating_duration_since(t) > self.window).unwrap_or(false) {
-            self.autonat_public_at = None;
+        while self.autonat_public_hits.front().map(|t| now.saturating_duration_since(*t) > self.window).unwrap_or(false) {
+            self.autonat_public_hits.pop_front();
         }
         while self.direct_inbound_hits.front().map(|t| now.saturating_duration_since(*t) > self.window).unwrap_or(false) {
             self.direct_inbound_hits.pop_front();
@@ -1051,7 +1101,10 @@ impl AutoRoleState {
             return false;
         }
         self.prune(now);
-        if self.autonat_public_at.is_some() && !self.direct_inbound_hits.is_empty() && has_external_addr {
+        if self.autonat_public_hits.len() >= self.required_autonat
+            && self.direct_inbound_hits.len() >= self.required_direct
+            && has_external_addr
+        {
             self.current = crate::Role::Public;
             let _ = self.role_tx.send(crate::Role::Public);
             return true;
@@ -1098,6 +1151,7 @@ impl SwarmDriver {
         let _ = self.start_listening();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new(
         swarm: libp2p::Swarm<Libp2pBehaviour>,
         command_rx: mpsc::Receiver<SwarmCommand>,
@@ -1108,11 +1162,18 @@ impl SwarmDriver {
         role_tx: watch::Sender<crate::Role>,
         config_role: crate::Role,
         max_peers_per_relay: usize,
+        auto_role_window: Duration,
+        auto_role_required_autonat: usize,
+        auto_role_required_direct: usize,
         shutdown: Listener,
     ) -> Self {
         let local_peer_id = *swarm.local_peer_id();
         let active_relay = reservations.into_iter().find_map(|r| relay_info_from_multiaddr(&r.multiaddr, local_peer_id));
-        let auto_role = if matches!(config_role, crate::Role::Auto) { Some(AutoRoleState::new(role_tx)) } else { None };
+        let auto_role = if matches!(config_role, crate::Role::Auto) {
+            Some(AutoRoleState::new(role_tx, auto_role_window, auto_role_required_autonat, auto_role_required_direct))
+        } else {
+            None
+        };
 
         Self {
             swarm,
@@ -1547,7 +1608,9 @@ impl SwarmDriver {
         let path = if endpoint_uses_relay(endpoint) { PathKind::Relay { relay_id: None } } else { PathKind::Direct };
         let relay_id = match endpoint {
             libp2p::core::ConnectedPoint::Dialer { address, .. } => relay_id_from_multiaddr(address),
-            libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => relay_id_from_multiaddr(send_back_addr),
+            libp2p::core::ConnectedPoint::Listener { send_back_addr, local_addr } => {
+                relay_id_from_multiaddr(send_back_addr).or_else(|| relay_id_from_multiaddr(local_addr))
+            }
         };
         let outbound = endpoint.is_dialer();
         self.connections
@@ -1969,11 +2032,12 @@ fn is_tcp_dialable(addr: &Multiaddr) -> bool {
 }
 
 fn endpoint_uses_relay(endpoint: &libp2p::core::ConnectedPoint) -> bool {
-    let addr = match endpoint {
-        libp2p::core::ConnectedPoint::Dialer { address, .. } => address,
-        libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => send_back_addr,
-    };
-    addr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+    match endpoint {
+        libp2p::core::ConnectedPoint::Dialer { address, .. } => addr_uses_relay(address),
+        libp2p::core::ConnectedPoint::Listener { send_back_addr, local_addr } => {
+            addr_uses_relay(send_back_addr) || addr_uses_relay(local_addr)
+        }
+    }
 }
 
 #[cfg(test)]

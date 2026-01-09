@@ -37,6 +37,7 @@ pub async fn run_relay_auto_worker(
     pool_config.rotation_interval = AUTO_RELAY_ROTATE_INTERVAL;
     pool_config.backoff_base = AUTO_RELAY_BASE_BACKOFF;
     pool_config.backoff_max = AUTO_RELAY_MAX_BACKOFF;
+    pool_config.min_sources = config.relay_min_sources.max(1);
     let mut pool = RelayPool::new(pool_config);
     let mut backoff = ReservationManager::new(AUTO_RELAY_BASE_BACKOFF, AUTO_RELAY_MAX_BACKOFF);
     let mut active: HashMap<String, ActiveReservation> = HashMap::new();

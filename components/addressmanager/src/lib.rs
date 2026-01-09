@@ -218,7 +218,7 @@ impl AddressManager {
                 gateway.add_any_port(igd::PortMappingProtocol::TCP, local_addr, UPNP_DEADLINE_SEC as u32, UPNP_REGISTRATION_NAME)?;
             info!("[UPnP] Added port mapping to random external port: {ip}:{port}");
             return Ok(Some((
-                NetAddress { ip, port, services: 0, relay_port: None },
+                NetAddress { ip, port, services: 0, relay_port: None, relay_capacity: None, relay_ttl_ms: None, relay_role: None },
                 ExtendHelper { gateway, local_addr, external_port: port },
             )));
         }
@@ -233,7 +233,15 @@ impl AddressManager {
             Ok(_) => {
                 info!("[UPnP] Added port mapping to default external port: {ip}:{desired_external_port}");
                 Ok(Some((
-                    NetAddress { ip, port: desired_external_port, services: 0, relay_port: None },
+                    NetAddress {
+                        ip,
+                        port: desired_external_port,
+                        services: 0,
+                        relay_port: None,
+                        relay_capacity: None,
+                        relay_ttl_ms: None,
+                        relay_role: None,
+                    },
                     ExtendHelper { gateway, local_addr, external_port: desired_external_port },
                 )))
             }
@@ -246,7 +254,7 @@ impl AddressManager {
                 )?;
                 info!("[UPnP] Added port mapping to random external port: {ip}:{port}");
                 Ok(Some((
-                    NetAddress { ip, port, services: 0, relay_port: None },
+                    NetAddress { ip, port, services: 0, relay_port: None, relay_capacity: None, relay_ttl_ms: None, relay_role: None },
                     ExtendHelper { gateway, local_addr, external_port: port },
                 )))
             }

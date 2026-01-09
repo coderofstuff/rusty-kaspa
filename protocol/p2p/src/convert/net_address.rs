@@ -4,7 +4,7 @@ use super::error::ConversionError;
 use crate::pb as protowire;
 
 use itertools::Itertools;
-use kaspa_utils::networking::{IpAddress, NetAddress};
+use kaspa_utils::networking::{IpAddress, NetAddress, RelayRole};
 
 // ----------------------------------------------------------------------------
 // consensus_core to protowire
@@ -22,13 +22,28 @@ impl From<(IpAddress, u16)> for protowire::NetAddress {
             },
             port: port as u32,
             relay_port: 0,
+            relay_capacity: 0,
+            relay_ttl_ms: 0,
+            relay_role: protowire::RelayRole::Unspecified as i32,
         }
     }
 }
 
 impl From<NetAddress> for protowire::NetAddress {
     fn from(item: NetAddress) -> Self {
-        Self { services: item.services, relay_port: item.relay_port.unwrap_or_default() as u32, ..(item.ip, item.port).into() }
+        let relay_role = match item.relay_role {
+            Some(RelayRole::Public) => protowire::RelayRole::Public as i32,
+            Some(RelayRole::Private) => protowire::RelayRole::Private as i32,
+            None => protowire::RelayRole::Unspecified as i32,
+        };
+        Self {
+            services: item.services,
+            relay_port: item.relay_port.unwrap_or_default() as u32,
+            relay_capacity: item.relay_capacity.unwrap_or_default(),
+            relay_ttl_ms: item.relay_ttl_ms.unwrap_or_default(),
+            relay_role,
+            ..(item.ip, item.port).into()
+        }
     }
 }
 
@@ -64,14 +79,26 @@ impl TryFrom<protowire::NetAddress> for NetAddress {
     fn try_from(item: protowire::NetAddress) -> Result<Self, Self::Error> {
         let services = item.services;
         let relay_port = item.relay_port;
+        let relay_capacity = item.relay_capacity;
+        let relay_ttl_ms = item.relay_ttl_ms;
+        let relay_role = match protowire::RelayRole::try_from(item.relay_role).ok() {
+            Some(protowire::RelayRole::Public) => Some(RelayRole::Public),
+            Some(protowire::RelayRole::Private) => Some(RelayRole::Private),
+            _ => None,
+        };
         let (ip, port) = item.try_into()?;
-        Ok(NetAddress::new(ip, port).with_services(services).with_relay_port((relay_port != 0).then_some(relay_port as u16)))
+        Ok(NetAddress::new(ip, port)
+            .with_services(services)
+            .with_relay_port((relay_port != 0).then_some(relay_port as u16))
+            .with_relay_capacity((relay_capacity != 0).then_some(relay_capacity))
+            .with_relay_ttl_ms((relay_ttl_ms != 0).then_some(relay_ttl_ms))
+            .with_relay_role(relay_role))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use kaspa_utils::networking::IpAddress;
+    use kaspa_utils::networking::{IpAddress, NetAddress, RelayRole};
 
     use crate::pb;
     use std::{
@@ -81,8 +108,16 @@ mod tests {
 
     #[test]
     fn test_netaddress() {
-        let net_addr_ipv4 =
-            pb::NetAddress { timestamp: 0, services: 0, ip: hex::decode("6a0a8af0").unwrap(), port: 123, relay_port: 0 };
+        let net_addr_ipv4 = pb::NetAddress {
+            timestamp: 0,
+            services: 0,
+            ip: hex::decode("6a0a8af0").unwrap(),
+            port: 123,
+            relay_port: 0,
+            relay_capacity: 0,
+            relay_ttl_ms: 0,
+            relay_role: pb::RelayRole::Unspecified as i32,
+        };
         let ipv4 = Ipv4Addr::from_str("106.10.138.240").unwrap().into();
         assert_eq!(<(IpAddress, u16)>::try_from(net_addr_ipv4.clone()).unwrap(), (ipv4, 123u16));
         assert_eq!(pb::NetAddress::from((ipv4, 123u16)), net_addr_ipv4);
@@ -93,9 +128,30 @@ mod tests {
             ip: hex::decode("20010db885a3000000008a2e03707334").unwrap(),
             port: 456,
             relay_port: 0,
+            relay_capacity: 0,
+            relay_ttl_ms: 0,
+            relay_role: pb::RelayRole::Unspecified as i32,
         };
         let ipv6 = Ipv6Addr::from_str("2001:0db8:85a3:0000:0000:8a2e:0370:7334").unwrap().into();
         assert_eq!(<(IpAddress, u16)>::try_from(net_addr_ipv6.clone()).unwrap(), (ipv6, 456u16));
         assert_eq!(pb::NetAddress::from((ipv6, 456u16)), net_addr_ipv6);
+    }
+
+    #[test]
+    fn test_netaddress_relay_metadata_roundtrip() {
+        let addr = NetAddress::new(IpAddress::from_str("203.0.113.9").unwrap(), 16112)
+            .with_services(0b1)
+            .with_relay_port(Some(16112))
+            .with_relay_capacity(Some(42))
+            .with_relay_ttl_ms(Some(30_000))
+            .with_relay_role(Some(RelayRole::Public));
+
+        let wire: pb::NetAddress = addr.into();
+        let parsed = NetAddress::try_from(wire).unwrap();
+        assert_eq!(parsed.services, 0b1);
+        assert_eq!(parsed.relay_port, Some(16112));
+        assert_eq!(parsed.relay_capacity, Some(42));
+        assert_eq!(parsed.relay_ttl_ms, Some(30_000));
+        assert_eq!(parsed.relay_role, Some(RelayRole::Public));
     }
 }

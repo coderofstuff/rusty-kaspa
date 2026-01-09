@@ -18,6 +18,15 @@ message NetAddress{
   bytes ip = 3;
   uint32 port = 4;
   uint32 relayPort = 5;
+  uint32 relayCapacity = 6;
+  uint64 relayTtlMs = 7;
+  RelayRole relayRole = 8;
+}
+
+enum RelayRole{
+  RELAY_ROLE_UNSPECIFIED = 0;
+  RELAY_ROLE_PUBLIC = 1;
+  RELAY_ROLE_PRIVATE = 2;
 }
 
 message SubnetworkId{

@@ -1,10 +1,11 @@
-use futures_util::future::BoxFuture;
+use futures_util::future::{join_all, BoxFuture};
 use kaspa_utils::networking::NetAddress;
 use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +40,43 @@ pub trait RelayCandidateSource: Send + Sync {
     fn fetch_candidates<'a>(&'a self) -> BoxFuture<'a, Vec<RelayCandidateUpdate>>;
 }
 
+pub struct CompositeRelaySource {
+    sources: Vec<Arc<dyn RelayCandidateSource>>,
+}
+
+impl CompositeRelaySource {
+    pub fn new(sources: Vec<Arc<dyn RelayCandidateSource>>) -> Self {
+        Self { sources }
+    }
+}
+
+impl RelayCandidateSource for CompositeRelaySource {
+    fn fetch_candidates<'a>(&'a self) -> BoxFuture<'a, Vec<RelayCandidateUpdate>> {
+        Box::pin(async move {
+            let futures = self.sources.iter().map(|source| source.fetch_candidates());
+            let batches = join_all(futures).await;
+            batches.into_iter().flatten().collect()
+        })
+    }
+}
+
+pub struct StaticRelaySource {
+    candidates: Vec<RelayCandidateUpdate>,
+}
+
+impl StaticRelaySource {
+    pub fn new(candidates: Vec<RelayCandidateUpdate>) -> Self {
+        Self { candidates }
+    }
+}
+
+impl RelayCandidateSource for StaticRelaySource {
+    fn fetch_candidates<'a>(&'a self) -> BoxFuture<'a, Vec<RelayCandidateUpdate>> {
+        let candidates = self.candidates.clone();
+        Box::pin(async move { candidates })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RelayPoolConfig {
     pub max_relays: usize,
@@ -48,6 +86,7 @@ pub struct RelayPoolConfig {
     pub backoff_base: Duration,
     pub backoff_max: Duration,
     pub min_sources: usize,
+    pub max_candidates: usize,
     pub rng_seed: Option<u64>,
 }
 
@@ -61,6 +100,7 @@ impl RelayPoolConfig {
             backoff_base: Duration::from_secs(10),
             backoff_max: Duration::from_secs(10 * 60),
             min_sources: 2,
+            max_candidates: 512,
             rng_seed: None,
         }
     }
@@ -88,16 +128,19 @@ struct RelayEntry {
     backoff_until: Option<Instant>,
     backoff_current: Duration,
     last_selected: Option<Instant>,
+    first_seen: Instant,
 }
 
 impl RelayEntry {
-    fn score(&self) -> f64 {
+    fn score(&self, now: Instant) -> f64 {
         let mut score = (self.successes as f64 * 10.0) - (self.failures as f64 * 20.0);
         if let Some(latency) = self.last_latency_ms {
             score -= latency as f64 / 100.0;
         }
         let sources = self.sources.count_ones() as f64;
         score += sources * 2.0;
+        let uptime_minutes = now.saturating_duration_since(self.first_seen).as_secs_f64() / 60.0;
+        score += uptime_minutes;
         score
     }
 
@@ -161,6 +204,7 @@ impl RelayPool {
                 backoff_until: None,
                 backoff_current: Duration::from_secs(0),
                 last_selected: None,
+                first_seen: now,
             });
 
             entry.address = update.address;
@@ -174,6 +218,8 @@ impl RelayPool {
             entry.expires_at = now + ttl;
             entry.sources |= update.source.bit();
         }
+
+        self.trim_candidates(now);
     }
 
     pub fn prune_expired(&mut self, now: Instant) {
@@ -229,7 +275,7 @@ impl RelayPool {
             eligible = high_confidence;
         }
 
-        eligible.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap_or(std::cmp::Ordering::Equal));
+        eligible.sort_by(|a, b| b.score(now).partial_cmp(&a.score(now)).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut selected = Vec::new();
         let mut used_prefixes: HashSet<PrefixKey> = HashSet::new();
@@ -293,6 +339,18 @@ impl RelayPool {
             entry.last_selected = Some(now);
         }
     }
+
+    fn trim_candidates(&mut self, now: Instant) {
+        if self.entries.len() <= self.config.max_candidates {
+            return;
+        }
+        let mut scored: Vec<(String, f64)> = self.entries.values().map(|entry| (entry.key.clone(), entry.score(now))).collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let remove_count = self.entries.len().saturating_sub(self.config.max_candidates);
+        for (key, _) in scored.into_iter().take(remove_count) {
+            self.entries.remove(&key);
+        }
+    }
 }
 
 pub fn relay_key_from_parts(ip: IpAddr, port: u16) -> String {
@@ -304,6 +362,7 @@ pub fn relay_update_from_netaddr(
     relay_port: u16,
     ttl: Duration,
     source: RelaySource,
+    capacity: Option<usize>,
 ) -> Result<RelayCandidateUpdate, libp2p::multiaddr::Error> {
     let key = relay_key_from_parts(net_address.ip.0, relay_port);
     let address = match net_address.ip.0 {
@@ -315,10 +374,45 @@ pub fn relay_update_from_netaddr(
         address,
         net_address: Some(NetAddress::new(net_address.ip, relay_port)),
         relay_peer_id: None,
-        capacity: None,
+        capacity,
         ttl: Some(ttl),
         source,
     })
+}
+
+pub fn relay_update_from_multiaddr(
+    address: Multiaddr,
+    ttl: Duration,
+    source: RelaySource,
+    capacity: Option<usize>,
+) -> Option<RelayCandidateUpdate> {
+    let mut ip: Option<IpAddr> = None;
+    let mut port: Option<u16> = None;
+    let mut relay_peer_id: Option<PeerId> = None;
+    for protocol in address.iter() {
+        match protocol {
+            Protocol::Ip4(v4) => ip = Some(IpAddr::V4(v4)),
+            Protocol::Ip6(v6) => ip = Some(IpAddr::V6(v6)),
+            Protocol::Tcp(p) => port = Some(p),
+            Protocol::P2p(peer) => relay_peer_id = Some(peer),
+            _ => {}
+        }
+    }
+    let ip = ip?;
+    let port = port?;
+    let key = relay_key_from_parts(ip, port);
+    let net_address = NetAddress::new(ip.into(), port);
+    Some(RelayCandidateUpdate { key, address, net_address: Some(net_address), relay_peer_id, capacity, ttl: Some(ttl), source })
+}
+
+pub fn relay_update_from_multiaddr_str(
+    address: &str,
+    ttl: Duration,
+    source: RelaySource,
+    capacity: Option<usize>,
+) -> Option<RelayCandidateUpdate> {
+    let addr = Multiaddr::from_str(address).ok()?;
+    relay_update_from_multiaddr(addr, ttl, source, capacity)
 }
 
 #[cfg(test)]
