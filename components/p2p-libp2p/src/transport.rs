@@ -355,8 +355,8 @@ mod tests {
         (driver, incoming_rx)
     }
 
-    fn dialback_ready_driver() -> (SwarmDriver, PeerId) {
-        let (mut driver, _) = test_driver(1);
+    fn dialback_ready_driver_with_allow_private(allow_private_addrs: bool) -> (SwarmDriver, PeerId) {
+        let (mut driver, _) = test_driver_with_allow_private(1, allow_private_addrs);
         let peer = PeerId::random();
         driver.peer_states.insert(peer, PeerState { supports_dcutr: true, connected_via_relay: true, outgoing: 0 });
         let relay_peer = PeerId::random();
@@ -364,6 +364,10 @@ mod tests {
         driver.active_relay = Some(RelayInfo { relay_peer, circuit_base });
         driver.swarm.add_external_address("/ip4/203.0.113.1/tcp/16112".parse().unwrap());
         (driver, peer)
+    }
+
+    fn dialback_ready_driver() -> (SwarmDriver, PeerId) {
+        dialback_ready_driver_with_allow_private(false)
     }
 
     fn make_request_id() -> StreamRequestId {
@@ -491,6 +495,15 @@ mod tests {
 
         driver.maybe_request_dialback(peer);
         assert!(driver.dialback_cooldowns.is_empty());
+    }
+
+    #[test]
+    fn dcutr_dialback_allows_private_autonat_when_private_addrs_allowed() {
+        let (mut driver, peer) = dialback_ready_driver_with_allow_private(true);
+        driver.autonat_private_until = Some(Instant::now() + Duration::from_secs(60));
+
+        driver.maybe_request_dialback(peer);
+        assert!(driver.dialback_cooldowns.contains_key(&peer));
     }
 
     #[test]
@@ -1556,7 +1569,9 @@ impl SwarmDriver {
                         self.autonat_private_until = None;
                     }
                     autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Error { error, .. }) => {
-                        if matches!(error, autonat::OutboundProbeError::Response(autonat::ResponseError::DialError)) {
+                        if !self.allow_private_addrs
+                            && matches!(error, autonat::OutboundProbeError::Response(autonat::ResponseError::DialError))
+                        {
                             self.autonat_private_until = Some(Instant::now() + AUTONAT_PRIVATE_COOLDOWN);
                         }
                     }
@@ -1919,15 +1934,17 @@ impl SwarmDriver {
             return;
         }
         let now = Instant::now();
-        if let Some(until) = self.autonat_private_until {
-            if until > now {
-                if let Some(metrics) = self.metrics.as_ref() {
-                    metrics.dcutr().record_dialback_skipped_private();
+        if !self.allow_private_addrs {
+            if let Some(until) = self.autonat_private_until {
+                if until > now {
+                    if let Some(metrics) = self.metrics.as_ref() {
+                        metrics.dcutr().record_dialback_skipped_private();
+                    }
+                    debug!("libp2p dcutr: skipping dial-back to {peer_id}: autonat private until {:?}", until);
+                    return;
                 }
-                debug!("libp2p dcutr: skipping dial-back to {peer_id}: autonat private until {:?}", until);
-                return;
+                self.autonat_private_until = None;
             }
-            self.autonat_private_until = None;
         }
         if let Some(next_allowed) = self.dialback_cooldowns.get(&peer_id) {
             if *next_allowed > now {
