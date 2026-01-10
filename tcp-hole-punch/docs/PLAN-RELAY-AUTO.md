@@ -27,7 +27,7 @@ Status tags: [present] [partial] [missing]
 1) Relay capability gossip
    - Public node advertises: relay listen addr + capacity + ttl + role.
    - Private nodes store relay pool with scoring.
-   - Note: service bit + relay_port already propagate; missing consumer/selection.
+   - Note: service bit + relay_port propagate and are consumed by relay pool (address manager source + auto selection).
 
 2) Relay pool + selection
    - Maintain N candidates, score by uptime/latency/failure rate.
@@ -52,7 +52,7 @@ Status tags: [present] [partial] [missing]
    - AutoNAT + inbound direct success + stable external addr.
    - Hysteresis (N successes over T minutes) to avoid flapping.
    - If uncertain: keep role=private, no public advertisement.
-   - Note: AutoNAT exists but is not wired into role resolution.
+   - Note: AutoNAT wired into role resolution with a stability window + direct inbound gating.
 
 ## Risk checklist (oracle)
 - DCUtR upgrade races: double‑dial, wrong connection closed, half‑upgrade fallback.
@@ -60,7 +60,7 @@ Status tags: [present] [partial] [missing]
 - Address hygiene: filter private/loopback unless LAN mode; cap + dedupe advertised addrs.
 - DCUtR attempt gating: skip when NAT likely symmetric or no usable public addrs.
 - Trust model: open relays require diversity + multi‑source discovery; avoid “fastest wins”.
-- Observability: log selection decisions, backoff, upgrade outcomes; add metrics.
+- Observability: log selection decisions, backoff, upgrade outcomes; add metrics (helper API `metrics` action).
 - Hard safety limits: cap candidates, parallel dials, reservation count, attempt budgets.
 
 ## Test plan (expanded)
@@ -74,6 +74,7 @@ Status tags: [present] [partial] [missing]
 - Private inbound cap: 8 (already default).
 - Max peers per relay: 1.
 - Relay min sources: 2.
+- Relay RNG seed: optional override for deterministic selection (test/lab).
 
 ## Work plan
 ### Phase 1: Relay discovery + pool
@@ -106,7 +107,7 @@ Status tags: [present] [partial] [missing]
 - Cap test: private inbound stays <= 8.
 - Rotation: kill relay, confirm reselect + DCUtR success.
 
-## Open questions
-- Exact gossip channel (address flow vs new message).
-- Where to store relay pool (address manager vs libp2p service).
-- Relay capacity representation (simple int vs weighted).
+## Resolved questions (implemented)
+- Gossip channel: existing address flow using `NET_ADDRESS_SERVICE_LIBP2P_RELAY` + `relay_port`/`relay_capacity`/`relay_ttl_ms`.
+- Relay pool storage: libp2p service (`relay_pool` + `relay_auto`) fed by address manager source.
+- Relay capacity: simple integer capacity; defaults to `max_peers_per_relay` when not advertised.

@@ -42,6 +42,7 @@ pub struct Config {
     pub max_relays: usize,
     pub max_peers_per_relay: usize,
     pub relay_min_sources: usize,
+    pub relay_rng_seed: Option<u64>,
     /// Optional list of relay reservation multiaddrs.
     pub reservations: Vec<String>,
     /// Optional list of relay candidate multiaddrs for auto selection.
@@ -72,6 +73,7 @@ impl Default for Config {
             max_relays: 1,
             max_peers_per_relay: 1,
             relay_min_sources: 2,
+            relay_rng_seed: None,
             reservations: Vec::new(),
             relay_candidates: Vec::new(),
             external_multiaddrs: Vec::new(),
@@ -153,6 +155,11 @@ impl ConfigBuilder {
 
     pub fn relay_min_sources(mut self, relay_min_sources: usize) -> Self {
         self.config.relay_min_sources = relay_min_sources;
+        self
+    }
+
+    pub fn relay_rng_seed(mut self, relay_rng_seed: Option<u64>) -> Self {
+        self.config.relay_rng_seed = relay_rng_seed;
         self
     }
 

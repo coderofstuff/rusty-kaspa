@@ -548,6 +548,15 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .help("Maximum peers per relay (eclipse guard)."),
         )
         .arg(
+            Arg::new("libp2p-relay-rng-seed")
+                .long("libp2p-relay-rng-seed")
+                .env("KASPAD_LIBP2P_RELAY_RNG_SEED")
+                .value_name("SEED")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(u64))
+                .help("Optional RNG seed for deterministic relay selection."),
+        )
+        .arg(
             Arg::new("libp2p-inbound-cap-private")
                 .long("libp2p-inbound-cap-private")
                 .env("KASPAD_LIBP2P_INBOUND_CAP_PRIVATE")
@@ -740,6 +749,7 @@ impl Args {
                     .get_one::<usize>("libp2p-max-peers-per-relay")
                     .copied()
                     .or(defaults.libp2p.libp2p_max_peers_per_relay),
+                libp2p_relay_rng_seed: m.get_one::<u64>("libp2p-relay-rng-seed").copied().or(defaults.libp2p.libp2p_relay_rng_seed),
                 libp2p_inbound_cap_private: m
                     .get_one::<usize>("libp2p-inbound-cap-private")
                     .copied()

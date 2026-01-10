@@ -30,6 +30,7 @@ enum HelperAction {
     Status,
     Dial(Multiaddr),
     Peers,
+    Metrics,
 }
 
 impl HelperApi {
@@ -50,6 +51,10 @@ impl HelperApi {
             HelperAction::Peers => {
                 let peers: Vec<HelperPeer> = self.provider.peers_snapshot().await.into_iter().map(HelperPeer::from).collect();
                 json!({ "ok": true, "peers": peers })
+            }
+            HelperAction::Metrics => {
+                let metrics = self.provider.metrics_snapshot().ok_or_else(|| HelperError::Invalid("metrics unavailable".into()))?;
+                json!({ "ok": true, "metrics": metrics })
             }
         };
 
@@ -73,6 +78,7 @@ impl TryFrom<HelperRequest> for HelperAction {
                 Ok(Self::Dial(addr))
             }
             "peers" => Ok(Self::Peers),
+            "metrics" => Ok(Self::Metrics),
             _ => Err(HelperError::UnknownAction),
         }
     }
@@ -110,6 +116,7 @@ mod tests {
     use super::*;
     use crate::Libp2pError;
     use crate::metadata::TransportMetadata;
+    use crate::metrics::Libp2pMetrics;
     use crate::transport::{BoxedLibp2pStream, ReservationHandle, StreamDirection};
     use futures_util::future::BoxFuture;
     use kaspa_utils::networking::NetAddress;
@@ -117,6 +124,7 @@ mod tests {
     #[derive(Default)]
     struct MockProvider {
         peers: Vec<PeerSnapshot>,
+        metrics: Option<Arc<Libp2pMetrics>>,
     }
     impl Libp2pStreamProvider for MockProvider {
         fn dial<'a>(&'a self, _: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
@@ -137,6 +145,9 @@ mod tests {
         fn peers_snapshot<'a>(&'a self) -> BoxFuture<'a, Vec<PeerSnapshot>> {
             let peers = self.peers.clone();
             Box::pin(async move { peers })
+        }
+        fn metrics(&self) -> Option<Arc<Libp2pMetrics>> {
+            self.metrics.clone()
         }
     }
 
@@ -165,12 +176,20 @@ mod tests {
             libp2p: true,
             dcutr_upgraded: true,
         };
-        let api = HelperApi::new(Arc::new(MockProvider { peers: vec![snap] }));
+        let api = HelperApi::new(Arc::new(MockProvider { peers: vec![snap], metrics: None }));
         let resp = api.handle_json(r#"{"action":"peers"}"#).await.unwrap();
         let value: serde_json::Value = serde_json::from_str(&resp).unwrap();
         let peers = value.get("peers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         assert_eq!(peers.len(), 1);
         let peer = peers.first().unwrap();
         assert_eq!(peer.get("peer_id").and_then(|v| v.as_str()), Some("peer1"));
+    }
+
+    #[tokio::test]
+    async fn helper_metrics_returns_snapshot() {
+        let api = HelperApi::new(Arc::new(MockProvider { peers: vec![], metrics: Some(Libp2pMetrics::new()) }));
+        let resp = api.handle_json(r#"{"action":"metrics"}"#).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert!(value.get("metrics").is_some());
     }
 }

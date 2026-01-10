@@ -1,4 +1,5 @@
-use crate::swarm::{Libp2pBehaviour, Libp2pEvent, StreamEvent, StreamRequestId, build_streaming_swarm};
+use crate::metrics::{Libp2pMetrics, Libp2pMetricsSnapshot};
+use crate::swarm::{build_streaming_swarm, Libp2pBehaviour, Libp2pEvent, StreamEvent, StreamRequestId};
 use crate::{config::Config, metadata::TransportMetadata};
 use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
@@ -349,8 +350,20 @@ mod tests {
             1,
             1,
             shutdown,
+            None,
         );
         (driver, incoming_rx)
+    }
+
+    fn dialback_ready_driver() -> (SwarmDriver, PeerId) {
+        let (mut driver, _) = test_driver(1);
+        let peer = PeerId::random();
+        driver.peer_states.insert(peer, PeerState { supports_dcutr: true, connected_via_relay: true, outgoing: 0 });
+        let relay_peer = PeerId::random();
+        let circuit_base: Multiaddr = format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay_peer}").parse().unwrap();
+        driver.active_relay = Some(RelayInfo { relay_peer, circuit_base });
+        driver.swarm.add_external_address("/ip4/203.0.113.1/tcp/16112".parse().unwrap());
+        (driver, peer)
     }
 
     fn make_request_id() -> StreamRequestId {
@@ -472,6 +485,24 @@ mod tests {
     }
 
     #[test]
+    fn dcutr_dialback_skips_when_autonat_private() {
+        let (mut driver, peer) = dialback_ready_driver();
+        driver.autonat_private_until = Some(Instant::now() + Duration::from_secs(60));
+
+        driver.maybe_request_dialback(peer);
+        assert!(driver.dialback_cooldowns.is_empty());
+    }
+
+    #[test]
+    fn dcutr_dialback_skips_when_direct_upgrade_cooldown_active() {
+        let (mut driver, peer) = dialback_ready_driver();
+        driver.direct_upgrade_cooldowns.insert(peer, Instant::now() + Duration::from_secs(60));
+
+        driver.maybe_request_dialback(peer);
+        assert!(driver.dialback_cooldowns.is_empty());
+    }
+
+    #[test]
     fn auto_role_promotes_after_signals() {
         let (role_tx, role_rx) = watch::channel(crate::Role::Private);
         let mut state = AutoRoleState::new(role_tx, AUTO_ROLE_WINDOW, 1, 1);
@@ -516,7 +547,7 @@ mod tests {
     #[test]
     fn usable_external_addr_respects_private_setting() {
         let (driver_public, _) = test_driver_with_allow_private(1, false);
-        let global: Multiaddr = "/ip4/198.51.100.1/tcp/1234".parse().unwrap();
+        let global: Multiaddr = "/ip4/8.8.8.8/tcp/1234".parse().unwrap();
         let private: Multiaddr = "/ip4/192.168.1.10/tcp/1234".parse().unwrap();
         let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/1234".parse().unwrap();
 
@@ -716,6 +747,12 @@ pub trait Libp2pStreamProvider: Send + Sync {
     fn role_updates(&self) -> Option<watch::Receiver<crate::Role>> {
         None
     }
+    fn metrics(&self) -> Option<Arc<Libp2pMetrics>> {
+        None
+    }
+    fn metrics_snapshot(&self) -> Option<Libp2pMetricsSnapshot> {
+        self.metrics().map(|metrics| metrics.snapshot())
+    }
 }
 
 /// Libp2p identity wrapper (ed25519).
@@ -786,6 +823,7 @@ const PENDING_DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 const PENDING_DIAL_CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
 const DIALBACK_COOLDOWN: Duration = Duration::from_secs(30);
 const DIRECT_UPGRADE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const AUTONAT_PRIVATE_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 
 /// Libp2p stream provider backed by a libp2p swarm.
 pub struct SwarmStreamProvider {
@@ -795,6 +833,7 @@ pub struct SwarmStreamProvider {
     shutdown: Trigger,
     task: Mutex<Option<JoinHandle<()>>>,
     role_updates: Option<watch::Receiver<crate::Role>>,
+    metrics: Arc<Libp2pMetrics>,
 }
 
 impl SwarmStreamProvider {
@@ -808,6 +847,7 @@ impl SwarmStreamProvider {
         let (incoming_tx, incoming_rx) = mpsc::channel(INCOMING_CHANNEL_BOUND);
         let (shutdown, shutdown_listener) = triggered::trigger();
         let protocol = default_stream_protocol();
+        let metrics = Libp2pMetrics::new();
         // Pass config to build_streaming_swarm to configure AutoNAT
         let swarm = build_streaming_swarm(&identity, &config, protocol.clone())?;
 
@@ -858,6 +898,7 @@ impl SwarmStreamProvider {
                 auto_role_required_autonat,
                 auto_role_required_direct,
                 shutdown_listener,
+                Some(metrics.clone()),
             )
             .run(),
         );
@@ -869,6 +910,7 @@ impl SwarmStreamProvider {
             shutdown,
             task: Mutex::new(Some(task)),
             role_updates: Some(role_rx),
+            metrics,
         })
     }
 
@@ -1005,6 +1047,10 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
 
     fn role_updates(&self) -> Option<watch::Receiver<crate::Role>> {
         self.role_updates.clone()
+    }
+
+    fn metrics(&self) -> Option<Arc<Libp2pMetrics>> {
+        Some(self.metrics.clone())
     }
 
     fn shutdown(&self) -> BoxFuture<'_, ()> {
@@ -1163,6 +1209,8 @@ struct SwarmDriver {
     active_relay: Option<RelayInfo>,
     auto_role: Option<AutoRoleState>,
     max_peers_per_relay: usize,
+    autonat_private_until: Option<Instant>,
+    metrics: Option<Arc<Libp2pMetrics>>,
     listening: bool,
     shutdown: Listener,
     connections: HashMap<StreamRequestId, ConnectionEntry>,
@@ -1197,6 +1245,7 @@ impl SwarmDriver {
         auto_role_required_autonat: usize,
         auto_role_required_direct: usize,
         shutdown: Listener,
+        metrics: Option<Arc<Libp2pMetrics>>,
     ) -> Self {
         let local_peer_id = *swarm.local_peer_id();
         let active_relay = reservations.into_iter().find_map(|r| relay_info_from_multiaddr(&r.multiaddr, local_peer_id));
@@ -1222,6 +1271,8 @@ impl SwarmDriver {
             active_relay,
             auto_role,
             max_peers_per_relay: max_peers_per_relay.max(1),
+            autonat_private_until: None,
+            metrics,
             listening: false,
             shutdown,
             connections: HashMap::new(),
@@ -1500,6 +1551,17 @@ impl SwarmDriver {
             SwarmEvent::Behaviour(Libp2pEvent::Autonat(event)) => {
                 debug!("libp2p autonat event: {:?}", event);
                 let has_external_addr = self.has_usable_external_addr();
+                match &event {
+                    autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Response { .. }) => {
+                        self.autonat_private_until = None;
+                    }
+                    autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Error { error, .. }) => {
+                        if matches!(error, autonat::OutboundProbeError::Response(autonat::ResponseError::DialError)) {
+                            self.autonat_private_until = Some(Instant::now() + AUTONAT_PRIVATE_COOLDOWN);
+                        }
+                    }
+                    _ => {}
+                }
                 if let Some(auto_role) = self.auto_role.as_mut() {
                     let is_public_probe = matches!(event, autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Response { .. }));
                     if is_public_probe {
@@ -1549,6 +1611,11 @@ impl SwarmDriver {
                     info!("libp2p DCUtR success: direct connection to {peer_id} resolves pending relay dial");
                     self.pending_dials.insert(connection_id, pending);
                     had_pending_relay = true;
+                }
+                if had_pending_relay {
+                    if let Some(metrics) = self.metrics.as_ref() {
+                        metrics.dcutr().record_dialback_success();
+                    }
                 }
 
                 if endpoint.is_dialer() {
@@ -1852,11 +1919,21 @@ impl SwarmDriver {
             return;
         }
         let now = Instant::now();
-        if let Some(next_allowed) = self.dialback_cooldowns.get(&peer_id)
-            && *next_allowed > now
-        {
-            debug!("libp2p dcutr: skipping dial-back to {peer_id}: cooldown until {:?}", *next_allowed);
-            return;
+        if let Some(until) = self.autonat_private_until {
+            if until > now {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.dcutr().record_dialback_skipped_private();
+                }
+                debug!("libp2p dcutr: skipping dial-back to {peer_id}: autonat private until {:?}", until);
+                return;
+            }
+            self.autonat_private_until = None;
+        }
+        if let Some(next_allowed) = self.dialback_cooldowns.get(&peer_id) {
+            if *next_allowed > now {
+                debug!("libp2p dcutr: skipping dial-back to {peer_id}: cooldown until {:?}", *next_allowed);
+                return;
+            }
         }
         if let Some(until) = self.direct_upgrade_cooldowns.get(&peer_id).copied() {
             if until > now {
@@ -1866,6 +1943,9 @@ impl SwarmDriver {
             self.direct_upgrade_cooldowns.remove(&peer_id);
         }
         if !self.has_usable_external_addr() {
+            if let Some(metrics) = self.metrics.as_ref() {
+                metrics.dcutr().record_dialback_skipped_no_external();
+            }
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: no usable external address");
             return;
         }
@@ -1888,6 +1968,9 @@ impl SwarmDriver {
             .extend_addresses_through_behaviour()
             .build();
 
+        if let Some(metrics) = self.metrics.as_ref() {
+            metrics.dcutr().record_dialback_attempt();
+        }
         match self.swarm.dial(opts) {
             Ok(()) => {
                 self.dialback_cooldowns.insert(peer_id, now + DIALBACK_COOLDOWN);
@@ -1895,6 +1978,9 @@ impl SwarmDriver {
             }
             Err(err) => {
                 self.dialback_cooldowns.insert(peer_id, now + DIALBACK_COOLDOWN);
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.dcutr().record_dialback_failure();
+                }
                 warn!("libp2p dcutr: failed to dial {peer_id} via relay {}: {err}", relay.relay_peer);
             }
         }

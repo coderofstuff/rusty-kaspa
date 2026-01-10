@@ -106,6 +106,8 @@ pub struct Libp2pArgs {
     pub libp2p_max_relays: Option<usize>,
     /// Max peers per relay (eclipse guard).
     pub libp2p_max_peers_per_relay: Option<usize>,
+    /// Optional RNG seed for relay selection (deterministic tests).
+    pub libp2p_relay_rng_seed: Option<u64>,
     /// Private-role inbound cap for libp2p connections.
     pub libp2p_inbound_cap_private: Option<usize>,
     /// Relay reservation multiaddrs.
@@ -139,6 +141,7 @@ impl Default for Libp2pArgs {
             libp2p_relay_inbound_unknown_cap: None,
             libp2p_max_relays: None,
             libp2p_max_peers_per_relay: None,
+            libp2p_relay_rng_seed: None,
             libp2p_inbound_cap_private: None,
             libp2p_reservations: Vec::new(),
             libp2p_relay_candidates: Vec::new(),
@@ -162,6 +165,7 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
     let env_listen_port = env::var("KASPAD_LIBP2P_LISTEN_PORT").ok().and_then(|s| s.parse::<u16>().ok());
     let env_max_relays = env::var("KASPAD_LIBP2P_MAX_RELAYS").ok().and_then(|s| s.parse::<usize>().ok());
     let env_max_peers_per_relay = env::var("KASPAD_LIBP2P_MAX_PEERS_PER_RELAY").ok().and_then(|s| s.parse::<usize>().ok());
+    let env_relay_rng_seed = env::var("KASPAD_LIBP2P_RELAY_RNG_SEED").ok().and_then(|s| s.parse::<u64>().ok());
     let env_inbound_cap_private = env::var("KASPAD_LIBP2P_INBOUND_CAP_PRIVATE").ok().and_then(|s| s.parse::<usize>().ok());
     let env_relay_advertise_capacity = env::var("KASPAD_LIBP2P_RELAY_ADVERTISE_CAPACITY").ok().and_then(|s| s.parse::<u32>().ok());
     let env_relay_advertise_ttl_ms = env::var("KASPAD_LIBP2P_RELAY_ADVERTISE_TTL_MS").ok().and_then(|s| s.parse::<u64>().ok());
@@ -211,6 +215,7 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
     let autonat_confidence_threshold =
         args.libp2p_autonat_confidence_threshold.or(env_autonat_confidence_threshold).filter(|value| *value > 0);
     let relay_min_sources = env::var("KASPAD_LIBP2P_RELAY_MIN_SOURCES").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(2);
+    let relay_rng_seed = args.libp2p_relay_rng_seed.or(env_relay_rng_seed);
     let resolved_role = resolve_role(role, &reservations, helper_listen);
 
     let identity = identity_path
@@ -237,6 +242,7 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
         .max_relays(max_relays)
         .max_peers_per_relay(max_peers_per_relay)
         .relay_min_sources(relay_min_sources)
+        .relay_rng_seed(relay_rng_seed)
         .reservations(reservations)
         .relay_candidates(relay_candidates)
         .external_multiaddrs(external_multiaddrs)
@@ -600,6 +606,7 @@ mod tests {
         env::set_var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE", "true");
         env::set_var("KASPAD_LIBP2P_AUTONAT_CONFIDENCE_THRESHOLD", "2");
         env::set_var("KASPAD_LIBP2P_RELAY_MIN_SOURCES", "3");
+        env::set_var("KASPAD_LIBP2P_RELAY_RNG_SEED", "42");
 
         let cfg = libp2p_config_from_args(&Libp2pArgs::default(), Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
         assert_eq!(cfg.mode, AdapterMode::Full);
@@ -612,6 +619,7 @@ mod tests {
         assert_eq!(cfg.role, AdapterRole::Auto);
         assert_eq!(cfg.libp2p_inbound_cap_private, DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE);
         assert_eq!(cfg.relay_min_sources, 3);
+        assert_eq!(cfg.relay_rng_seed, Some(42));
 
         env::remove_var("KASPAD_LIBP2P_MODE");
         env::remove_var("KASPAD_LIBP2P_IDENTITY_PATH");
@@ -621,6 +629,7 @@ mod tests {
         env::remove_var("KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE");
         env::remove_var("KASPAD_LIBP2P_AUTONAT_CONFIDENCE_THRESHOLD");
         env::remove_var("KASPAD_LIBP2P_RELAY_MIN_SOURCES");
+        env::remove_var("KASPAD_LIBP2P_RELAY_RNG_SEED");
         env::remove_var("KASPAD_LIBP2P_ROLE");
     }
 
