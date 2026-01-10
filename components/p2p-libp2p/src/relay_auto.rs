@@ -17,6 +17,7 @@ const AUTO_RELAY_MAX_BACKOFF: Duration = Duration::from_secs(10 * 60);
 struct ActiveReservation {
     handle: ReservationHandle,
     reserved_at: Instant,
+    relay_peer_id: Option<String>,
 }
 
 pub async fn run_relay_auto_worker(
@@ -52,6 +53,24 @@ pub async fn run_relay_auto_worker(
         }
         pool.update_candidates(now, candidates);
         pool.prune_expired(now);
+        let connected_peers: HashSet<String> =
+            provider.peers_snapshot().await.into_iter().filter(|peer| peer.libp2p).map(|peer| peer.peer_id).collect();
+        let mut disconnected = Vec::new();
+        for (key, reservation) in active.iter() {
+            if let Some(peer_id) = reservation.relay_peer_id.as_deref() {
+                if !connected_peers.contains(peer_id) {
+                    disconnected.push(key.clone());
+                }
+            }
+        }
+        for key in disconnected {
+            if let Some(reservation) = active.remove(&key) {
+                info!("libp2p relay auto: releasing reservation on {key} (relay disconnected)");
+                reservation.handle.release().await;
+                backoff.record_failure(&key, now);
+                pool.record_failure(&key, now);
+            }
+        }
 
         let desired = pool.select_relays(now);
         let desired_keys: HashSet<String> = desired.iter().map(|sel| sel.key.clone()).collect();
@@ -121,7 +140,14 @@ pub async fn run_relay_auto_worker(
                     backoff.record_success(&selection.key);
                     pool.record_success(&selection.key, Some(latency));
                     pool.mark_selected(&selection.key, now);
-                    active.insert(selection.key.clone(), ActiveReservation { handle, reserved_at: now });
+                    active.insert(
+                        selection.key.clone(),
+                        ActiveReservation {
+                            handle,
+                            reserved_at: now,
+                            relay_peer_id: selection.relay_peer_id.map(|id| id.to_string()),
+                        },
+                    );
                 }
                 Err(err) => {
                     warn!("libp2p relay auto: reservation failed for {}: {err}", selection.key);
