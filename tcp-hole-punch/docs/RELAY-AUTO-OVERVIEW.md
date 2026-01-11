@@ -6,7 +6,7 @@ Purpose
 - Keep inbound load bounded and reduce eclipse risk.
 
 Why now (lab vs real world)
-- Clean branch works because lab scripts hard-code relay + manual reservation.
+- Clean branch works because lab scripts hard-code relay + manual reservation (https://github.com/elldeeone/rusty-kaspa/tree/tcp-hole-punch-clean).
 - Real network needs auto discovery, selection, reservation, and role signaling.
 - Relay pool prevents naive selection (spoof/overload risk) and keeps reservations resilient.
 
