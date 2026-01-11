@@ -50,6 +50,7 @@ Relay pool behavior
 - Multi-source requirement (relay_min_sources) to reduce spoofing risk.
 - Scoring considers success/failure, latency, uptime, source count.
 - Per-relay peer cap enforced during selection.
+- In-memory only; no persistence, no extra gossip, no new data collection.
 
 Auto role promotion (AutoNAT)
 - AutoNAT client/server enabled by config.
