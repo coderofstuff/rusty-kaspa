@@ -1,7 +1,7 @@
 # Relay Auto Overview
 
 Purpose
-- Remove lab scripts and manual relay reservations.
+- Remove reliance on lab scripts; enable real-world relay discovery and reservation.
 - Make private nodes reachable in real deployments.
 - Keep inbound load bounded and reduce eclipse risk.
 
