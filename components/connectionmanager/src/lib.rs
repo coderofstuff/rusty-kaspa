@@ -2,8 +2,9 @@ use std::{
     cmp::min,
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr, ToSocketAddrs},
+    str::FromStr,
     sync::{Arc, OnceLock, RwLock},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use duration_string::DurationString;
@@ -11,8 +12,8 @@ use futures_util::future::{join_all, try_join_all};
 use itertools::Itertools;
 use kaspa_addressmanager::{AddressManager, NetAddress};
 use kaspa_core::{debug, info, warn};
-use kaspa_p2p_lib::{ConnectionError, PathKind, Peer, common::ProtocolError};
-use kaspa_utils::triggers::SingleTrigger;
+use kaspa_p2p_lib::{common::ProtocolError, ConnectionError, PathKind, Peer};
+use kaspa_utils::{networking::RelayRole, triggers::SingleTrigger};
 use parking_lot::Mutex as ParkingLotMutex;
 use rand::{seq::SliceRandom, thread_rng};
 use tokio::{
@@ -25,6 +26,33 @@ use tokio::{
 };
 
 const DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE: usize = 8;
+const RELAY_DIAL_COOLDOWN: Duration = Duration::from_secs(60);
+const RELAY_DIAL_WINDOW: Duration = Duration::from_secs(60);
+const RELAY_DIAL_MAX_PER_WINDOW: usize = 4;
+
+#[derive(Debug)]
+struct RelayDialBudget {
+    window_start: Instant,
+    count: usize,
+}
+
+impl RelayDialBudget {
+    fn new() -> Self {
+        Self { window_start: Instant::now(), count: 0 }
+    }
+
+    fn allow(&mut self, now: Instant) -> bool {
+        if now.saturating_duration_since(self.window_start) >= RELAY_DIAL_WINDOW {
+            self.window_start = now;
+            self.count = 0;
+        }
+        if self.count >= RELAY_DIAL_MAX_PER_WINDOW {
+            return false;
+        }
+        self.count += 1;
+        true
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Libp2pRoleConfig {
@@ -62,6 +90,9 @@ pub struct ConnectionManager {
     default_port: u16,
     address_manager: Arc<ParkingLotMutex<AddressManager>>,
     connection_requests: TokioMutex<HashMap<SocketAddr, ConnectionRequest>>,
+    relay_target_cooldowns: TokioMutex<HashMap<String, Instant>>,
+    relay_hint_cooldowns: TokioMutex<HashMap<String, Instant>>,
+    relay_dial_budget: TokioMutex<RelayDialBudget>,
     force_next_iteration: UnboundedSender<()>,
     shutdown_signal: SingleTrigger,
 }
@@ -77,6 +108,18 @@ impl ConnectionRequest {
     fn new(is_permanent: bool) -> Self {
         Self { next_attempt: SystemTime::now(), is_permanent, attempts: 0 }
     }
+}
+
+#[derive(Clone, Debug)]
+struct RelayDialTarget {
+    target_peer_id: String,
+    relay_key: String,
+}
+
+#[derive(Clone, Debug)]
+struct DialPlan {
+    address: NetAddress,
+    relay: Option<RelayDialTarget>,
 }
 
 impl ConnectionManager {
@@ -102,6 +145,9 @@ impl ConnectionManager {
             libp2p_inbound_cap_private: role_config.libp2p_inbound_cap_private,
             address_manager,
             connection_requests: Default::default(),
+            relay_target_cooldowns: TokioMutex::new(HashMap::new()),
+            relay_hint_cooldowns: TokioMutex::new(HashMap::new()),
+            relay_dial_budget: TokioMutex::new(RelayDialBudget::new()),
             force_next_iteration: tx,
             shutdown_signal: SingleTrigger::new(),
             dns_seeders,
@@ -205,6 +251,7 @@ impl ConnectionManager {
 
         let mut missing_connections = self.outbound_target - active_outbound.len();
         let mut addr_iter = self.address_manager.lock().iterate_prioritized_random_addresses(active_outbound);
+        let mut used_relays: HashSet<String> = HashSet::new();
         let mut progressing = true;
         let mut connecting = true;
         while connecting && missing_connections > 0 {
@@ -218,9 +265,29 @@ impl ConnectionManager {
                     connecting = false;
                     break;
                 };
+                if let Some((dial_addr, relay_target)) = Self::relay_dial_plan(&net_addr) {
+                    if used_relays.contains(&relay_target.relay_key) {
+                        continue;
+                    }
+                    let now = Instant::now();
+                    if !self.relay_dial_allowed(&relay_target, now).await {
+                        continue;
+                    }
+                    used_relays.insert(relay_target.relay_key.clone());
+                    debug!("Connecting to relay target {}", &dial_addr);
+                    addrs_to_connect.push(DialPlan { address: net_addr, relay: Some(relay_target) });
+                    jobs.push(self.p2p_adaptor.connect_peer(dial_addr));
+                    continue;
+                }
+                if net_addr.is_synthetic_relay_hint() {
+                    continue;
+                }
+                if matches!(net_addr.relay_role, Some(RelayRole::Private)) && net_addr.libp2p_peer_id.is_some() {
+                    continue;
+                }
                 let socket_addr = SocketAddr::new(net_addr.ip.into(), net_addr.port).to_string();
                 debug!("Connecting to {}", &socket_addr);
-                addrs_to_connect.push(net_addr);
+                addrs_to_connect.push(DialPlan { address: net_addr, relay: None });
                 jobs.push(self.p2p_adaptor.connect_peer(socket_addr.clone()));
             }
 
@@ -242,20 +309,26 @@ impl ConnectionManager {
                     addr_iter.len(),
                 );
             }
-            for (res, net_addr) in (join_all(jobs).await).into_iter().zip(addrs_to_connect) {
+            for (res, plan) in (join_all(jobs).await).into_iter().zip(addrs_to_connect) {
                 match res {
                     Ok(_) => {
-                        self.address_manager.lock().mark_connection_success(net_addr);
+                        self.address_manager.lock().mark_connection_success(plan.address);
                         missing_connections -= 1;
                         progressing = true;
+                        if let Some(relay) = plan.relay.as_ref() {
+                            self.record_relay_dial_success(relay).await;
+                        }
                     }
                     Err(ConnectionError::ProtocolError(ProtocolError::PeerAlreadyExists(_))) => {
                         // We avoid marking the existing connection as connection failure
-                        debug!("Failed connecting to {:?}, peer already exists", net_addr);
+                        debug!("Failed connecting to {:?}, peer already exists", plan.address);
                     }
                     Err(err) => {
-                        debug!("Failed connecting to {:?}, err: {}", net_addr, err);
-                        self.address_manager.lock().mark_connection_failure(net_addr);
+                        debug!("Failed connecting to {:?}, err: {}", plan.address, err);
+                        self.address_manager.lock().mark_connection_failure(plan.address);
+                        if let Some(relay) = plan.relay.as_ref() {
+                            self.record_relay_dial_failure(relay, Instant::now()).await;
+                        }
                     }
                 }
             }
@@ -271,6 +344,107 @@ impl ConnectionManager {
                 self.dns_seed_with_address_target(2 * missing_connections).await;
             }
         }
+    }
+
+    fn relay_dial_plan(address: &NetAddress) -> Option<(String, RelayDialTarget)> {
+        if !matches!(address.relay_role, Some(RelayRole::Private)) {
+            return None;
+        }
+        let target_peer_id = address.libp2p_peer_id.as_ref()?;
+        let hint = address.relay_circuit_hint.as_ref()?;
+        let relay_key = Self::relay_hint_key(hint)?;
+        let dial_addr = Self::relay_circuit_addr(hint, target_peer_id)?;
+        Some((dial_addr, RelayDialTarget { target_peer_id: target_peer_id.clone(), relay_key }))
+    }
+
+    fn relay_circuit_addr(hint: &str, target_peer_id: &str) -> Option<String> {
+        let mut base = if hint.starts_with('/') {
+            hint.trim_end_matches('/').to_string()
+        } else {
+            let socket = SocketAddr::from_str(hint).ok()?;
+            match socket.ip() {
+                IpAddr::V4(ip) => format!("/ip4/{ip}/tcp/{}", socket.port()),
+                IpAddr::V6(ip) => format!("/ip6/{ip}/tcp/{}", socket.port()),
+            }
+        };
+
+        if !base.contains("/p2p-circuit") {
+            base.push_str("/p2p-circuit");
+        }
+        base.push_str("/p2p/");
+        base.push_str(target_peer_id);
+        Some(base)
+    }
+
+    fn relay_hint_key(hint: &str) -> Option<String> {
+        if hint.starts_with('/') {
+            if let Some((ip, port)) = Self::parse_multiaddr_ip_port(hint) {
+                return Some(SocketAddr::new(ip, port).to_string());
+            }
+            return Some(hint.trim_end_matches('/').to_string());
+        }
+
+        SocketAddr::from_str(hint).ok().map(|socket| socket.to_string())
+    }
+
+    fn parse_multiaddr_ip_port(hint: &str) -> Option<(IpAddr, u16)> {
+        let parts: Vec<&str> = hint.split('/').filter(|part| !part.is_empty()).collect();
+        let mut ip: Option<IpAddr> = None;
+        let mut port: Option<u16> = None;
+        for idx in 0..parts.len().saturating_sub(1) {
+            match parts[idx] {
+                "ip4" | "ip6" if ip.is_none() => {
+                    if let Ok(parsed) = IpAddr::from_str(parts[idx + 1]) {
+                        ip = Some(parsed);
+                    }
+                }
+                "tcp" if port.is_none() => {
+                    if let Ok(parsed) = parts[idx + 1].parse::<u16>() {
+                        port = Some(parsed);
+                    }
+                }
+                _ => {}
+            }
+        }
+        match (ip, port) {
+            (Some(ip), Some(port)) => Some((ip, port)),
+            _ => None,
+        }
+    }
+
+    async fn relay_dial_allowed(&self, target: &RelayDialTarget, now: Instant) -> bool {
+        {
+            let mut cooldowns = self.relay_target_cooldowns.lock().await;
+            if let Some(deadline) = cooldowns.get(&target.target_peer_id).cloned() {
+                if deadline > now {
+                    return false;
+                }
+                cooldowns.remove(&target.target_peer_id);
+            }
+        }
+        {
+            let mut cooldowns = self.relay_hint_cooldowns.lock().await;
+            if let Some(deadline) = cooldowns.get(&target.relay_key).cloned() {
+                if deadline > now {
+                    return false;
+                }
+                cooldowns.remove(&target.relay_key);
+            }
+        }
+
+        let mut budget = self.relay_dial_budget.lock().await;
+        budget.allow(now)
+    }
+
+    async fn record_relay_dial_success(&self, target: &RelayDialTarget) {
+        self.relay_target_cooldowns.lock().await.remove(&target.target_peer_id);
+        self.relay_hint_cooldowns.lock().await.remove(&target.relay_key);
+    }
+
+    async fn record_relay_dial_failure(&self, target: &RelayDialTarget, now: Instant) {
+        let deadline = now + RELAY_DIAL_COOLDOWN;
+        self.relay_target_cooldowns.lock().await.insert(target.target_peer_id.clone(), deadline);
+        self.relay_hint_cooldowns.lock().await.insert(target.relay_key.clone(), deadline);
     }
 
     async fn handle_inbound_connections(self: &Arc<Self>, peer_by_address: &HashMap<SocketAddr, Peer>) {
@@ -459,9 +633,10 @@ mod tests {
     use super::*;
     use kaspa_p2p_lib::PeerProperties;
     use kaspa_p2p_lib::transport::{Capabilities, TransportMetadata};
-    use kaspa_utils::networking::PeerId;
+    use kaspa_utils::networking::{IpAddress, PeerId, RelayRole};
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::str::FromStr;
     use std::time::Instant;
 
     fn make_peer_with_path(path: PathKind, ip: Ipv4Addr, caps: Capabilities) -> Peer {
@@ -569,5 +744,30 @@ mod tests {
         let refs: Vec<&Peer> = peers.iter().collect();
         let to_drop = ConnectionManager::drop_libp2p_over_cap(&refs, 4);
         assert!(to_drop.is_empty());
+    }
+
+    #[test]
+    fn relay_circuit_addr_builds_from_ip_hint() {
+        let addr = ConnectionManager::relay_circuit_addr("203.0.113.9:16112", "12D3KooTarget").unwrap();
+        assert_eq!(addr, "/ip4/203.0.113.9/tcp/16112/p2p-circuit/p2p/12D3KooTarget");
+    }
+
+    #[test]
+    fn relay_circuit_addr_extends_multiaddr_hint() {
+        let hint = "/ip4/203.0.113.9/tcp/16112/p2p/12D3KooRelay";
+        let addr = ConnectionManager::relay_circuit_addr(hint, "12D3KooTarget").unwrap();
+        assert_eq!(addr, "/ip4/203.0.113.9/tcp/16112/p2p/12D3KooRelay/p2p-circuit/p2p/12D3KooTarget");
+    }
+
+    #[test]
+    fn relay_dial_plan_requires_fields() {
+        let addr = NetAddress::new(IpAddress::from_str("10.0.0.1").unwrap(), 16112)
+            .with_relay_role(Some(RelayRole::Private))
+            .with_libp2p_peer_id(Some("12D3KooTarget".to_string()))
+            .with_relay_circuit_hint(Some("203.0.113.9:16112".to_string()));
+        let (dial_addr, target) = ConnectionManager::relay_dial_plan(&addr).unwrap();
+        assert_eq!(dial_addr, "/ip4/203.0.113.9/tcp/16112/p2p-circuit/p2p/12D3KooTarget");
+        assert_eq!(target.target_peer_id, "12D3KooTarget");
+        assert_eq!(target.relay_key, "203.0.113.9:16112");
     }
 }

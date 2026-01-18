@@ -116,7 +116,15 @@ fn libp2p_advertisement(config: &kaspa_p2p_libp2p::Config) -> Libp2pAdvertisemen
     let relay_port = if advertise { config.listen_addresses.first().map(|addr| addr.port()) } else { None };
     let relay_capacity = if advertise { config.relay_advertise_capacity } else { None };
     let relay_ttl_ms = if advertise { config.relay_advertise_ttl_ms } else { None };
-    let relay_role = if advertise { Some(RelayRole::Public) } else { None };
+    let relay_role = if config.mode.is_enabled() {
+        if advertise {
+            Some(RelayRole::Public)
+        } else {
+            Some(RelayRole::Private)
+        }
+    } else {
+        None
+    };
     Libp2pAdvertisement { services, relay_port, relay_capacity, relay_ttl_ms, relay_role }
 }
 
@@ -585,7 +593,7 @@ Do you confirm? (y/n)";
     let grpc_server_addr = args.rpclisten.unwrap_or(ContextualNetAddress::loopback()).normalize(config.default_rpc_port());
 
     #[cfg(feature = "libp2p")]
-    let (libp2p_config, libp2p_status, outbound_connector, libp2p_init_service, libp2p_provider_cell) = {
+    let (libp2p_config, libp2p_status, libp2p_peer_id, outbound_connector, libp2p_init_service, libp2p_provider_cell) = {
         let cfg = libp2p_config_from_args(&args.libp2p, &app_dir, SocketAddr::new(p2p_server_addr.ip.into(), p2p_server_addr.port));
         let runtime = crate::libp2p::libp2p_runtime_from_config(&cfg);
         let status: GetLibp2pStatusResponse = crate::libp2p::libp2p_status_from_config(&cfg, runtime.peer_id.clone());
@@ -594,7 +602,7 @@ Do you confirm? (y/n)";
             kaspa_p2p_libp2p::Mode::Full | kaspa_p2p_libp2p::Mode::Helper => runtime.outbound.clone(),
             kaspa_p2p_libp2p::Mode::Bridge => Arc::new(kaspa_p2p_lib::TcpConnector),
         };
-        (cfg, status, outbound, runtime.init_service, runtime.provider_cell)
+        (cfg, status, runtime.peer_id.clone(), outbound, runtime.init_service, runtime.provider_cell)
     };
     #[cfg(feature = "libp2p")]
     let (
@@ -624,6 +632,8 @@ Do you confirm? (y/n)";
     };
     #[cfg(not(feature = "libp2p"))]
     let libp2p_status: GetLibp2pStatusResponse = GetLibp2pStatusResponse::disabled();
+    #[cfg(not(feature = "libp2p"))]
+    let libp2p_peer_id: Option<String> = None;
     #[cfg(not(feature = "libp2p"))]
     let outbound_connector: Arc<dyn kaspa_p2p_lib::OutboundConnector> = Arc::new(kaspa_p2p_lib::TcpConnector);
     #[cfg(not(feature = "libp2p"))]
@@ -752,14 +762,21 @@ Do you confirm? (y/n)";
         libp2p_relay_capacity,
         libp2p_relay_ttl_ms,
         libp2p_relay_role,
+        libp2p_peer_id.clone(),
+        None,
         libp2p_relay_inbound_cap,
         libp2p_relay_inbound_unknown_cap,
     ));
     #[cfg(feature = "libp2p")]
     let libp2p_node_service = if libp2p_config.mode.is_enabled() {
-        libp2p_provider_cell
-            .clone()
-            .and_then(|cell| Some(Arc::new(crate::libp2p::Libp2pNodeService::new(libp2p_config.clone(), cell, flow_context.clone()))))
+        libp2p_provider_cell.clone().and_then(|cell| {
+            Some(Arc::new(crate::libp2p::Libp2pNodeService::new(
+                libp2p_config.clone(),
+                cell,
+                flow_context.clone(),
+                libp2p_peer_id.clone(),
+            )))
+        })
     } else {
         None
     };
@@ -889,6 +906,6 @@ mod tests {
         let advert_private = libp2p_advertisement(&cfg_private);
         assert_eq!(advert_private.services, 0);
         assert_eq!(advert_private.relay_port, None);
-        assert_eq!(advert_private.relay_role, None);
+        assert_eq!(advert_private.relay_role, Some(RelayRole::Private));
     }
 }

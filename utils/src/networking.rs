@@ -2,6 +2,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fmt::Display,
     net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -230,7 +231,7 @@ pub enum RelayRole {
 }
 
 /// A network address, equivalent of a [SocketAddr], enriched with service metadata.
-#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct NetAddress {
     pub ip: IpAddress,
     pub port: u16,
@@ -244,11 +245,25 @@ pub struct NetAddress {
     pub relay_ttl_ms: Option<u64>,
     #[serde(default)]
     pub relay_role: Option<RelayRole>,
+    #[serde(default)]
+    pub libp2p_peer_id: Option<String>,
+    #[serde(default)]
+    pub relay_circuit_hint: Option<String>,
 }
 
 impl NetAddress {
     pub fn new(ip: IpAddress, port: u16) -> Self {
-        Self { ip, port, services: 0, relay_port: None, relay_capacity: None, relay_ttl_ms: None, relay_role: None }
+        Self {
+            ip,
+            port,
+            services: 0,
+            relay_port: None,
+            relay_capacity: None,
+            relay_ttl_ms: None,
+            relay_role: None,
+            libp2p_peer_id: None,
+            relay_circuit_hint: None,
+        }
     }
 
     pub fn prefix_bucket(&self) -> PrefixBucket {
@@ -280,6 +295,16 @@ impl NetAddress {
         self
     }
 
+    pub fn with_libp2p_peer_id(mut self, libp2p_peer_id: Option<String>) -> Self {
+        self.libp2p_peer_id = libp2p_peer_id;
+        self
+    }
+
+    pub fn with_relay_circuit_hint(mut self, relay_circuit_hint: Option<String>) -> Self {
+        self.relay_circuit_hint = relay_circuit_hint;
+        self
+    }
+
     pub fn set_services(&mut self, services: u64) {
         self.services = services;
     }
@@ -300,6 +325,18 @@ impl NetAddress {
         self.relay_role = relay_role;
     }
 
+    pub fn set_libp2p_peer_id(&mut self, libp2p_peer_id: Option<String>) {
+        self.libp2p_peer_id = libp2p_peer_id;
+    }
+
+    pub fn set_relay_circuit_hint(&mut self, relay_circuit_hint: Option<String>) {
+        self.relay_circuit_hint = relay_circuit_hint;
+    }
+
+    pub fn is_synthetic_relay_hint(&self) -> bool {
+        self.libp2p_peer_id.is_some() && self.relay_circuit_hint.is_some() && is_synthetic_relay_ip(self.ip)
+    }
+
     /// Merge capability metadata from another address that refers to the same endpoint.
     /// Services are ORed; relay port is upgraded if provided by the other address.
     pub fn merge_metadata(&mut self, other: &NetAddress) {
@@ -315,6 +352,12 @@ impl NetAddress {
         }
         if let Some(role) = other.relay_role {
             self.relay_role = Some(role);
+        }
+        if let Some(peer_id) = other.libp2p_peer_id.as_ref() {
+            self.libp2p_peer_id = Some(peer_id.clone());
+        }
+        if let Some(hint) = other.relay_circuit_hint.as_ref() {
+            self.relay_circuit_hint = Some(hint.clone());
         }
     }
 
@@ -377,6 +420,8 @@ impl BorshSerialize for NetAddress {
         BorshSerialize::serialize(&self.relay_capacity, writer)?;
         BorshSerialize::serialize(&self.relay_ttl_ms, writer)?;
         BorshSerialize::serialize(&self.relay_role, writer)?;
+        BorshSerialize::serialize(&self.libp2p_peer_id, writer)?;
+        BorshSerialize::serialize(&self.relay_circuit_hint, writer)?;
         Ok(())
     }
 }
@@ -416,7 +461,39 @@ impl BorshDeserialize for NetAddress {
             Err(err) => return Err(err),
         };
 
-        Ok(Self { ip, port, services, relay_port, relay_capacity, relay_ttl_ms, relay_role })
+        let libp2p_peer_id = match Option::<String>::deserialize_reader(reader) {
+            Ok(peer_id) => peer_id,
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => None,
+            Err(err) => return Err(err),
+        };
+
+        let relay_circuit_hint = match Option::<String>::deserialize_reader(reader) {
+            Ok(hint) => hint,
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => None,
+            Err(err) => return Err(err),
+        };
+
+        Ok(Self { ip, port, services, relay_port, relay_capacity, relay_ttl_ms, relay_role, libp2p_peer_id, relay_circuit_hint })
+    }
+}
+
+pub fn synthetic_relay_endpoint(peer_id: &str) -> (IpAddress, u16) {
+    let mut hasher = Sha256::new();
+    hasher.update(peer_id.as_bytes());
+    let hash = hasher.finalize();
+
+    let host = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]) & 0x0FFF_FFFF;
+    let ip = Ipv4Addr::from(0xF000_0000u32 | host);
+    let port_raw = u16::from_be_bytes([hash[4], hash[5]]);
+    let port = 1024u16.saturating_add(port_raw % 64512);
+
+    (IpAddress::from(IpAddr::V4(ip)), port)
+}
+
+pub fn is_synthetic_relay_ip(ip: IpAddress) -> bool {
+    match ip.0 {
+        IpAddr::V4(v4) => (v4.octets()[0] & 0xF0) == 0xF0,
+        IpAddr::V6(_) => false,
     }
 }
 

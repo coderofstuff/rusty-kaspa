@@ -78,7 +78,7 @@ impl AsyncService for P2pService {
             )
         } else {
             Adaptor::bidirectional(
-                self.listen,
+                self.listen.clone(),
                 self.flow_context.hub().clone(),
                 self.flow_context.clone(),
                 self.counters.clone(),

@@ -38,7 +38,7 @@ use kaspa_p2p_lib::{
 };
 use kaspa_p2p_mining::rule_engine::MiningRuleEngine;
 use kaspa_utils::iter::IterExtensions;
-use kaspa_utils::networking::{IpAddress, NetAddress, PeerId, RelayRole, NET_ADDRESS_SERVICE_LIBP2P_RELAY};
+use kaspa_utils::networking::{synthetic_relay_endpoint, IpAddress, NetAddress, PeerId, RelayRole, NET_ADDRESS_SERVICE_LIBP2P_RELAY};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -215,6 +215,8 @@ pub struct FlowContextInner {
     libp2p_relay_capacity: RwLock<Option<u32>>,
     libp2p_relay_ttl_ms: RwLock<Option<u64>>,
     libp2p_relay_role: RwLock<Option<RelayRole>>,
+    libp2p_peer_id: RwLock<Option<String>>,
+    libp2p_relay_hint: RwLock<Option<String>>,
     pub libp2p_relay_inbound_cap: Option<usize>,
     pub libp2p_relay_inbound_unknown_cap: Option<usize>,
     hub: Hub,
@@ -308,6 +310,8 @@ impl Deref for FlowContext {
     }
 }
 
+type Libp2pAdvertisement = (u64, Option<u16>, Option<u32>, Option<u64>, Option<RelayRole>, Option<String>, Option<String>);
+
 impl FlowContext {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -325,6 +329,8 @@ impl FlowContext {
         libp2p_relay_capacity: Option<u32>,
         libp2p_relay_ttl_ms: Option<u64>,
         libp2p_relay_role: Option<RelayRole>,
+        libp2p_peer_id: Option<String>,
+        libp2p_relay_hint: Option<String>,
         libp2p_relay_inbound_cap: Option<usize>,
         libp2p_relay_inbound_unknown_cap: Option<usize>,
     ) -> Self {
@@ -363,6 +369,8 @@ impl FlowContext {
                 libp2p_relay_capacity: RwLock::new(libp2p_relay_capacity),
                 libp2p_relay_ttl_ms: RwLock::new(libp2p_relay_ttl_ms),
                 libp2p_relay_role: RwLock::new(libp2p_relay_role),
+                libp2p_peer_id: RwLock::new(libp2p_peer_id),
+                libp2p_relay_hint: RwLock::new(libp2p_relay_hint),
                 libp2p_relay_inbound_cap,
                 libp2p_relay_inbound_unknown_cap,
             }),
@@ -415,13 +423,15 @@ impl FlowContext {
         self.outbound_connector.clone()
     }
 
-    pub fn libp2p_advertisement(&self) -> (u64, Option<u16>, Option<u32>, Option<u64>, Option<RelayRole>) {
+    pub fn libp2p_advertisement(&self) -> Libp2pAdvertisement {
         let services = *self.libp2p_services.read();
         let relay_port = *self.libp2p_relay_port.read();
         let relay_capacity = *self.libp2p_relay_capacity.read();
         let relay_ttl_ms = *self.libp2p_relay_ttl_ms.read();
         let relay_role = *self.libp2p_relay_role.read();
-        (services, relay_port, relay_capacity, relay_ttl_ms, relay_role)
+        let libp2p_peer_id = self.libp2p_peer_id.read().clone();
+        let relay_hint = self.libp2p_relay_hint.read().clone();
+        (services, relay_port, relay_capacity, relay_ttl_ms, relay_role, libp2p_peer_id, relay_hint)
     }
 
     pub fn set_libp2p_advertisement(
@@ -431,12 +441,39 @@ impl FlowContext {
         relay_capacity: Option<u32>,
         relay_ttl_ms: Option<u64>,
         relay_role: Option<RelayRole>,
+        libp2p_peer_id: Option<String>,
+        relay_hint: Option<String>,
     ) {
         *self.libp2p_services.write() = services;
         *self.libp2p_relay_port.write() = relay_port;
         *self.libp2p_relay_capacity.write() = relay_capacity;
         *self.libp2p_relay_ttl_ms.write() = relay_ttl_ms;
         *self.libp2p_relay_role.write() = relay_role;
+        *self.libp2p_peer_id.write() = libp2p_peer_id;
+        *self.libp2p_relay_hint.write() = relay_hint;
+    }
+
+    fn normalize_libp2p_address(&self, address: NetAddress) -> NetAddress {
+        let is_private = matches!(address.relay_role, Some(RelayRole::Private));
+        let Some(peer_id) = address.libp2p_peer_id.as_deref() else {
+            return address;
+        };
+        if !is_private {
+            return address;
+        }
+        if address.ip.is_publicly_routable() {
+            return address;
+        }
+
+        let (synthetic_ip, synthetic_port) = synthetic_relay_endpoint(peer_id);
+        NetAddress::new(synthetic_ip, synthetic_port)
+            .with_services(address.services)
+            .with_relay_port(address.relay_port)
+            .with_relay_capacity(address.relay_capacity)
+            .with_relay_ttl_ms(address.relay_ttl_ms)
+            .with_relay_role(address.relay_role)
+            .with_libp2p_peer_id(address.libp2p_peer_id)
+            .with_relay_circuit_hint(address.relay_circuit_hint)
     }
 
     pub fn libp2p_relay_inbound_cap(&self) -> Option<usize> {
@@ -818,8 +855,15 @@ impl ConnectionInitializer for FlowContext {
         // Subnets are not currently supported
         let mut self_version_message = Version::new(local_address, self.node_id, network_name.clone(), None, PROTOCOL_VERSION);
         self_version_message.add_user_agent(name(), version(), &self.config.user_agent_comments);
-        let (libp2p_services, libp2p_relay_port, libp2p_relay_capacity, libp2p_relay_ttl_ms, libp2p_relay_role) =
-            self.libp2p_advertisement();
+        let (
+            libp2p_services,
+            libp2p_relay_port,
+            libp2p_relay_capacity,
+            libp2p_relay_ttl_ms,
+            libp2p_relay_role,
+            libp2p_peer_id,
+            relay_hint,
+        ) = self.libp2p_advertisement();
         self_version_message.services = libp2p_services;
         if let Some(mut address) = self_version_message.address.take() {
             if let Some(port) = libp2p_relay_port {
@@ -833,6 +877,12 @@ impl ConnectionInitializer for FlowContext {
             }
             if let Some(role) = libp2p_relay_role {
                 address.relay_role = Some(role);
+            }
+            if let Some(peer_id) = libp2p_peer_id {
+                address.libp2p_peer_id = Some(peer_id);
+            }
+            if let Some(hint) = relay_hint {
+                address.relay_circuit_hint = Some(hint);
             }
             address.services |= libp2p_services;
             self_version_message.address = Some(address);
@@ -908,7 +958,7 @@ impl ConnectionInitializer for FlowContext {
                         outbound_address.set_relay_role(Some(RelayRole::Public));
                     }
                 }
-                address_manager.add_address(outbound_address);
+                address_manager.add_address(self.normalize_libp2p_address(outbound_address));
             }
 
             if let Some(mut peer_ip_address) = peer_version.address {
@@ -918,7 +968,7 @@ impl ConnectionInitializer for FlowContext {
                 if peer_ip_address.has_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY) && peer_ip_address.relay_role.is_none() {
                     peer_ip_address.set_relay_role(Some(RelayRole::Public));
                 }
-                address_manager.add_address(peer_ip_address);
+                address_manager.add_address(self.normalize_libp2p_address(peer_ip_address));
             }
         }
 

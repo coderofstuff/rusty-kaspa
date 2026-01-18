@@ -32,3 +32,15 @@ impl From<NetAddress> for AddressKey {
         )
     }
 }
+
+impl From<&NetAddress> for AddressKey {
+    fn from(value: &NetAddress) -> Self {
+        AddressKey::new(
+            match value.ip.0 {
+                IpAddr::V4(ip) => ip.to_ipv6_mapped(),
+                IpAddr::V6(ip) => ip,
+            },
+            value.port,
+        )
+    }
+}

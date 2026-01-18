@@ -131,6 +131,7 @@ impl ConnectionHandler {
         let bytes_rx = self.counters.bytes_rx.clone();
 
         tokio::spawn(async move {
+            let serve_address_log = serve_address.clone();
             let proto_server = ProtoP2pServer::new(connection_handler)
                 .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
                 .send_compressed(tonic::codec::CompressionEncoding::Gzip)
@@ -145,8 +146,8 @@ impl ConnectionHandler {
                 .await;
 
             match serve_result {
-                Ok(_) => info!("P2P Server stopped: {}", serve_address),
-                Err(err) => panic!("P2P, Server {serve_address} stopped with error: {err:?}"),
+                Ok(_) => info!("P2P Server stopped: {}", serve_address_log),
+                Err(err) => panic!("P2P, Server {serve_address_log} stopped with error: {err:?}"),
             }
         });
         Ok(termination_sender)

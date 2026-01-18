@@ -88,7 +88,7 @@ impl SendAddressesFlow {
             dequeue!(self.incoming_route, Payload::RequestAddresses)?;
             let addresses = self.ctx.address_manager.lock().iterate_addresses().collect_vec();
             let address_list =
-                addresses.choose_multiple(&mut rand::thread_rng(), MAX_ADDRESSES_SEND).map(|addr| (*addr).into()).collect();
+                addresses.choose_multiple(&mut rand::thread_rng(), MAX_ADDRESSES_SEND).map(|addr| addr.clone().into()).collect();
             self.router.enqueue(make_message!(Payload::Addresses, AddressesMessage { address_list })).await?;
         }
     }

@@ -178,7 +178,7 @@ impl RelayEntry {
     }
 
     fn prefix_key(&self) -> Option<PrefixKey> {
-        self.net_address.map(|addr| PrefixKey::from(addr.ip.0))
+        self.net_address.as_ref().map(|addr| PrefixKey::from(addr.ip.0))
     }
 }
 
@@ -223,11 +223,15 @@ impl RelayPool {
         for update in updates {
             let ttl = update.ttl.unwrap_or(self.config.candidate_ttl);
             let capacity = update.capacity.unwrap_or(self.config.max_peers_per_relay);
-            let entry = self.entries.entry(update.key.clone()).or_insert_with(|| RelayEntry {
-                key: update.key.clone(),
-                address: update.address.clone(),
-                net_address: update.net_address,
-                relay_peer_id: update.relay_peer_id,
+            let key = update.key.clone();
+            let address = update.address.clone();
+            let net_address = update.net_address.clone();
+            let relay_peer_id = update.relay_peer_id;
+            let entry = self.entries.entry(key.clone()).or_insert_with(|| RelayEntry {
+                key: key.clone(),
+                address: address.clone(),
+                net_address,
+                relay_peer_id,
                 capacity,
                 expires_at: now + ttl,
                 sources: update.source.bit(),

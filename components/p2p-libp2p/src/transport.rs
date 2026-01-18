@@ -335,6 +335,7 @@ mod tests {
         let (incoming_tx, incoming_rx) = mpsc::channel(incoming_capacity);
         let (_shutdown_tx, shutdown) = triggered::trigger();
         let (role_tx, _role_rx) = watch::channel(crate::Role::Private);
+        let (relay_hint_tx, _relay_hint_rx) = watch::channel(None);
         let driver = SwarmDriver::new(
             swarm,
             cmd_rx,
@@ -344,6 +345,7 @@ mod tests {
             allow_private_addrs,
             vec![],
             role_tx,
+            relay_hint_tx,
             crate::Role::Private,
             1,
             AUTO_ROLE_WINDOW,
@@ -497,8 +499,8 @@ mod tests {
         assert!(driver.dialback_cooldowns.is_empty());
     }
 
-    #[test]
-    fn dcutr_dialback_allows_private_autonat_when_private_addrs_allowed() {
+    #[tokio::test]
+    async fn dcutr_dialback_allows_private_autonat_when_private_addrs_allowed() {
         let (mut driver, peer) = dialback_ready_driver_with_allow_private(true);
         driver.autonat_private_until = Some(Instant::now() + Duration::from_secs(60));
 
@@ -628,6 +630,42 @@ impl Libp2pOutboundConnector {
         handler.connect_with_stream(stream, md).await
     }
 
+    async fn dial_multiaddr_via_provider(
+        provider: Arc<dyn Libp2pStreamProvider>,
+        address: Multiaddr,
+        handler: kaspa_p2p_lib::ConnectionHandler,
+    ) -> Result<Arc<Router>, ConnectionError> {
+        let address = Self::resolve_relay_multiaddr(provider.clone(), address)
+            .await
+            .map_err(|_| ConnectionError::ProtocolError(ProtocolError::Other("libp2p dial failed")))?;
+        let (mut md, stream) = provider
+            .dial_multiaddr(address)
+            .await
+            .map_err(|_| ConnectionError::ProtocolError(ProtocolError::Other("libp2p dial failed")))?;
+
+        md.capabilities.libp2p = true;
+        if matches!(md.path, kaspa_p2p_lib::PathKind::Unknown) {
+            md.path = kaspa_p2p_lib::PathKind::Direct;
+        }
+        handler.connect_with_stream(stream, md).await
+    }
+
+    async fn resolve_relay_multiaddr(provider: Arc<dyn Libp2pStreamProvider>, address: Multiaddr) -> Result<Multiaddr, Libp2pError> {
+        if !addr_uses_relay(&address) {
+            return Ok(address);
+        }
+        if extract_relay_peer(&address).is_some() {
+            return Ok(address);
+        }
+        if extract_circuit_target_peer(&address).is_none() {
+            return Err(Libp2pError::Multiaddr("relay circuit missing target peer id".into()));
+        }
+
+        let relay_probe_addr = relay_probe_base(&address);
+        let relay_peer = provider.probe_relay(relay_probe_addr).await?;
+        Ok(insert_relay_peer(&address, relay_peer))
+    }
+
     fn connect_libp2p_only<'a>(
         &'a self,
         address: String,
@@ -641,6 +679,12 @@ impl Libp2pOutboundConnector {
                     "libp2p outbound connector unavailable (provider not initialised)",
                 ))
             })?;
+            if address.starts_with('/') {
+                let multiaddr = Multiaddr::from_str(&address)
+                    .map_err(|_| ConnectionError::ProtocolError(ProtocolError::Other("invalid libp2p multiaddr provided")))?;
+                return Self::dial_multiaddr_via_provider(provider, multiaddr, handler).await;
+            }
+
             let address = NetAddress::from_str(&address)
                 .map_err(|_| ConnectionError::ProtocolError(ProtocolError::Other("invalid libp2p address provided")))?;
             Self::dial_via_provider(provider, address, handler).await
@@ -657,6 +701,17 @@ impl Libp2pOutboundConnector {
         let fallback = self.fallback.clone();
         let cooldowns = &self.bridge_cooldowns;
         Box::pin(async move {
+            if address.starts_with('/') {
+                let provider = provider.ok_or_else(|| {
+                    ConnectionError::ProtocolError(ProtocolError::Other(
+                        "libp2p outbound connector unavailable (provider not initialised)",
+                    ))
+                })?;
+                let multiaddr = Multiaddr::from_str(&address)
+                    .map_err(|_| ConnectionError::ProtocolError(ProtocolError::Other("invalid libp2p multiaddr provided")))?;
+                return Self::dial_multiaddr_via_provider(provider, multiaddr, handler.clone()).await;
+            }
+
             let parsed_address = NetAddress::from_str(&address);
             let now = Instant::now();
 
@@ -760,6 +815,9 @@ pub trait Libp2pStreamProvider: Send + Sync {
     fn role_updates(&self) -> Option<watch::Receiver<crate::Role>> {
         None
     }
+    fn relay_hint_updates(&self) -> Option<watch::Receiver<Option<String>>> {
+        None
+    }
     fn metrics(&self) -> Option<Arc<Libp2pMetrics>> {
         None
     }
@@ -846,6 +904,7 @@ pub struct SwarmStreamProvider {
     shutdown: Trigger,
     task: Mutex<Option<JoinHandle<()>>>,
     role_updates: Option<watch::Receiver<crate::Role>>,
+    relay_hint_updates: Option<watch::Receiver<Option<String>>>,
     metrics: Arc<Libp2pMetrics>,
 }
 
@@ -892,6 +951,7 @@ impl SwarmStreamProvider {
         let reservations = parse_reservation_targets(&config.reservations)?;
         let effective_role = if matches!(config.role, crate::Role::Auto) { crate::Role::Private } else { config.role };
         let (role_tx, role_rx) = watch::channel(effective_role);
+        let (relay_hint_tx, relay_hint_rx) = watch::channel(None);
         let auto_role_required_autonat = config.autonat.confidence_threshold.max(1);
         let auto_role_required_direct = AUTO_ROLE_REQUIRED_DIRECT.max(1);
         let allow_private_addrs = !config.autonat.server_only_if_public;
@@ -905,6 +965,7 @@ impl SwarmStreamProvider {
                 allow_private_addrs,
                 reservations,
                 role_tx,
+                relay_hint_tx,
                 config.role,
                 config.max_peers_per_relay,
                 AUTO_ROLE_WINDOW,
@@ -923,6 +984,7 @@ impl SwarmStreamProvider {
             shutdown,
             task: Mutex::new(Some(task)),
             role_updates: Some(role_rx),
+            relay_hint_updates: Some(relay_hint_rx),
             metrics,
         })
     }
@@ -1060,6 +1122,10 @@ impl Libp2pStreamProvider for SwarmStreamProvider {
 
     fn role_updates(&self) -> Option<watch::Receiver<crate::Role>> {
         self.role_updates.clone()
+    }
+
+    fn relay_hint_updates(&self) -> Option<watch::Receiver<Option<String>>> {
+        self.relay_hint_updates.clone()
     }
 
     fn metrics(&self) -> Option<Arc<Libp2pMetrics>> {
@@ -1220,6 +1286,7 @@ struct SwarmDriver {
     peer_states: HashMap<PeerId, PeerState>,
     reservation_listeners: HashSet<ListenerId>,
     active_relay: Option<RelayInfo>,
+    active_relay_listener: Option<ListenerId>,
     auto_role: Option<AutoRoleState>,
     max_peers_per_relay: usize,
     autonat_private_until: Option<Instant>,
@@ -1227,6 +1294,7 @@ struct SwarmDriver {
     listening: bool,
     shutdown: Listener,
     connections: HashMap<StreamRequestId, ConnectionEntry>,
+    relay_hint_tx: watch::Sender<Option<String>>,
 }
 
 impl SwarmDriver {
@@ -1240,6 +1308,24 @@ impl SwarmDriver {
         let external_addrs: Vec<_> = self.swarm.external_addresses().collect();
         info!("libp2p bootstrap: swarm now has {} external addresses: {:?}", external_addrs.len(), external_addrs);
         let _ = self.start_listening();
+        self.publish_relay_hint();
+    }
+
+    fn publish_relay_hint(&self) {
+        let hint = self.active_relay.as_ref().map(|relay| relay.circuit_base.to_string());
+        let _ = self.relay_hint_tx.send(hint);
+    }
+
+    fn set_active_relay(&mut self, relay: RelayInfo, listener: Option<ListenerId>) {
+        self.active_relay = Some(relay);
+        self.active_relay_listener = listener;
+        self.publish_relay_hint();
+    }
+
+    fn clear_active_relay(&mut self) {
+        self.active_relay = None;
+        self.active_relay_listener = None;
+        self.publish_relay_hint();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1252,6 +1338,7 @@ impl SwarmDriver {
         allow_private_addrs: bool,
         reservations: Vec<ReservationTarget>,
         role_tx: watch::Sender<crate::Role>,
+        relay_hint_tx: watch::Sender<Option<String>>,
         config_role: crate::Role,
         max_peers_per_relay: usize,
         auto_role_window: Duration,
@@ -1282,6 +1369,7 @@ impl SwarmDriver {
             peer_states: HashMap::new(),
             reservation_listeners: HashSet::new(),
             active_relay,
+            active_relay_listener: None,
             auto_role,
             max_peers_per_relay: max_peers_per_relay.max(1),
             autonat_private_until: None,
@@ -1289,6 +1377,7 @@ impl SwarmDriver {
             listening: false,
             shutdown,
             connections: HashMap::new(),
+            relay_hint_tx,
         }
     }
 
@@ -1428,17 +1517,16 @@ impl SwarmDriver {
                 let _ = respond_to.send(self.start_listening());
             }
             SwarmCommand::Reserve { mut target, respond_to } => {
-                if self.active_relay.is_none()
-                    && let Some(info) = relay_info_from_multiaddr(&target, *self.swarm.local_peer_id())
-                {
-                    self.active_relay = Some(info);
-                }
                 if !target.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
                     target.push(Protocol::P2pCircuit);
                 }
+                let target_for_info = target.clone();
                 match self.swarm.listen_on(target) {
                     Ok(listener) => {
                         self.reservation_listeners.insert(listener);
+                        if let Some(info) = relay_info_from_multiaddr(&target_for_info, *self.swarm.local_peer_id()) {
+                            self.set_active_relay(info, Some(listener));
+                        }
                         let _ = respond_to.send(Ok(listener));
                     }
                     Err(err) => {
@@ -1449,6 +1537,9 @@ impl SwarmDriver {
             SwarmCommand::ReleaseReservation { listener_id, respond_to } => {
                 self.reservation_listeners.remove(&listener_id);
                 let _ = self.swarm.remove_listener(listener_id);
+                if self.active_relay_listener == Some(listener_id) {
+                    self.clear_active_relay();
+                }
                 let _ = respond_to.send(());
             }
             SwarmCommand::PeersSnapshot { respond_to } => {
@@ -1589,10 +1680,10 @@ impl SwarmDriver {
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("libp2p listening on {address}");
-                if self.active_relay.is_none()
-                    && let Some(info) = relay_info_from_multiaddr(&address, *self.swarm.local_peer_id())
-                {
-                    self.active_relay = Some(info);
+                if self.active_relay.is_none() {
+                    if let Some(info) = relay_info_from_multiaddr(&address, *self.swarm.local_peer_id()) {
+                        self.set_active_relay(info, None);
+                    }
                 }
                 self.listening = true;
             }
@@ -2207,6 +2298,34 @@ fn strip_peer_suffix(addr: &mut Multiaddr, peer_id: PeerId) {
 
 fn addr_uses_relay(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+}
+
+fn relay_probe_base(addr: &Multiaddr) -> Multiaddr {
+    let mut base = Multiaddr::empty();
+    for protocol in addr.iter() {
+        if matches!(protocol, Protocol::P2pCircuit) {
+            break;
+        }
+        base.push(protocol);
+    }
+    base
+}
+
+fn insert_relay_peer(addr: &Multiaddr, relay_peer: PeerId) -> Multiaddr {
+    let mut out = Multiaddr::empty();
+    let mut inserted = false;
+    for protocol in addr.iter() {
+        if matches!(protocol, Protocol::P2pCircuit) && !inserted {
+            out.push(Protocol::P2p(relay_peer));
+            inserted = true;
+        }
+        out.push(protocol);
+    }
+    if !inserted {
+        out.push(Protocol::P2p(relay_peer));
+        out.push(Protocol::P2pCircuit);
+    }
+    out
 }
 
 fn is_tcp_dialable(addr: &Multiaddr) -> bool {

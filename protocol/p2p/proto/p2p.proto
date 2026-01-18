@@ -21,6 +21,8 @@ message NetAddress{
   uint32 relayCapacity = 6;
   uint64 relayTtlMs = 7;
   RelayRole relayRole = 8;
+  string libp2pPeerId = 9;
+  string relayCircuitHint = 10;
 }
 
 enum RelayRole{

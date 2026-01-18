@@ -412,13 +412,16 @@ fn apply_role_update(
     relay_capacity: Option<u32>,
     relay_ttl_ms: Option<u64>,
     inbound_cap_private: usize,
+    libp2p_peer_id: Option<String>,
+    relay_hint: Option<String>,
 ) {
-    let (services, relay_port, relay_role, relay_capacity, relay_ttl_ms) = if matches!(role, AdapterRole::Public) {
-        (NET_ADDRESS_SERVICE_LIBP2P_RELAY, relay_port, Some(RelayRole::Public), relay_capacity, relay_ttl_ms)
-    } else {
-        (0, None, None, None, None)
-    };
-    flow_context.set_libp2p_advertisement(services, relay_port, relay_capacity, relay_ttl_ms, relay_role);
+    let (services, relay_port, relay_role, relay_capacity, relay_ttl_ms, libp2p_peer_id, relay_hint) =
+        if matches!(role, AdapterRole::Public) {
+            (NET_ADDRESS_SERVICE_LIBP2P_RELAY, relay_port, Some(RelayRole::Public), relay_capacity, relay_ttl_ms, None, None)
+        } else {
+            (0, None, Some(RelayRole::Private), None, None, libp2p_peer_id, relay_hint)
+        };
+    flow_context.set_libp2p_advertisement(services, relay_port, relay_capacity, relay_ttl_ms, relay_role, libp2p_peer_id, relay_hint);
     let is_private = !matches!(role, AdapterRole::Public);
     set_libp2p_role_config(Libp2pRoleConfig { is_private, libp2p_inbound_cap_private: inbound_cap_private });
 }
@@ -468,6 +471,7 @@ pub struct Libp2pNodeService {
     config: AdapterConfig,
     provider_cell: Arc<OnceCell<Arc<dyn kaspa_p2p_libp2p::Libp2pStreamProvider>>>,
     flow_context: Arc<FlowContext>,
+    libp2p_peer_id: Option<String>,
     shutdown: SingleTrigger,
 }
 
@@ -477,8 +481,9 @@ impl Libp2pNodeService {
         config: AdapterConfig,
         provider_cell: Arc<OnceCell<Arc<dyn kaspa_p2p_libp2p::Libp2pStreamProvider>>>,
         flow_context: Arc<FlowContext>,
+        libp2p_peer_id: Option<String>,
     ) -> Self {
-        Self { config, provider_cell, flow_context, shutdown: SingleTrigger::new() }
+        Self { config, provider_cell, flow_context, libp2p_peer_id, shutdown: SingleTrigger::new() }
     }
 }
 
@@ -503,13 +508,31 @@ impl AsyncService for Libp2pNodeService {
                 sleep(Duration::from_millis(50)).await;
             };
 
+            let relay_port = self.config.listen_addresses.first().map(|addr| addr.port());
+            let relay_capacity = self.config.relay_advertise_capacity;
+            let relay_ttl_ms = self.config.relay_advertise_ttl_ms;
+            let inbound_cap_private = self.config.libp2p_inbound_cap_private;
+            let libp2p_peer_id = self.libp2p_peer_id.clone();
+            let current_role = Arc::new(Mutex::new(self.config.role));
+            let current_hint: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+            apply_role_update(
+                &self.flow_context,
+                *current_role.lock(),
+                relay_port,
+                relay_capacity,
+                relay_ttl_ms,
+                inbound_cap_private,
+                libp2p_peer_id.clone(),
+                current_hint.lock().clone(),
+            );
+
             if matches!(self.config.role, AdapterRole::Auto) {
                 if let Some(mut role_rx) = provider.role_updates() {
                     let flow_context = self.flow_context.clone();
-                    let relay_port = self.config.listen_addresses.first().map(|addr| addr.port());
-                    let relay_capacity = self.config.relay_advertise_capacity;
-                    let relay_ttl_ms = self.config.relay_advertise_ttl_ms;
-                    let inbound_cap_private = self.config.libp2p_inbound_cap_private;
+                    let current_role = current_role.clone();
+                    let current_hint = current_hint.clone();
+                    let libp2p_peer_id = libp2p_peer_id.clone();
                     tokio::spawn(async move {
                         let mut current = *role_rx.borrow();
                         loop {
@@ -521,10 +544,51 @@ impl AsyncService for Libp2pNodeService {
                                 continue;
                             }
                             current = role;
-                            apply_role_update(&flow_context, role, relay_port, relay_capacity, relay_ttl_ms, inbound_cap_private);
+                            *current_role.lock() = role;
+                            apply_role_update(
+                                &flow_context,
+                                role,
+                                relay_port,
+                                relay_capacity,
+                                relay_ttl_ms,
+                                inbound_cap_private,
+                                libp2p_peer_id.clone(),
+                                current_hint.lock().clone(),
+                            );
                         }
                     });
                 }
+            }
+
+            if let Some(mut hint_rx) = provider.relay_hint_updates() {
+                let flow_context = self.flow_context.clone();
+                let current_role = current_role.clone();
+                let current_hint = current_hint.clone();
+                let libp2p_peer_id = libp2p_peer_id.clone();
+                tokio::spawn(async move {
+                    let mut current = hint_rx.borrow().clone();
+                    loop {
+                        if hint_rx.changed().await.is_err() {
+                            break;
+                        }
+                        let hint = hint_rx.borrow().clone();
+                        if hint == current {
+                            continue;
+                        }
+                        current = hint.clone();
+                        *current_hint.lock() = hint.clone();
+                        apply_role_update(
+                            &flow_context,
+                            *current_role.lock(),
+                            relay_port,
+                            relay_capacity,
+                            relay_ttl_ms,
+                            inbound_cap_private,
+                            libp2p_peer_id.clone(),
+                            hint,
+                        );
+                    }
+                });
             }
 
             let handler = loop {

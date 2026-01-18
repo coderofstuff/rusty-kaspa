@@ -51,7 +51,7 @@ impl Adaptor {
             broadcasters,
             counters,
         );
-        let server_termination = connection_handler.serve(serve_address);
+        let server_termination = connection_handler.serve(serve_address.clone());
         let adaptor = Arc::new(Adaptor::new(Some(server_termination), connection_handler, manager, serve_address));
         adaptor.manager.clone().start_event_loop(manager_receiver);
         adaptor.start();
@@ -59,7 +59,7 @@ impl Adaptor {
     }
 
     pub fn serve_address(&self) -> NetAddress {
-        self.serve_address
+        self.serve_address.clone()
     }
 
     pub fn start(&self) {
