@@ -291,6 +291,7 @@ nohup ~/rusty-kaspa/target/release/kaspad \
 ```
 libp2p autonat: role auto-promoted to public
 ```
+Note: AutoNAT promotion can take a few minutes (often ~5). If the line is missing, wait and re-check.
 
 ## Step 8: Max Peers Per Relay Cap
 
@@ -346,6 +347,221 @@ grep -E "peer id|reservation" /tmp/kaspa-c.log
 5. Dial Node A via relay from Node B and Node C helper APIs.
 
 **Expected outcome:** Node A stabilizes with a single relay‑path peer (cap=1). Check Node A helper peers output and confirm only one `"path":"relay"` entry remains.
+
+## Step 9: New Feature Checks (Relay Hints + Auto)
+
+Optional but recommended coverage for new relay‑hint behavior.
+
+Notes:
+- Backoff/failure logs appear only if a bad relay candidate is actually selected.
+- Synthetic TCP skip logs appear only when a relay hint has been ingested into the AddressManager.
+
+### 9.1 Relay candidate without `/p2p` peer id (probe path)
+
+Start relay as public (Step 6.1), then start Node A with a candidate missing the peer id:
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-a /tmp/node-a.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-a \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-identity-path=/tmp/node-a.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.61/tcp/16112 \
+  --libp2p-relay-candidates=/ip4/10.0.3.26/tcp/16112 \
+  --connect=10.0.3.26:16111 \
+  --nologfiles > /tmp/kaspa-a.log 2>&1 &
+
+sleep 20
+grep -E "reservation accepted|probe failed" /tmp/kaspa-a.log
+```
+
+**Expected:** Reservation accepted (probe filled in the relay peer id).
+
+### 9.2 Multi‑source gating for relay auto
+
+Start Node A with a relay candidate but *no* extra source:
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-a /tmp/node-a.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-a \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-identity-path=/tmp/node-a.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.61/tcp/16112 \
+  --libp2p-relay-candidates=/ip4/10.0.3.26/tcp/16112 \
+  --nologfiles > /tmp/kaspa-a.log 2>&1 &
+
+sleep 30
+grep -E "reservation accepted" /tmp/kaspa-a.log
+```
+
+**Expected:** No reservation accepted yet.
+
+Restart with a second source and confirm it proceeds:
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-a /tmp/node-a.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-a \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-identity-path=/tmp/node-a.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.61/tcp/16112 \
+  --libp2p-relay-candidates=/ip4/10.0.3.26/tcp/16112 \
+  --connect=10.0.3.26:16111 \
+  --nologfiles > /tmp/kaspa-a.log 2>&1 &
+
+sleep 20
+grep -E "reservation accepted" /tmp/kaspa-a.log
+```
+
+### 9.3 Bad relay candidate backoff + fallback
+
+Start Node A with one invalid relay candidate and one valid:
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-a /tmp/node-a.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-a \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-identity-path=/tmp/node-a.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.61/tcp/16112 \
+  --libp2p-relay-candidates=/ip4/10.0.3.99/tcp/16112,/ip4/10.0.3.26/tcp/16112 \
+  --connect=10.0.3.26:16111 \
+  --nologfiles > /tmp/kaspa-a.log 2>&1 &
+
+sleep 30
+grep -E "probe failed|reservation failed|reservation accepted" /tmp/kaspa-a.log
+```
+
+**Expected:** Warn about the bad candidate, then a reservation on the valid relay.
+
+### 9.4 Synthetic relay hints are non‑dialable for TCP (optional debug)
+
+If you want confirmation that synthetic relay hints are *not* dialed directly:
+
+```bash
+RUST_LOG=debug \
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-a \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-identity-path=/tmp/node-a.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.61/tcp/16112 \
+  --libp2p-relay-candidates=/ip4/10.0.3.26/tcp/16112 \
+  --connect=10.0.3.26:16111 \
+  --nologfiles > /tmp/kaspa-a.log 2>&1 &
+```
+
+Look for debug lines like `libp2p relay auto: ...` and `Connecting to relay target ...`, and *no* TCP `Connecting to ...` for synthetic relay hints.
+
+## Step 10: Gossip‑Only Relay Hint + Rotation
+
+This validates that relay hints from gossip are sufficient for auto‑dial, and that stale hints rotate.
+
+### 10.1 Gossip‑only hint (no manual dial)
+
+To avoid a “single source” block in the lab, run a second relay instance on the same relay VM (different ports). No ports are opened on Node A/B.
+
+Relay #1 (16111/16112) is already running. Start Relay #2:
+
+```bash
+pkill -9 -f /tmp/kaspa-relay2 || true
+rm -rf /tmp/kaspa-relay2 /tmp/relay2.key
+
+KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-relay2 \
+  --listen=10.0.3.26:16211 \
+  --rpclisten=10.0.3.26:16210 \
+  --libp2p-mode=bridge \
+  --libp2p-role=public \
+  --libp2p-identity-path=/tmp/relay2.key \
+  --libp2p-helper-listen=127.0.0.1:38081 \
+  --libp2p-listen-port=16212 \
+  --libp2p-relay-listen-port=16212 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.26/tcp/16212 \
+  --nodnsseed \
+  --nologfiles > /tmp/kaspa-relay2.log 2>&1 &
+
+sleep 12
+grep "streaming swarm peer id" /tmp/kaspa-relay2.log
+```
+
+1. Start relay as public (Step 6.1).
+2. Start Node A + Node B in `auto` role with **no helper dial**, and connect to both relays:
+
+```bash
+--connect=10.0.3.26:16111 --connect=10.0.3.26:16211
+--libp2p-relay-candidates=/ip4/10.0.3.26/tcp/16112,/ip4/10.0.3.26/tcp/16212
+```
+
+If you want to keep a single relay, you can set `KASPAD_LIBP2P_RELAY_MIN_SOURCES=1` as a lab‑only override.
+
+3. Wait 60–120s to allow address gossip.
+4. Check Node A logs for relay hint selection and relay dial attempts:
+
+```bash
+grep -E "relay hint|relay auto|Connecting to relay target|reservation accepted" /tmp/kaspa-a.log | tail -n 50
+```
+
+**Expected:** Node A establishes a relay‑path connection to Node B (then DCUtR upgrades to direct).
+
+### 10.2 Hint staleness + rotation
+
+1. Stop Relay #1 (16111/16112) to force rotation to Relay #2:
+
+```bash
+pkill -9 kaspad
+```
+
+If Relay #1 is running in a different session, kill only that process.
+
+2. Wait for Node A to attempt a relay dial to the stale hint (should fail) and rotate.
+
+```bash
+grep -E "reservation failed|probe failed|skipping .* backoff|relay auto" /tmp/kaspa-a.log | tail -n 50
+```
+
+**Expected:** Failure/backoff against stale relay, then selection of a valid relay.
+
+## Step 11: Relay Demotion + Reselection
+
+This validates that a relay that loses public status is removed and peers move to another relay.
+
+Lab note: for practical testing with a single relay, set `KASPAD_LIBP2P_RELAY_MIN_SOURCES=1` on Node A/B. When the relay stops, you may not see an explicit “releasing reservation” log line; verify by checking helper peers output (empty).
+Lab note: to avoid waiting on reservation TTLs, you can restart Node A after the relay goes down to force immediate re‑selection.
+
+1. Start relay in `auto` role and wait for auto‑promotion (Step 7).
+2. Simulate demotion (stop relay or remove inbound reachability).
+3. Observe Node A/B logs for reservation release + new relay selection.
+
+```bash
+grep -E "releasing reservation|relay auto|reservation accepted" /tmp/kaspa-a.log | tail -n 50
+```
+
+**Expected:** Reservation release on the demoted relay and a new reservation on another relay.
 
 ## Critical Configuration Notes
 
