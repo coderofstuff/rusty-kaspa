@@ -264,7 +264,10 @@ impl<S: DagknightStore + DagknightStoreReader, Q: RelationsStoreReader, R: Reach
 
     pub fn sort_blocks(&self, blocks: impl IntoIterator<Item = Hash>) -> Vec<Hash> {
         let mut sorted_blocks: Vec<Hash> = blocks.into_iter().collect();
-        sorted_blocks.sort_by_cached_key(|block| SortableBlock { hash: *block, blue_work: self.get_blue_work(*block).unwrap() });
+        sorted_blocks.sort_by_cached_key(|block| SortableBlock {
+            hash: *block,
+            blue_work: self.headers_store.get_header(*block).unwrap().blue_work,
+        });
         sorted_blocks
     }
 
@@ -279,7 +282,7 @@ impl<S: DagknightStore + DagknightStoreReader, Q: RelationsStoreReader, R: Reach
     pub fn find_selected_parent(&self, parents: impl IntoIterator<Item = Hash>) -> Hash {
         parents
             .into_iter()
-            .map(|parent| SortableBlock { hash: parent, blue_work: self.get_blue_work(parent).unwrap() })
+            .map(|parent| SortableBlock { hash: parent, blue_work: self.headers_store.get_header(parent).unwrap().blue_work })
             .max()
             .unwrap()
             .hash
