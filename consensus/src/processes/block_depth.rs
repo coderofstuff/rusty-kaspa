@@ -24,7 +24,7 @@ pub struct BlockDepthManager<S: DepthStoreReader, U: ReachabilityStoreReader, V:
     genesis_hash: Hash,
     depth_store: Arc<S>,
     reachability_service: MTReachabilityService<U>,
-    ghostdag_store: Arc<V>,
+    coloring_ghostdag_store: Arc<V>,
     headers_store: Arc<T>,
 }
 
@@ -35,10 +35,10 @@ impl<S: DepthStoreReader, U: ReachabilityStoreReader, V: GhostdagStoreReader, T:
         genesis_hash: Hash,
         depth_store: Arc<S>,
         reachability_service: MTReachabilityService<U>,
-        ghostdag_store: Arc<V>,
+        coloring_ghostdag_store: Arc<V>,
         headers_store: Arc<T>,
     ) -> Self {
-        Self { merge_depth, finality_depth, genesis_hash, depth_store, reachability_service, ghostdag_store, headers_store }
+        Self { merge_depth, finality_depth, genesis_hash, depth_store, reachability_service, coloring_ghostdag_store, headers_store }
     }
     pub fn calc_merge_depth_root(&self, ghostdag_data: &GhostdagData, pruning_point: Hash) -> Hash {
         self.calculate_block_at_depth(ghostdag_data, BlockDepthType::MergeRoot, pruning_point)
@@ -60,7 +60,7 @@ impl<S: DepthStoreReader, U: ReachabilityStoreReader, V: GhostdagStoreReader, T:
             return self.genesis_hash;
         }
 
-        let pp_bs = self.ghostdag_store.get_blue_score(pruning_point).unwrap();
+        let pp_bs = self.coloring_ghostdag_store.get_blue_score(pruning_point).unwrap();
 
         if ghostdag_data.blue_score < pp_bs + depth {
             return ORIGIN;
@@ -86,7 +86,7 @@ impl<S: DepthStoreReader, U: ReachabilityStoreReader, V: GhostdagStoreReader, T:
         let required_blue_score = ghostdag_data.blue_score - depth;
 
         for chain_block in self.reachability_service.forward_chain_iterator(current, ghostdag_data.selected_parent, true) {
-            if self.ghostdag_store.get_blue_score(chain_block).unwrap() >= required_blue_score {
+            if self.coloring_ghostdag_store.get_blue_score(chain_block).unwrap() >= required_blue_score {
                 break;
             }
 
