@@ -110,7 +110,7 @@ pub struct PruningProofManager {
     pruning_samples_store: Arc<DbPruningSamplesStore>,
     pruning_meta_stores: Arc<RwLock<PruningMetaStores>>,
 
-    ghostdag_manager: DbGhostdagManager,
+    coloring_ghostdag_manager: DbGhostdagManager,
     traversal_manager: DbDagTraversalManager,
     window_manager: DbWindowManager,
     parents_manager: DbParentsManager,
@@ -135,7 +135,7 @@ impl PruningProofManager {
         storage: &Arc<ConsensusStorage>,
         parents_manager: DbParentsManager,
         reachability_service: MTReachabilityService<DbReachabilityStore>,
-        ghostdag_manager: DbGhostdagManager,
+        coloring_ghostdag_manager: DbGhostdagManager,
         traversal_manager: DbDagTraversalManager,
         window_manager: DbWindowManager,
         max_block_level: BlockLevel,
@@ -165,7 +165,7 @@ impl PruningProofManager {
             depth_store: storage.depth_store.clone(),
             pruning_samples_store: storage.pruning_samples_store.clone(),
 
-            ghostdag_manager,
+            coloring_ghostdag_manager,
             traversal_manager,
             window_manager,
             parents_manager,
@@ -263,7 +263,7 @@ impl PruningProofManager {
             .traversal_manager
             .anticone(pruning_point, virtual_parents, None)
             .expect("no error is expected when max_traversal_allowed is None");
-        let mut anticone = self.ghostdag_manager.sort_blocks(anticone);
+        let mut anticone = self.coloring_ghostdag_manager.sort_blocks(anticone);
         anticone.insert(0, pruning_point);
 
         let mut daa_window_blocks = BlockHashMap::new();

@@ -198,7 +198,7 @@ impl ConsensusServices {
             &storage,
             parents_manager.clone(),
             reachability_service.clone(),
-            ghostdag_manager.clone(),
+            coloring_ghostdag_manager.clone(),
             dag_traversal_manager.clone(),
             window_manager.clone(),
             params.max_block_level,
