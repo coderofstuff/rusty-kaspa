@@ -12,6 +12,7 @@ use kaspa_consensus_core::{
     blockhash::{BlockHashExtensions, ORIGIN},
     config::genesis::GenesisBlock,
     errors::{block::RuleError, difficulty::DifficultyResult},
+    trusted::ExternalGhostdagData,
 };
 use kaspa_hashes::Hash;
 use kaspa_math::Uint256;
@@ -213,7 +214,22 @@ impl<T: GhostdagStoreReader, U: BlockWindowCacheReader + BlockWindowCacheWriter,
             // Needed for blue_work
             let parent_topology_ghostdag = self.topology_ghostdag_store.get_data(current_coloring_ghostdag.selected_parent).unwrap();
             // Needed for selected parent
-            let parent_coloring_ghostdag = self.coloring_ghostdag_store.get_data(current_coloring_ghostdag.selected_parent).unwrap();
+
+            // TEMPORARY HACK TO APPLY PRUNING CONSISTENCY
+            let mut parent_coloring_ghostdag = ExternalGhostdagData::from(
+                self.coloring_ghostdag_store.get_data(current_coloring_ghostdag.selected_parent).unwrap().as_ref(),
+            );
+
+            parent_coloring_ghostdag.mergeset_blues.retain(|&h| self.topology_ghostdag_store.has(h).unwrap());
+            parent_coloring_ghostdag.mergeset_reds.retain(|&h| self.topology_ghostdag_store.has(h).unwrap());
+
+            if !self.topology_ghostdag_store.has(parent_coloring_ghostdag.selected_parent).unwrap() {
+                println!("parent_coloring_ghostdag.mergeset_blues: {:#?}", parent_coloring_ghostdag.mergeset_blues);
+                println!("parent_coloring_ghostdag.selected_parent: {}", parent_coloring_ghostdag.selected_parent);
+                parent_coloring_ghostdag.selected_parent = ORIGIN;
+            }
+
+            let parent_coloring_ghostdag = Arc::new(parent_coloring_ghostdag.into());
 
             // No need to further iterate since past of selected parent has only lower blue work
             if !window_heap.can_push(current_coloring_ghostdag.selected_parent, parent_topology_ghostdag.blue_work) {
