@@ -1,9 +1,9 @@
-use crate::swarm::{build_streaming_swarm, Libp2pBehaviour, Libp2pEvent, StreamEvent, StreamRequestId};
+use crate::swarm::{Libp2pBehaviour, Libp2pEvent, StreamEvent, StreamRequestId, build_streaming_swarm};
 use crate::{config::Config, metadata::TransportMetadata};
-use futures_util::future::BoxFuture;
 use futures_util::StreamExt;
-use kaspa_p2p_lib::common::ProtocolError;
+use futures_util::future::BoxFuture;
 use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
+use kaspa_p2p_lib::common::ProtocolError;
 use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PathKind, PeerKey, Router, TransportConnector};
 use kaspa_utils::networking::NetAddress;
 use libp2p::core::transport::ListenerId;
@@ -12,9 +12,9 @@ use libp2p::identify;
 use libp2p::identity::Keypair;
 use libp2p::multiaddr::Multiaddr;
 use libp2p::multiaddr::Protocol;
-use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::SwarmEvent;
-use libp2p::{identity, relay, PeerId};
+use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
+use libp2p::{PeerId, identity, relay};
 use log::{debug, info, warn};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -22,12 +22,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{fs, io, path::Path};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::OnceCell;
-use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::task::spawn;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, Duration, Instant, MissedTickBehavior};
+use tokio::task::spawn;
+use tokio::time::{Duration, Instant, MissedTickBehavior, interval};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use triggered::{Listener, Trigger};
 
@@ -83,8 +83,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::str::FromStr;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     use tempfile::tempdir;
     use tokio::sync::{mpsc, oneshot};
@@ -524,11 +524,11 @@ impl Libp2pOutboundConnector {
             let parsed_address = NetAddress::from_str(&address);
             let now = Instant::now();
 
-            if let Some(deadline) = cooldowns.lock().await.get(&address).cloned() {
-                if deadline > now {
-                    metadata.capabilities.libp2p = false;
-                    return fallback.connect(address, metadata, handler).await;
-                }
+            if let Some(deadline) = cooldowns.lock().await.get(&address).cloned()
+                && deadline > now
+            {
+                metadata.capabilities.libp2p = false;
+                return fallback.connect(address, metadata, handler).await;
             }
 
             if let (Ok(net_addr), Some(provider)) = (parsed_address, provider.clone()) {
@@ -1085,10 +1085,10 @@ impl SwarmDriver {
                 let _ = respond_to.send(self.start_listening());
             }
             SwarmCommand::Reserve { mut target, respond_to } => {
-                if self.active_relay.is_none() {
-                    if let Some(info) = relay_info_from_multiaddr(&target, *self.swarm.local_peer_id()) {
-                        self.active_relay = Some(info);
-                    }
+                if self.active_relay.is_none()
+                    && let Some(info) = relay_info_from_multiaddr(&target, *self.swarm.local_peer_id())
+                {
+                    self.active_relay = Some(info);
                 }
                 if !target.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
                     target.push(Protocol::P2pCircuit);
@@ -1223,10 +1223,10 @@ impl SwarmDriver {
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("libp2p listening on {address}");
-                if self.active_relay.is_none() {
-                    if let Some(info) = relay_info_from_multiaddr(&address, *self.swarm.local_peer_id()) {
-                        self.active_relay = Some(info);
-                    }
+                if self.active_relay.is_none()
+                    && let Some(info) = relay_info_from_multiaddr(&address, *self.swarm.local_peer_id())
+                {
+                    self.active_relay = Some(info);
                 }
                 self.listening = true;
             }
@@ -1237,12 +1237,12 @@ impl SwarmDriver {
                 // For DCUtR direct connections spawned from relay dials, transfer the earliest
                 // pending relay dial for this peer onto the new connection_id.
                 let mut had_pending_relay = false;
-                if !endpoint_uses_relay(&endpoint) {
-                    if let Some((_old_req, pending)) = self.take_pending_relay_by_peer(&peer_id) {
-                        info!("libp2p DCUtR success: direct connection to {peer_id} resolves pending relay dial");
-                        self.pending_dials.insert(connection_id, pending);
-                        had_pending_relay = true;
-                    }
+                if !endpoint_uses_relay(&endpoint)
+                    && let Some((_old_req, pending)) = self.take_pending_relay_by_peer(&peer_id)
+                {
+                    info!("libp2p DCUtR success: direct connection to {peer_id} resolves pending relay dial");
+                    self.pending_dials.insert(connection_id, pending);
+                    had_pending_relay = true;
                 }
 
                 if endpoint.is_dialer() {
@@ -1353,10 +1353,10 @@ impl SwarmDriver {
                 // connection records which track whether a connection uses a relay circuit.
                 // This is needed because the send_back_addr for relay circuit listeners
                 // may not contain the P2pCircuit protocol marker.
-                if matches!(metadata.path, kaspa_p2p_lib::PathKind::Unknown) {
-                    if let Some(conn) = self.connections.get(&connection_id) {
-                        metadata.path = conn.path.clone();
-                    }
+                if matches!(metadata.path, kaspa_p2p_lib::PathKind::Unknown)
+                    && let Some(conn) = self.connections.get(&connection_id)
+                {
+                    metadata.path = conn.path.clone();
                 }
                 info!("libp2p_bridge: inbound stream from {peer_id} over {:?}, handing to Kaspa", metadata.path);
                 let incoming = IncomingStream { metadata, direction: StreamDirection::Inbound, stream: Box::new(stream.compat()) };
@@ -1366,7 +1366,9 @@ impl SwarmDriver {
                 let metadata = metadata_from_endpoint(&peer_id, &endpoint);
                 let direction = match &endpoint {
                     libp2p::core::ConnectedPoint::Dialer { role_override: libp2p::core::Endpoint::Listener, .. } => {
-                        info!("libp2p_bridge: DCUtR role_override detected, treating outbound stream as inbound (h2 server) for {peer_id}");
+                        info!(
+                            "libp2p_bridge: DCUtR role_override detected, treating outbound stream as inbound (h2 server) for {peer_id}"
+                        );
                         StreamDirection::Inbound
                     }
                     _ => StreamDirection::Outbound,
@@ -1453,11 +1455,11 @@ impl SwarmDriver {
             return;
         }
         let now = Instant::now();
-        if let Some(next_allowed) = self.dialback_cooldowns.get(&peer_id) {
-            if *next_allowed > now {
-                debug!("libp2p dcutr: skipping dial-back to {peer_id}: cooldown until {:?}", *next_allowed);
-                return;
-            }
+        if let Some(next_allowed) = self.dialback_cooldowns.get(&peer_id)
+            && *next_allowed > now
+        {
+            debug!("libp2p dcutr: skipping dial-back to {peer_id}: cooldown until {:?}", *next_allowed);
+            return;
         }
 
         let Some(relay) = &self.active_relay else {
@@ -1667,10 +1669,8 @@ fn extract_circuit_target_peer(addr: &Multiaddr) -> Option<PeerId> {
     for p in components {
         if matches!(p, Protocol::P2pCircuit) {
             after_circuit = true;
-        } else if after_circuit {
-            if let Protocol::P2p(peer_id) = p {
-                return Some(peer_id);
-            }
+        } else if after_circuit && let Protocol::P2p(peer_id) = p {
+            return Some(peer_id);
         }
     }
     None
@@ -1687,10 +1687,10 @@ fn relay_info_from_multiaddr(addr: &Multiaddr, local_peer_id: PeerId) -> Option<
 }
 
 fn strip_peer_suffix(addr: &mut Multiaddr, peer_id: PeerId) {
-    if let Some(Protocol::P2p(last)) = addr.iter().last() {
-        if last == peer_id {
-            addr.pop();
-        }
+    if let Some(Protocol::P2p(last)) = addr.iter().last()
+        && last == peer_id
+    {
+        addr.pop();
     }
 }
 
@@ -1732,8 +1732,8 @@ struct MockProvider {
 fn make_test_stream(drops: Arc<std::sync::atomic::AtomicUsize>) -> BoxedLibp2pStream {
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use tokio::io::{duplex, ReadBuf};
     use tokio::io::{AsyncRead, AsyncWrite};
+    use tokio::io::{ReadBuf, duplex};
 
     struct DropStream {
         inner: tokio::io::DuplexStream,

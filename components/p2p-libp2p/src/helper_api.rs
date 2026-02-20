@@ -108,9 +108,9 @@ impl From<PeerSnapshot> for HelperPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Libp2pError;
     use crate::metadata::TransportMetadata;
     use crate::transport::{BoxedLibp2pStream, ReservationHandle, StreamDirection};
-    use crate::Libp2pError;
     use futures_util::future::BoxFuture;
     use kaspa_utils::networking::NetAddress;
 

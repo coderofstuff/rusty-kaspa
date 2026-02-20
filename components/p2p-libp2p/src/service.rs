@@ -1,6 +1,6 @@
 use crate::helper_api::{HelperApi, HelperError};
 use crate::reservations::ReservationManager;
-use crate::transport::{multiaddr_to_metadata, BoxedLibp2pStream, Libp2pStreamProvider, ReservationHandle, StreamDirection};
+use crate::transport::{BoxedLibp2pStream, Libp2pStreamProvider, ReservationHandle, StreamDirection, multiaddr_to_metadata};
 use crate::{config::Config, transport::Libp2pError};
 use kaspa_p2p_lib::{ConnectionHandler, MetadataConnectInfo, PathKind};
 use libp2p::Multiaddr;
@@ -13,7 +13,7 @@ use tokio::io;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tokio_stream::wrappers::ReceiverStream;
 use triggered::Listener;
 
@@ -438,9 +438,9 @@ mod tests {
     use libp2p::PeerId;
     use std::collections::VecDeque;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
-    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
     use tokio::time::Duration;
 
     #[tokio::test]

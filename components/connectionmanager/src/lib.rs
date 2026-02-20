@@ -11,7 +11,7 @@ use futures_util::future::{join_all, try_join_all};
 use itertools::Itertools;
 use kaspa_addressmanager::{AddressManager, NetAddress};
 use kaspa_core::{debug, info, warn};
-use kaspa_p2p_lib::{common::ProtocolError, ConnectionError, PathKind, Peer};
+use kaspa_p2p_lib::{ConnectionError, PathKind, Peer, common::ProtocolError};
 use kaspa_utils::triggers::SingleTrigger;
 use parking_lot::Mutex as ParkingLotMutex;
 use rand::{seq::SliceRandom, thread_rng};
@@ -348,11 +348,7 @@ impl ConnectionManager {
     }
 
     fn drop_libp2p_over_cap<'a>(peers: &'a [&Peer], cap: usize) -> Vec<&'a Peer> {
-        if peers.len() > cap {
-            peers.choose_multiple(&mut thread_rng(), peers.len() - cap).cloned().collect_vec()
-        } else {
-            Vec::new()
-        }
+        if peers.len() > cap { peers.choose_multiple(&mut thread_rng(), peers.len() - cap).cloned().collect_vec() } else { Vec::new() }
     }
 
     fn relay_overflow<'a>(peers: &'a [&Peer], per_relay_cap: usize, unknown_cap: usize) -> Vec<&'a Peer> {
@@ -465,8 +461,8 @@ impl ConnectionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kaspa_p2p_lib::transport::{Capabilities, TransportMetadata};
     use kaspa_p2p_lib::PeerProperties;
+    use kaspa_p2p_lib::transport::{Capabilities, TransportMetadata};
     use kaspa_utils::networking::PeerId;
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, SocketAddr};

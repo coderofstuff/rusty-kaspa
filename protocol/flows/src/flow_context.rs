@@ -47,8 +47,8 @@ use std::{
     iter::once,
     ops::Deref,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Weak,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };

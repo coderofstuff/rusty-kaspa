@@ -1,6 +1,6 @@
 use futures::StreamExt;
-use kaspa_p2p_libp2p::config::{ConfigBuilder, Mode};
 use kaspa_p2p_libp2p::Libp2pIdentity;
+use kaspa_p2p_libp2p::config::{ConfigBuilder, Mode};
 use libp2p::core::transport::choice::OrTransport;
 use libp2p::core::upgrade;
 use libp2p::dcutr;
@@ -12,7 +12,7 @@ use libp2p::relay::{self, client as relay_client};
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::tcp::tokio::Transport as TcpTransport;
 use libp2p::yamux;
-use libp2p::{identity, Transport};
+use libp2p::{Transport, identity};
 use std::time::Duration;
 use tokio::select;
 use tokio::time::Instant;

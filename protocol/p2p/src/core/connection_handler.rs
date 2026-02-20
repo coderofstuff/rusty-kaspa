@@ -27,8 +27,8 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Uri;
 use tonic::transport::{Error as TonicError, Server as TonicServer};
-use tonic::{body::BoxBody, transport::server::Connected};
 use tonic::{Request, Response, Status as TonicStatus, Streaming};
+use tonic::{body::BoxBody, transport::server::Connected};
 use tower::Service;
 
 #[derive(Error, Debug)]
@@ -474,7 +474,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::net::SocketAddr;
     use std::task::{Context, Poll};
-    use tokio::io::{duplex, AsyncRead, AsyncWrite};
+    use tokio::io::{AsyncRead, AsyncWrite, duplex};
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::ReceiverStream;
     use uuid::Uuid;

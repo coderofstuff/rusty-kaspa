@@ -14,7 +14,7 @@ pub mod transport;
 
 pub use config::{AutoNatConfig, Config, ConfigBuilder, Identity, Mode, Role};
 pub use service::Libp2pService;
-pub use swarm::{build_base_swarm, BaseBehaviour};
+pub use swarm::{BaseBehaviour, build_base_swarm};
 pub use transport::{
     BoxedLibp2pStream, Libp2pConnector, Libp2pError, Libp2pIdentity, Libp2pOutboundConnector, Libp2pStream, Libp2pStreamProvider,
     SwarmStreamProvider,

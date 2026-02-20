@@ -12,7 +12,7 @@ use kaspa_rpc_core::{GetLibp2pStatusResponse, RpcLibp2pIdentity, RpcLibp2pMode};
 #[cfg(feature = "libp2p")]
 use kaspa_utils::triggers::SingleTrigger;
 use serde::Deserialize;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use std::{
     env,
     net::SocketAddr,
@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::sync::OnceCell;
 #[cfg(feature = "libp2p")]
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 pub(crate) const DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE: usize = 8;
 

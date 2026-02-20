@@ -1,9 +1,9 @@
 use crate::core::hub::HubEvent;
 use crate::pb::RejectMessage;
-use crate::pb::{kaspad_message::Payload as KaspadMessagePayload, KaspadMessage};
+use crate::pb::{KaspadMessage, kaspad_message::Payload as KaspadMessagePayload};
 use crate::transport::TransportMetadata;
-use crate::{common::ProtocolError, KaspadMessagePayloadType};
-use crate::{make_message, Peer};
+use crate::{KaspadMessagePayloadType, common::ProtocolError};
+use crate::{Peer, make_message};
 use kaspa_core::{debug, error, info, trace, warn};
 use kaspa_utils::networking::PeerId;
 use parking_lot::{Mutex, RwLock};

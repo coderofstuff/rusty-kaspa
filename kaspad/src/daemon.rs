@@ -4,7 +4,7 @@ use std::{fs, path::PathBuf, process::exit, sync::Arc, time::Duration};
 
 use async_channel::unbounded;
 #[cfg(feature = "libp2p")]
-use kaspa_connectionmanager::{set_libp2p_role_config, Libp2pRoleConfig};
+use kaspa_connectionmanager::{Libp2pRoleConfig, set_libp2p_role_config};
 use kaspa_consensus_core::{
     config::ConfigBuilder,
     constants::TRANSIENT_BYTE_TO_MASS_FACTOR,
@@ -12,7 +12,7 @@ use kaspa_consensus_core::{
     mining_rules::MiningRules,
 };
 use kaspa_consensus_notify::{root::ConsensusNotificationRoot, service::NotifyService};
-use kaspa_core::{core::Core, debug, info, trace};
+use kaspa_core::{core::Core, debug, info};
 use kaspa_core::{kaspad_env::version, task::tick::TickService};
 use kaspa_database::{
     prelude::{CachePolicy, DbWriter, DirectDbWriter, RocksDbPreset},
@@ -53,7 +53,6 @@ use kaspa_mining::{
 };
 use kaspa_p2p_flows::{flow_context::FlowContext, service::P2pService};
 
-use itertools::Itertools;
 use kaspa_perf_monitor::{builder::Builder as PerfMonitorBuilder, counters::CountersSnapshot};
 use kaspa_utxoindex::{UtxoIndex, api::UtxoIndexProxy};
 use kaspa_wrpc_server::service::{Options as WrpcServerOptions, WebSocketCounters as WrpcServerCounters, WrpcEncoding, WrpcService};

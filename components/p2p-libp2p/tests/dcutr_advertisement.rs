@@ -1,10 +1,10 @@
 mod tests {
     use futures::StreamExt;
     use libp2p::{
-        dcutr, identify, identity, noise, relay,
+        PeerId, Swarm, SwarmBuilder, Transport, dcutr, identify, identity, noise, relay,
         relay::client as relay_client,
         swarm::{NetworkBehaviour, SwarmEvent},
-        tcp, yamux, PeerId, Swarm, SwarmBuilder, Transport,
+        tcp, yamux,
     };
     use std::time::Duration;
 

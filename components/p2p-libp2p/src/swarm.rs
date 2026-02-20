@@ -9,17 +9,17 @@ use libp2p::identify;
 use libp2p::noise;
 use libp2p::ping;
 use libp2p::relay::{self, client as relay_client};
+use libp2p::swarm::NewExternalAddrCandidate;
+use libp2p::swarm::THandlerInEvent;
 use libp2p::swarm::behaviour::{FromSwarm, ToSwarm};
 use libp2p::swarm::handler::{
     ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,
     OneShotHandler, StreamUpgradeError,
 };
-use libp2p::swarm::NewExternalAddrCandidate;
-use libp2p::swarm::THandlerInEvent;
 use libp2p::swarm::{ConnectionId, NetworkBehaviour, NotifyHandler, Stream, StreamProtocol, SubstreamProtocol};
 use libp2p::tcp::tokio::Transport as TcpTransport;
 use libp2p::yamux;
-use libp2p::{identity, swarm, Multiaddr, Swarm, Transport};
+use libp2p::{Multiaddr, Swarm, Transport, identity, swarm};
 use log::{debug, info};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;

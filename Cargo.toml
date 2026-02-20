@@ -52,6 +52,7 @@ members = [
     "components/connectionmanager",
     "components/consensusmanager",
     "components/p2p-libp2p",
+    "bridge",
     "database",
     "crypto/txscript",
     "crypto/txscript/errors",

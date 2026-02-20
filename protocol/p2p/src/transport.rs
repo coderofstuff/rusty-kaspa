@@ -1,5 +1,5 @@
-use crate::core::peer::PeerKey;
 use crate::Router;
+use crate::core::peer::PeerKey;
 use kaspa_utils::networking::{IpAddress, NetAddress, PeerId};
 use std::collections::hash_map::DefaultHasher;
 use std::future::Future;
