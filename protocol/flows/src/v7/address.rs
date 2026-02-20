@@ -9,6 +9,7 @@ use kaspa_p2p_lib::{
 };
 use rand::seq::SliceRandom;
 use std::sync::Arc;
+use tokio::time::{Duration, sleep};
 
 /// The maximum number of addresses that are sent in a single kaspa Addresses message.
 const MAX_ADDRESSES_SEND: usize = 1000;
@@ -16,6 +17,8 @@ const MAX_ADDRESSES_SEND: usize = 1000;
 /// The maximum number of addresses that can be received in a single kaspa Addresses response.
 /// If a peer exceeds this value we consider it a protocol error.
 const MAX_ADDRESSES_RECEIVE: usize = 2500;
+/// Periodic refresh for address gossip to avoid startup race windows.
+const ADDRESS_REFRESH_INTERVAL: Duration = Duration::from_secs(45);
 
 pub struct ReceiveAddressesFlow {
     ctx: FlowContext,
@@ -40,24 +43,31 @@ impl ReceiveAddressesFlow {
     }
 
     async fn start_impl(&mut self) -> Result<(), ProtocolError> {
-        self.router
-            .enqueue(make_message!(
-                Payload::RequestAddresses,
-                RequestAddressesMessage { include_all_subnetworks: false, subnetwork_id: None }
-            ))
-            .await?;
+        loop {
+            self.router
+                .enqueue(make_message!(
+                    Payload::RequestAddresses,
+                    RequestAddressesMessage { include_all_subnetworks: false, subnetwork_id: None }
+                ))
+                .await?;
 
-        let msg = dequeue_with_timeout!(self.incoming_route, Payload::Addresses)?;
-        let address_list: Vec<NetAddress> = msg.try_into()?;
-        if address_list.len() > MAX_ADDRESSES_RECEIVE {
-            return Err(ProtocolError::OtherOwned(format!("address count {} exceeded {}", address_list.len(), MAX_ADDRESSES_RECEIVE)));
+            let msg = dequeue_with_timeout!(self.incoming_route, Payload::Addresses)?;
+            let address_list: Vec<NetAddress> = msg.try_into()?;
+            if address_list.len() > MAX_ADDRESSES_RECEIVE {
+                return Err(ProtocolError::OtherOwned(format!(
+                    "address count {} exceeded {}",
+                    address_list.len(),
+                    MAX_ADDRESSES_RECEIVE
+                )));
+            }
+            {
+                let mut amgr_lock = self.ctx.address_manager.lock();
+                for addr in address_list {
+                    amgr_lock.add_address(addr)
+                }
+            }
+            sleep(ADDRESS_REFRESH_INTERVAL).await;
         }
-        let mut amgr_lock = self.ctx.address_manager.lock();
-        for addr in address_list {
-            amgr_lock.add_address(addr)
-        }
-
-        Ok(())
     }
 }
 
