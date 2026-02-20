@@ -64,10 +64,10 @@ pub async fn run_relay_auto_worker(
             provider.peers_snapshot().await.into_iter().filter(|peer| peer.libp2p).map(|peer| peer.peer_id).collect();
         let mut disconnected = Vec::new();
         for (key, reservation) in active.iter() {
-            if let Some(peer_id) = reservation.relay_peer_id.as_deref() {
-                if !connected_peers.contains(peer_id) {
-                    disconnected.push(key.clone());
-                }
+            if let Some(peer_id) = reservation.relay_peer_id.as_deref()
+                && !connected_peers.contains(peer_id)
+            {
+                disconnected.push(key.clone());
             }
         }
         for key in disconnected {
@@ -124,32 +124,32 @@ pub async fn run_relay_auto_worker(
             }
 
             let mut reservation_addr = pool.reservation_multiaddr(&selection.key);
-            if reservation_addr.is_none() {
-                if let Some(probe_addr) = pool.probe_multiaddr(&selection.key) {
-                    if let Some(metrics) = metrics.as_ref() {
-                        metrics.relay_auto().record_probe_attempt();
+            if reservation_addr.is_none()
+                && let Some(probe_addr) = pool.probe_multiaddr(&selection.key)
+            {
+                if let Some(metrics) = metrics.as_ref() {
+                    metrics.relay_auto().record_probe_attempt();
+                }
+                let probe_started = Instant::now();
+                match provider.probe_relay(probe_addr).await {
+                    Ok(peer_id) => {
+                        pool.set_peer_id(&selection.key, peer_id);
+                        let latency = probe_started.elapsed();
+                        pool.record_success(&selection.key, Some(latency), now);
+                        if let Some(metrics) = metrics.as_ref() {
+                            metrics.relay_auto().record_probe_success();
+                        }
+                        reservation_addr = pool.reservation_multiaddr(&selection.key);
                     }
-                    let probe_started = Instant::now();
-                    match provider.probe_relay(probe_addr).await {
-                        Ok(peer_id) => {
-                            pool.set_peer_id(&selection.key, peer_id);
-                            let latency = probe_started.elapsed();
-                            pool.record_success(&selection.key, Some(latency), now);
-                            if let Some(metrics) = metrics.as_ref() {
-                                metrics.relay_auto().record_probe_success();
-                            }
-                            reservation_addr = pool.reservation_multiaddr(&selection.key);
+                    Err(err) => {
+                        warn!("libp2p relay auto: probe failed for {}: {err}", selection.key);
+                        backoff.record_failure(&selection.key, now);
+                        pool.record_failure(&selection.key, now);
+                        if let Some(metrics) = metrics.as_ref() {
+                            metrics.relay_auto().record_probe_failure();
+                            metrics.relay_auto().record_backoff();
                         }
-                        Err(err) => {
-                            warn!("libp2p relay auto: probe failed for {}: {err}", selection.key);
-                            backoff.record_failure(&selection.key, now);
-                            pool.record_failure(&selection.key, now);
-                            if let Some(metrics) = metrics.as_ref() {
-                                metrics.relay_auto().record_probe_failure();
-                                metrics.relay_auto().record_backoff();
-                            }
-                            continue;
-                        }
+                        continue;
                     }
                 }
             }

@@ -1,7 +1,7 @@
-use futures_util::future::{join_all, BoxFuture};
+use futures_util::future::{BoxFuture, join_all};
 use kaspa_utils::networking::NetAddress;
-use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::str::FromStr;

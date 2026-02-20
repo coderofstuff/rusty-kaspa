@@ -28,7 +28,7 @@ use kaspa_txscript::caches::TxScriptCacheCounters;
 use kaspa_utils::git;
 use kaspa_utils::networking::ContextualNetAddress;
 #[cfg(feature = "libp2p")]
-use kaspa_utils::networking::{RelayRole, NET_ADDRESS_SERVICE_LIBP2P_RELAY};
+use kaspa_utils::networking::{NET_ADDRESS_SERVICE_LIBP2P_RELAY, RelayRole};
 use kaspa_utils::sysinfo::SystemInfo;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
 
@@ -116,15 +116,8 @@ fn libp2p_advertisement(config: &kaspa_p2p_libp2p::Config) -> Libp2pAdvertisemen
     let relay_port = if advertise { config.listen_addresses.first().map(|addr| addr.port()) } else { None };
     let relay_capacity = if advertise { config.relay_advertise_capacity } else { None };
     let relay_ttl_ms = if advertise { config.relay_advertise_ttl_ms } else { None };
-    let relay_role = if config.mode.is_enabled() {
-        if advertise {
-            Some(RelayRole::Public)
-        } else {
-            Some(RelayRole::Private)
-        }
-    } else {
-        None
-    };
+    let relay_role =
+        if config.mode.is_enabled() { if advertise { Some(RelayRole::Public) } else { Some(RelayRole::Private) } } else { None };
     Libp2pAdvertisement { services, relay_port, relay_capacity, relay_ttl_ms, relay_role }
 }
 

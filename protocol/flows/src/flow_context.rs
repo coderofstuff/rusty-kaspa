@@ -38,7 +38,7 @@ use kaspa_p2p_lib::{
 };
 use kaspa_p2p_mining::rule_engine::MiningRuleEngine;
 use kaspa_utils::iter::IterExtensions;
-use kaspa_utils::networking::{synthetic_relay_endpoint, IpAddress, NetAddress, PeerId, RelayRole, NET_ADDRESS_SERVICE_LIBP2P_RELAY};
+use kaspa_utils::networking::{IpAddress, NET_ADDRESS_SERVICE_LIBP2P_RELAY, NetAddress, PeerId, RelayRole, synthetic_relay_endpoint};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::time::Instant;

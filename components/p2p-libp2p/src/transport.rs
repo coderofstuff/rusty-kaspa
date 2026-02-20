@@ -1,5 +1,5 @@
 use crate::metrics::{Libp2pMetrics, Libp2pMetricsSnapshot};
-use crate::swarm::{build_streaming_swarm, Libp2pBehaviour, Libp2pEvent, StreamEvent, StreamRequestId};
+use crate::swarm::{Libp2pBehaviour, Libp2pEvent, StreamEvent, StreamRequestId, build_streaming_swarm};
 use crate::{config::Config, metadata::TransportMetadata};
 use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
@@ -1680,10 +1680,10 @@ impl SwarmDriver {
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("libp2p listening on {address}");
-                if self.active_relay.is_none() {
-                    if let Some(info) = relay_info_from_multiaddr(&address, *self.swarm.local_peer_id()) {
-                        self.set_active_relay(info, None);
-                    }
+                if self.active_relay.is_none()
+                    && let Some(info) = relay_info_from_multiaddr(&address, *self.swarm.local_peer_id())
+                {
+                    self.set_active_relay(info, None);
                 }
                 self.listening = true;
             }
@@ -1692,12 +1692,13 @@ impl SwarmDriver {
                 self.track_established(peer_id, &endpoint);
 
                 let has_external_addr = self.has_usable_external_addr();
-                if let Some(auto_role) = self.auto_role.as_mut() {
-                    if !endpoint.is_dialer() && !endpoint_uses_relay(&endpoint) {
-                        auto_role.record_direct_inbound(Instant::now());
-                        if auto_role.maybe_promote(Instant::now(), has_external_addr) {
-                            info!("libp2p auto role: promoted to public after direct inbound");
-                        }
+                if let Some(auto_role) = self.auto_role.as_mut()
+                    && !endpoint.is_dialer()
+                    && !endpoint_uses_relay(&endpoint)
+                {
+                    auto_role.record_direct_inbound(Instant::now());
+                    if auto_role.maybe_promote(Instant::now(), has_external_addr) {
+                        info!("libp2p auto role: promoted to public after direct inbound");
                     }
                 }
 
@@ -1718,10 +1719,8 @@ impl SwarmDriver {
                     self.pending_dials.insert(connection_id, pending);
                     had_pending_relay = true;
                 }
-                if had_pending_relay {
-                    if let Some(metrics) = self.metrics.as_ref() {
-                        metrics.dcutr().record_dialback_success();
-                    }
+                if had_pending_relay && let Some(metrics) = self.metrics.as_ref() {
+                    metrics.dcutr().record_dialback_success();
                 }
 
                 if endpoint.is_dialer() {
@@ -2025,23 +2024,23 @@ impl SwarmDriver {
             return;
         }
         let now = Instant::now();
-        if !self.allow_private_addrs {
-            if let Some(until) = self.autonat_private_until {
-                if until > now {
-                    if let Some(metrics) = self.metrics.as_ref() {
-                        metrics.dcutr().record_dialback_skipped_private();
-                    }
-                    debug!("libp2p dcutr: skipping dial-back to {peer_id}: autonat private until {:?}", until);
-                    return;
+        if !self.allow_private_addrs
+            && let Some(until) = self.autonat_private_until
+        {
+            if until > now {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.dcutr().record_dialback_skipped_private();
                 }
-                self.autonat_private_until = None;
-            }
-        }
-        if let Some(next_allowed) = self.dialback_cooldowns.get(&peer_id) {
-            if *next_allowed > now {
-                debug!("libp2p dcutr: skipping dial-back to {peer_id}: cooldown until {:?}", *next_allowed);
+                debug!("libp2p dcutr: skipping dial-back to {peer_id}: autonat private until {:?}", until);
                 return;
             }
+            self.autonat_private_until = None;
+        }
+        if let Some(next_allowed) = self.dialback_cooldowns.get(&peer_id)
+            && *next_allowed > now
+        {
+            debug!("libp2p dcutr: skipping dial-back to {peer_id}: cooldown until {:?}", *next_allowed);
+            return;
         }
         if let Some(until) = self.direct_upgrade_cooldowns.get(&peer_id).copied() {
             if until > now {

@@ -12,7 +12,7 @@ use futures_util::future::{join_all, try_join_all};
 use itertools::Itertools;
 use kaspa_addressmanager::{AddressManager, NetAddress};
 use kaspa_core::{debug, info, warn};
-use kaspa_p2p_lib::{common::ProtocolError, ConnectionError, PathKind, Peer};
+use kaspa_p2p_lib::{ConnectionError, PathKind, Peer, common::ProtocolError};
 use kaspa_utils::{networking::RelayRole, triggers::SingleTrigger};
 use parking_lot::Mutex as ParkingLotMutex;
 use rand::{seq::SliceRandom, thread_rng};

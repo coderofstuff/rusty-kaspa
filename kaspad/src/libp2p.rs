@@ -4,24 +4,24 @@ use futures_util::future::BoxFuture;
 #[cfg(feature = "libp2p")]
 use kaspa_addressmanager::AddressManager;
 #[cfg(feature = "libp2p")]
-use kaspa_connectionmanager::{set_libp2p_role_config, Libp2pRoleConfig};
+use kaspa_connectionmanager::{Libp2pRoleConfig, set_libp2p_role_config};
 use kaspa_core::task::service::{AsyncService, AsyncServiceError, AsyncServiceFuture};
 #[cfg(feature = "libp2p")]
 use kaspa_p2p_flows::flow_context::FlowContext;
 use kaspa_p2p_lib::{OutboundConnector, TcpConnector};
+use kaspa_p2p_libp2p::SwarmStreamProvider;
 #[cfg(feature = "libp2p")]
 use kaspa_p2p_libp2p::relay_pool::{
-    relay_update_from_multiaddr_str, relay_update_from_netaddr, CompositeRelaySource, RelayCandidateSource, RelayCandidateUpdate,
-    RelaySource, StaticRelaySource,
+    CompositeRelaySource, RelayCandidateSource, RelayCandidateUpdate, RelaySource, StaticRelaySource, relay_update_from_multiaddr_str,
+    relay_update_from_netaddr,
 };
-use kaspa_p2p_libp2p::SwarmStreamProvider;
 use kaspa_p2p_libp2p::{
     AutoNatConfig, Config as AdapterConfig, ConfigBuilder as AdapterConfigBuilder, Identity as AdapterIdentity,
     Libp2pOutboundConnector, Mode as AdapterMode, Role as AdapterRole,
 };
 use kaspa_rpc_core::{GetLibp2pStatusResponse, RpcLibp2pIdentity, RpcLibp2pMode};
 #[cfg(feature = "libp2p")]
-use kaspa_utils::networking::{RelayRole, NET_ADDRESS_SERVICE_LIBP2P_RELAY};
+use kaspa_utils::networking::{NET_ADDRESS_SERVICE_LIBP2P_RELAY, RelayRole};
 #[cfg(feature = "libp2p")]
 use kaspa_utils::triggers::SingleTrigger;
 #[cfg(feature = "libp2p")]
@@ -737,11 +737,11 @@ mod tests {
     mod relay_source_tests {
         use super::*;
         use kaspa_addressmanager::AddressManager;
-        use kaspa_consensus_core::config::{params::SIMNET_PARAMS, Config as ConsensusConfig};
+        use kaspa_consensus_core::config::{Config as ConsensusConfig, params::SIMNET_PARAMS};
         use kaspa_core::task::tick::TickService;
         use kaspa_database::create_temp_db;
         use kaspa_database::prelude::ConnBuilder;
-        use kaspa_utils::networking::{IpAddress, NetAddress, NET_ADDRESS_SERVICE_LIBP2P_RELAY};
+        use kaspa_utils::networking::{IpAddress, NET_ADDRESS_SERVICE_LIBP2P_RELAY, NetAddress};
         use std::str::FromStr;
         use std::sync::Arc;
 

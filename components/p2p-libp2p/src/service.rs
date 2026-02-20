@@ -88,13 +88,13 @@ impl Libp2pService {
             tokio::spawn(async move { reservation_worker(provider_for_worker, reservations, state, shutdown).await });
         }
 
-        if self.config.reservations.is_empty() {
-            if let Some(relay_source) = self.relay_source.clone() {
-                let provider_for_worker = provider.clone();
-                let config = self.config.clone();
-                let shutdown = self.shutdown.clone();
-                tokio::spawn(async move { run_relay_auto_worker(provider_for_worker, relay_source, config, shutdown).await });
-            }
+        if self.config.reservations.is_empty()
+            && let Some(relay_source) = self.relay_source.clone()
+        {
+            let provider_for_worker = provider.clone();
+            let config = self.config.clone();
+            let shutdown = self.shutdown.clone();
+            tokio::spawn(async move { run_relay_auto_worker(provider_for_worker, relay_source, config, shutdown).await });
         }
 
         if let Some(addr) = self.config.helper_listen {
