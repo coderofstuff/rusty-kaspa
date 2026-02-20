@@ -2,6 +2,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use kaspa_consensus_core::blockhash;
+use kaspa_core::debug;
 use parking_lot::RwLock;
 
 use crate::model::stores::reachability::ReachabilityStoreReader;
@@ -105,7 +106,15 @@ impl<T: ReachabilityStoreReader + ?Sized> MTReachabilityService<T> {
 impl<T: ReachabilityStoreReader + ?Sized> ReachabilityService for MTReachabilityService<T> {
     fn try_is_chain_ancestor_of(&self, this: Hash, queried: Hash) -> Result<bool> {
         let read_guard = self.store.read();
-        inquirer::is_chain_ancestor_of(read_guard.deref(), this, queried)
+        debug!("try_is_chain_ancestor_of | this: {} | queried: {}", this, queried);
+
+        let res = inquirer::is_chain_ancestor_of(read_guard.deref(), this, queried);
+
+        if res.is_err() {
+            debug!("stacktrace: {:?}", std::backtrace::Backtrace::force_capture());
+        }
+
+        res
     }
 
     fn try_is_dag_ancestor_of(&self, this: Hash, queried: Hash) -> Result<bool> {
