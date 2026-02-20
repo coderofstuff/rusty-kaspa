@@ -568,7 +568,7 @@ impl<
                         child,
                         self.reachability_service.has_reachability_data(child)
                     );
-                    if !visited_subdag.contains(&child) {
+                    if visited_subdag.contains(&child) {
                         panic!("root: {} | Unexpected missing reachability data for {} | tips: {:?}", child, root, tips);
                     } else {
                         debug!(
