@@ -216,6 +216,7 @@ pub struct FlowContextInner {
     libp2p_relay_ttl_ms: RwLock<Option<u64>>,
     libp2p_relay_role: RwLock<Option<RelayRole>>,
     libp2p_peer_id: RwLock<Option<String>>,
+    libp2p_advertise_address: Option<NetAddress>,
     libp2p_relay_hint: RwLock<Option<String>>,
     pub libp2p_relay_inbound_cap: Option<usize>,
     pub libp2p_relay_inbound_unknown_cap: Option<usize>,
@@ -330,6 +331,7 @@ impl FlowContext {
         libp2p_relay_ttl_ms: Option<u64>,
         libp2p_relay_role: Option<RelayRole>,
         libp2p_peer_id: Option<String>,
+        libp2p_advertise_address: Option<NetAddress>,
         libp2p_relay_hint: Option<String>,
         libp2p_relay_inbound_cap: Option<usize>,
         libp2p_relay_inbound_unknown_cap: Option<usize>,
@@ -370,6 +372,7 @@ impl FlowContext {
                 libp2p_relay_ttl_ms: RwLock::new(libp2p_relay_ttl_ms),
                 libp2p_relay_role: RwLock::new(libp2p_relay_role),
                 libp2p_peer_id: RwLock::new(libp2p_peer_id),
+                libp2p_advertise_address,
                 libp2p_relay_hint: RwLock::new(libp2p_relay_hint),
                 libp2p_relay_inbound_cap,
                 libp2p_relay_inbound_unknown_cap,
@@ -451,6 +454,10 @@ impl FlowContext {
         *self.libp2p_relay_role.write() = relay_role;
         *self.libp2p_peer_id.write() = libp2p_peer_id;
         *self.libp2p_relay_hint.write() = relay_hint;
+    }
+
+    pub fn libp2p_advertise_address(&self) -> Option<NetAddress> {
+        self.libp2p_advertise_address.clone()
     }
 
     fn normalize_libp2p_address(&self, address: NetAddress) -> NetAddress {
@@ -849,7 +856,7 @@ impl ConnectionInitializer for FlowContext {
 
         let network_name = self.config.network_name();
 
-        let local_address = self.address_manager.lock().best_local_address();
+        let local_address = self.address_manager.lock().best_local_address().or_else(|| self.libp2p_advertise_address());
 
         // Build the local version message
         // Subnets are not currently supported

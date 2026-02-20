@@ -110,7 +110,7 @@ impl SendAddressesFlow {
     }
 
     fn current_local_address(&self) -> Option<NetAddress> {
-        let mut local = self.ctx.address_manager.lock().best_local_address()?;
+        let mut local = self.ctx.address_manager.lock().best_local_address().or_else(|| self.ctx.libp2p_advertise_address())?;
         let (services, relay_port, relay_capacity, relay_ttl_ms, relay_role, libp2p_peer_id, relay_hint) =
             self.ctx.libp2p_advertisement();
         local.services |= services;

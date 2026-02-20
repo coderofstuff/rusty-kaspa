@@ -1,5 +1,5 @@
 #[cfg(feature = "libp2p")]
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::{fs, path::PathBuf, process::exit, sync::Arc, time::Duration};
 
 use async_channel::unbounded;
@@ -28,7 +28,7 @@ use kaspa_txscript::caches::TxScriptCacheCounters;
 use kaspa_utils::git;
 use kaspa_utils::networking::ContextualNetAddress;
 #[cfg(feature = "libp2p")]
-use kaspa_utils::networking::{NET_ADDRESS_SERVICE_LIBP2P_RELAY, RelayRole};
+use kaspa_utils::networking::{NET_ADDRESS_SERVICE_LIBP2P_RELAY, NetAddress, RelayRole};
 use kaspa_utils::sysinfo::SystemInfo;
 use kaspa_utils_tower::counters::TowerConnectionCounters;
 
@@ -119,6 +119,42 @@ fn libp2p_advertisement(config: &kaspa_p2p_libp2p::Config) -> Libp2pAdvertisemen
     let relay_role =
         if config.mode.is_enabled() { if advertise { Some(RelayRole::Public) } else { Some(RelayRole::Private) } } else { None };
     Libp2pAdvertisement { services, relay_port, relay_capacity, relay_ttl_ms, relay_role }
+}
+
+#[cfg(feature = "libp2p")]
+fn parse_ip_tcp_from_multiaddr(value: &str) -> Option<SocketAddr> {
+    let parts: Vec<&str> = value.split('/').filter(|part| !part.is_empty()).collect();
+    let mut ip: Option<IpAddr> = None;
+    let mut port: Option<u16> = None;
+    for idx in 0..parts.len().saturating_sub(1) {
+        match parts[idx] {
+            "ip4" | "ip6" if ip.is_none() => {
+                if let Ok(parsed) = parts[idx + 1].parse::<IpAddr>() {
+                    ip = Some(parsed);
+                }
+            }
+            "tcp" if port.is_none() => {
+                if let Ok(parsed) = parts[idx + 1].parse::<u16>() {
+                    port = Some(parsed);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match (ip, port) {
+        (Some(ip), Some(port)) => Some(SocketAddr::new(ip, port)),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "libp2p")]
+fn libp2p_fallback_advertise_address(config: &kaspa_p2p_libp2p::Config) -> Option<NetAddress> {
+    if let Some(socket) = config.advertise_addresses.first() {
+        return Some((*socket).into());
+    }
+
+    config.external_multiaddrs.iter().find_map(|value| parse_ip_tcp_from_multiaddr(value).map(Into::into))
 }
 
 pub fn validate_args(args: &Args) -> ConfigResult<()> {
@@ -623,6 +659,8 @@ Do you confirm? (y/n)";
             libp2p_config.relay_inbound_unknown_cap,
         )
     };
+    #[cfg(feature = "libp2p")]
+    let libp2p_advertise_address = libp2p_fallback_advertise_address(&libp2p_config);
     #[cfg(not(feature = "libp2p"))]
     let libp2p_status: GetLibp2pStatusResponse = GetLibp2pStatusResponse::disabled();
     #[cfg(not(feature = "libp2p"))]
@@ -639,6 +677,8 @@ Do you confirm? (y/n)";
         libp2p_relay_inbound_cap,
         libp2p_relay_inbound_unknown_cap,
     ) = (0, None, None, None, None, None, None);
+    #[cfg(not(feature = "libp2p"))]
+    let libp2p_advertise_address = None;
     #[cfg(feature = "libp2p")]
     {
         let is_private = libp2p_config.mode.is_enabled()
@@ -756,6 +796,7 @@ Do you confirm? (y/n)";
         libp2p_relay_ttl_ms,
         libp2p_relay_role,
         libp2p_peer_id.clone(),
+        libp2p_advertise_address,
         None,
         libp2p_relay_inbound_cap,
         libp2p_relay_inbound_unknown_cap,
@@ -882,6 +923,7 @@ Do you confirm? (y/n)";
 mod tests {
     use super::*;
     use kaspa_p2p_libp2p::{Config as AdapterConfig, ConfigBuilder as AdapterConfigBuilder, Mode as AdapterMode, Role as AdapterRole};
+    use std::net::SocketAddr;
 
     #[test]
     fn libp2p_advertisement_respects_role() {
@@ -900,5 +942,28 @@ mod tests {
         assert_eq!(advert_private.services, 0);
         assert_eq!(advert_private.relay_port, None);
         assert_eq!(advert_private.relay_role, Some(RelayRole::Private));
+    }
+
+    #[test]
+    fn parse_ip_tcp_from_multiaddr_extracts_socket_addr() {
+        let parsed = parse_ip_tcp_from_multiaddr("/ip4/10.0.3.61/tcp/16112/p2p/12D3KooWRelay").expect("expected ip/tcp components");
+        assert_eq!(parsed, "10.0.3.61:16112".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn fallback_advertise_address_uses_external_multiaddr() {
+        let config = AdapterConfigBuilder::new().external_multiaddrs(vec!["/ip4/10.0.3.62/tcp/16112".to_string()]).build();
+        let advertised = libp2p_fallback_advertise_address(&config).expect("expected fallback address");
+        assert_eq!(SocketAddr::from(advertised), "10.0.3.62:16112".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn fallback_advertise_address_prefers_explicit_advertise_socket() {
+        let config = AdapterConfigBuilder::new()
+            .external_multiaddrs(vec!["/ip4/10.0.3.62/tcp/16112".to_string()])
+            .advertise_addresses(vec!["203.0.113.10:17112".parse::<SocketAddr>().unwrap()])
+            .build();
+        let advertised = libp2p_fallback_advertise_address(&config).expect("expected fallback address");
+        assert_eq!(SocketAddr::from(advertised), "203.0.113.10:17112".parse::<SocketAddr>().unwrap());
     }
 }
