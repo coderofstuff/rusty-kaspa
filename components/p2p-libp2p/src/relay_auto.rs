@@ -2,6 +2,7 @@ use crate::config::{Config, Role};
 use crate::relay_pool::{RelayCandidateSource, RelayPool, RelayPoolConfig};
 use crate::reservations::ReservationManager;
 use crate::transport::{Libp2pStreamProvider, ReservationHandle};
+use libp2p::{PeerId, multiaddr::Protocol};
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -168,6 +169,7 @@ pub async fn run_relay_auto_worker(
             if let Some(metrics) = metrics.as_ref() {
                 metrics.relay_auto().record_reservation_attempt();
             }
+            let relay_peer_id = resolve_relay_peer_id(selection.relay_peer_id, &target);
             match provider.reserve(target).await {
                 Ok(handle) => {
                     let latency = started.elapsed();
@@ -175,14 +177,7 @@ pub async fn run_relay_auto_worker(
                     backoff.record_success(&selection.key);
                     pool.record_success(&selection.key, Some(latency), now);
                     pool.mark_selected(&selection.key, now);
-                    active.insert(
-                        selection.key.clone(),
-                        ActiveReservation {
-                            handle,
-                            reserved_at: now,
-                            relay_peer_id: selection.relay_peer_id.map(|id| id.to_string()),
-                        },
-                    );
+                    active.insert(selection.key.clone(), ActiveReservation { handle, reserved_at: now, relay_peer_id });
                     if let Some(metrics) = metrics.as_ref() {
                         metrics.relay_auto().record_reservation_success();
                         metrics.relay_auto().set_active_reservations(active.len());
@@ -215,5 +210,42 @@ pub async fn run_relay_auto_worker(
     let active_reservations = std::mem::take(&mut active);
     for (_, reservation) in active_reservations {
         reservation.handle.release().await;
+    }
+}
+
+fn resolve_relay_peer_id(selection_peer_id: Option<PeerId>, reservation_target: &libp2p::Multiaddr) -> Option<String> {
+    selection_peer_id
+        .or_else(|| {
+            reservation_target.iter().find_map(|protocol| match protocol {
+                Protocol::P2p(peer_id) => Some(peer_id),
+                _ => None,
+            })
+        })
+        .map(|peer_id| peer_id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_relay_peer_id;
+    use libp2p::{Multiaddr, PeerId};
+    use std::str::FromStr;
+
+    #[test]
+    fn resolve_relay_peer_id_uses_selection_when_available() {
+        let selected = PeerId::random();
+        let from_target = PeerId::random();
+        let target = Multiaddr::from_str(&format!("/ip4/10.0.3.26/tcp/16112/p2p/{from_target}")).expect("valid target");
+
+        let resolved = resolve_relay_peer_id(Some(selected), &target);
+        assert_eq!(resolved.as_deref(), Some(selected.to_string().as_str()));
+    }
+
+    #[test]
+    fn resolve_relay_peer_id_falls_back_to_target() {
+        let from_target = PeerId::random();
+        let target = Multiaddr::from_str(&format!("/ip4/10.0.3.26/tcp/16112/p2p/{from_target}")).expect("valid target");
+
+        let resolved = resolve_relay_peer_id(None, &target);
+        assert_eq!(resolved.as_deref(), Some(from_target.to_string().as_str()));
     }
 }
