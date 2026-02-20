@@ -96,10 +96,42 @@ impl SendAddressesFlow {
     async fn start_impl(&mut self) -> Result<(), ProtocolError> {
         loop {
             dequeue!(self.incoming_route, Payload::RequestAddresses)?;
-            let addresses = self.ctx.address_manager.lock().iterate_addresses().collect_vec();
-            let address_list =
-                addresses.choose_multiple(&mut rand::thread_rng(), MAX_ADDRESSES_SEND).map(|addr| addr.clone().into()).collect();
+            let mut addresses = self.ctx.address_manager.lock().iterate_addresses().collect_vec();
+            if let Some(local_address) = self.current_local_address() {
+                addresses.push(local_address);
+            }
+            let unique_addresses = addresses.into_iter().unique().collect_vec();
+            let address_list = unique_addresses
+                .choose_multiple(&mut rand::thread_rng(), MAX_ADDRESSES_SEND)
+                .map(|addr| addr.clone().into())
+                .collect();
             self.router.enqueue(make_message!(Payload::Addresses, AddressesMessage { address_list })).await?;
         }
+    }
+
+    fn current_local_address(&self) -> Option<NetAddress> {
+        let mut local = self.ctx.address_manager.lock().best_local_address()?;
+        let (services, relay_port, relay_capacity, relay_ttl_ms, relay_role, libp2p_peer_id, relay_hint) =
+            self.ctx.libp2p_advertisement();
+        local.services |= services;
+        if let Some(port) = relay_port {
+            local.set_relay_port(Some(port));
+        }
+        if let Some(capacity) = relay_capacity {
+            local.set_relay_capacity(Some(capacity));
+        }
+        if let Some(ttl_ms) = relay_ttl_ms {
+            local.set_relay_ttl_ms(Some(ttl_ms));
+        }
+        if let Some(role) = relay_role {
+            local.set_relay_role(Some(role));
+        }
+        if let Some(peer_id) = libp2p_peer_id {
+            local.set_libp2p_peer_id(Some(peer_id));
+        }
+        if let Some(hint) = relay_hint {
+            local.set_relay_circuit_hint(Some(hint));
+        }
+        Some(local)
     }
 }
