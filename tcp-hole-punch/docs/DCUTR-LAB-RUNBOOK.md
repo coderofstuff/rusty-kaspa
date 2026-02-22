@@ -567,6 +567,128 @@ grep -E "releasing reservation|relay auto|reservation accepted" /tmp/kaspa-a.log
 
 **Expected:** Reservation release on the demoted relay and a new reservation on another relay.
 
+## Step 12: Additional Relay-Auto Regression Checks
+
+These checks cover behavior added after the original lab flow.
+
+### 12.1 Bridge multiaddr dial failure must not TCP-fallback
+
+1. Ensure Node A is running with helper API and debug logs:
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-a /tmp/node-a.key
+
+RUST_LOG=debug KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-a \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-identity-path=/tmp/node-a.key \
+  --libp2p-helper-listen=127.0.0.1:38080 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.61/tcp/16112 \
+  --libp2p-relay-candidates=/ip4/10.0.3.26/tcp/16112/p2p/RELAY_PEER_ID \
+  --connect=10.0.3.26:16111 \
+  --nologfiles > /tmp/kaspa-a.log 2>&1 &
+
+sleep 15
+```
+
+2. Trigger a relay-circuit dial to an unreachable relay IP (valid multiaddr shape, unreachable relay):
+
+```bash
+echo '{"action":"dial","multiaddr":"/ip4/10.0.3.99/tcp/16112/p2p/RELAY_PEER_ID/p2p-circuit/p2p/NODE_B_PEER_ID"}' | nc -w 15 127.0.0.1 38080
+```
+
+3. Verify Node A did not fall back to raw TCP:
+
+```bash
+grep -E "falling back to TCP|bridge mode libp2p dial failed .* falling back to TCP" /tmp/kaspa-a.log
+```
+
+**Expected:** no matches.
+
+### 12.2 Outbound relay diversity cap must include existing outbound usage
+
+Goal: steady state should not keep multiple outbound relay-path peers on the same `relay_id` when cap is `1`.
+
+1. Run two relay instances (Step 10) and at least two private targets.
+2. On Node A, query peers twice (30s apart):
+
+```bash
+echo '{"action":"peers"}' | nc -w 5 127.0.0.1 38080
+sleep 30
+echo '{"action":"peers"}' | nc -w 5 127.0.0.1 38080
+```
+
+If `jq` is available:
+
+```bash
+echo '{"action":"peers"}' | nc -w 5 127.0.0.1 38080 | jq '.peers
+  | map(select(.direction=="outbound" and .path=="relay"))
+  | group_by(.relay_id)
+  | map({relay_id: .[0].relay_id, count: length})'
+```
+
+**Expected:** for each `relay_id`, outbound relay-path count stays `<= 1` at steady state.
+
+### 12.3 Auto demotion must clear relay advertising
+
+Goal: relay in `auto` role demotes to private after window expiry and is no longer selected from gossip as a public relay.
+
+1. Start relay in `auto` and first confirm promotion:
+
+```bash
+grep -E "role auto-promoted to public" /tmp/kaspa-relay.log
+```
+
+2. Stop NAT clients that provide direct inbound signal (Node A/B), then wait at least 11 minutes.
+3. Verify demotion:
+
+```bash
+grep -E "role auto-demoted to private" /tmp/kaspa-relay.log
+```
+
+4. Start a fresh client with gossip-only discovery (no `--libp2p-relay-candidates`, no `--libp2p-reservations`) and set lab override:
+
+```bash
+pkill -9 kaspad
+rm -rf /tmp/kaspa-c /tmp/node-c.key
+
+KASPAD_LIBP2P_RELAY_MIN_SOURCES=1 KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
+nohup ~/rusty-kaspa/target/release/kaspad \
+  --appdir=/tmp/kaspa-c \
+  --listen=192.168.2.10:16121 \
+  --rpclisten=192.168.2.10:16120 \
+  --libp2p-relay-listen-port=16122 \
+  --libp2p-mode=bridge \
+  --libp2p-role=auto \
+  --libp2p-identity-path=/tmp/node-c.key \
+  --libp2p-helper-listen=127.0.0.1:38081 \
+  --libp2p-external-multiaddrs=/ip4/10.0.3.62/tcp/16122 \
+  --connect=10.0.3.26:16111 \
+  --nologfiles > /tmp/kaspa-c.log 2>&1 &
+
+sleep 90
+grep -E "reservation accepted" /tmp/kaspa-c.log
+```
+
+**Expected:** no new reservation accepted after demotion.
+
+### 12.4 Private relay-hint target must not raw-TCP fallback
+
+Goal: when a peer is known via private relay hint (synthetic key path), Node A should try relay targeting only, not direct TCP to synthetic `240.0.0.0/4`.
+
+1. Keep Node A on debug logs.
+2. Ensure Node B (private) is discovered via relay hint, then stop relay to force retries.
+3. Inspect Node A logs:
+
+```bash
+grep -E "Connecting to relay target|Connecting to 24[0-9]\\." /tmp/kaspa-a.log | tail -n 80
+```
+
+**Expected:** relay-target attempts may appear; `Connecting to 24[0-9].*` should not appear for synthetic hint targets.
+
 ## Critical Configuration Notes
 
 ### Environment Variable is REQUIRED
