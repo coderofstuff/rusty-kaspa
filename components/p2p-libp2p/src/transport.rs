@@ -249,6 +249,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bridge_mode_multiaddr_failure_does_not_fallback_to_tcp() {
+        let cfg = Config { mode: crate::Mode::Bridge, ..Config::default() };
+        let drops = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::with_responses(VecDeque::from([Err(Libp2pError::DialFailed("fail".into()))]), drops));
+        let fallback = Arc::new(CountingFallback::default());
+        let connector = Libp2pOutboundConnector::with_provider(cfg, fallback.clone(), provider.clone());
+        let handler = test_handler();
+
+        let relay = PeerId::random();
+        let target = PeerId::random();
+        let multiaddr = format!("/ip4/203.0.113.9/tcp/16112/p2p/{relay}/p2p-circuit/p2p/{target}");
+        let res = connector.connect(multiaddr, CoreTransportMetadata::default(), &handler).await;
+        assert!(res.is_err());
+        assert_eq!(provider.attempts(), 1);
+        assert_eq!(fallback.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_relay_multiaddr_probes_missing_relay_peer_v4() {
+        let relay_peer = PeerId::random();
+        let target_peer = PeerId::random();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::with_probe_peer(VecDeque::new(), drops, relay_peer));
+        let addr: Multiaddr = format!("/ip4/203.0.113.9/tcp/16112/p2p-circuit/p2p/{target_peer}").parse().unwrap();
+
+        let resolved = Libp2pOutboundConnector::resolve_relay_multiaddr(provider.clone(), addr).await.expect("resolve should succeed");
+        let expected_probe: Multiaddr = "/ip4/203.0.113.9/tcp/16112".parse().unwrap();
+        assert_eq!(provider.last_probe(), Some(expected_probe));
+
+        let expected: Multiaddr =
+            format!("/ip4/203.0.113.9/tcp/16112/p2p/{relay_peer}/p2p-circuit/p2p/{target_peer}").parse().unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    #[tokio::test]
+    async fn resolve_relay_multiaddr_probes_missing_relay_peer_v6() {
+        let relay_peer = PeerId::random();
+        let target_peer = PeerId::random();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::with_probe_peer(VecDeque::new(), drops, relay_peer));
+        let addr: Multiaddr = format!("/ip6/2001:db8::9/tcp/16112/p2p-circuit/p2p/{target_peer}").parse().unwrap();
+
+        let resolved = Libp2pOutboundConnector::resolve_relay_multiaddr(provider.clone(), addr).await.expect("resolve should succeed");
+        let expected_probe: Multiaddr = "/ip6/2001:db8::9/tcp/16112".parse().unwrap();
+        assert_eq!(provider.last_probe(), Some(expected_probe));
+
+        let expected: Multiaddr =
+            format!("/ip6/2001:db8::9/tcp/16112/p2p/{relay_peer}/p2p-circuit/p2p/{target_peer}").parse().unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    #[tokio::test]
+    async fn resolve_relay_multiaddr_rejects_missing_target_peer() {
+        let relay_peer = PeerId::random();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(MockProvider::with_probe_peer(VecDeque::new(), drops, relay_peer));
+        let addr: Multiaddr = "/ip4/203.0.113.9/tcp/16112/p2p-circuit".parse().unwrap();
+
+        let err = Libp2pOutboundConnector::resolve_relay_multiaddr(provider.clone(), addr).await.expect_err("expected error");
+        assert!(matches!(err, Libp2pError::Multiaddr(msg) if msg.contains("missing target peer id")));
+        assert!(provider.last_probe().is_none(), "probe should not run without target peer id");
+    }
+
+    #[tokio::test]
     async fn off_mode_delegates_to_tcp_fallback() {
         let cfg = Config { mode: crate::Mode::Off, ..Config::default() };
         let drops = Arc::new(AtomicUsize::new(0));
@@ -708,10 +772,10 @@ mod tests {
         let now = Instant::now();
 
         state.record_autonat_public(now);
-        assert!(!state.maybe_promote(now, true));
+        assert_eq!(state.update_role(now, true), None);
 
         state.record_direct_inbound(now);
-        assert!(state.maybe_promote(now, true));
+        assert_eq!(state.update_role(now, true), Some(crate::Role::Public));
         assert_eq!(*role_rx.borrow(), crate::Role::Public);
     }
 
@@ -723,7 +787,7 @@ mod tests {
 
         state.record_autonat_public(now);
         state.record_direct_inbound(now);
-        assert!(!state.maybe_promote(now, false));
+        assert_eq!(state.update_role(now, false), None);
         assert_eq!(*role_rx.borrow(), crate::Role::Private);
     }
 
@@ -735,12 +799,28 @@ mod tests {
 
         state.record_autonat_public(now);
         state.record_direct_inbound(now);
-        assert!(!state.maybe_promote(now, true));
+        assert_eq!(state.update_role(now, true), None);
 
         state.record_autonat_public(now);
         state.record_direct_inbound(now);
-        assert!(state.maybe_promote(now, true));
+        assert_eq!(state.update_role(now, true), Some(crate::Role::Public));
         assert_eq!(*role_rx.borrow(), crate::Role::Public);
+    }
+
+    #[test]
+    fn auto_role_demotes_when_window_signal_expires() {
+        let (role_tx, role_rx) = watch::channel(crate::Role::Private);
+        let mut state = AutoRoleState::new(role_tx, Duration::from_secs(1), 1, 1);
+        let now = Instant::now();
+
+        state.record_autonat_public(now);
+        state.record_direct_inbound(now);
+        assert_eq!(state.update_role(now, true), Some(crate::Role::Public));
+        assert_eq!(*role_rx.borrow(), crate::Role::Public);
+
+        let later = now + Duration::from_secs(2);
+        assert_eq!(state.update_role(later, true), Some(crate::Role::Private));
+        assert_eq!(*role_rx.borrow(), crate::Role::Private);
     }
 
     #[test]
@@ -1440,20 +1520,22 @@ impl AutoRoleState {
         }
     }
 
-    fn maybe_promote(&mut self, now: Instant, has_external_addr: bool) -> bool {
-        if self.current == crate::Role::Public {
-            return false;
-        }
+    fn update_role(&mut self, now: Instant, has_external_addr: bool) -> Option<crate::Role> {
         self.prune(now);
-        if self.autonat_public_hits.len() >= self.required_autonat
+        let should_be_public = self.autonat_public_hits.len() >= self.required_autonat
             && self.direct_inbound_hits.len() >= self.required_direct
-            && has_external_addr
-        {
+            && has_external_addr;
+        if should_be_public && self.current != crate::Role::Public {
             self.current = crate::Role::Public;
             let _ = self.role_tx.send(crate::Role::Public);
-            return true;
+            return Some(crate::Role::Public);
         }
-        false
+        if !should_be_public && self.current != crate::Role::Private {
+            self.current = crate::Role::Private;
+            let _ = self.role_tx.send(crate::Role::Private);
+            return Some(crate::Role::Private);
+        }
+        None
     }
 }
 
@@ -1999,9 +2081,11 @@ impl SwarmDriver {
             let is_public_probe = matches!(event, autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Response { .. }));
             if is_public_probe {
                 auto_role.record_autonat_public(Instant::now());
-                if auto_role.maybe_promote(Instant::now(), has_external_addr) {
-                    info!("libp2p autonat: role auto-promoted to public");
-                }
+            }
+            match auto_role.update_role(Instant::now(), has_external_addr) {
+                Some(crate::Role::Public) => info!("libp2p autonat: role auto-promoted to public"),
+                Some(crate::Role::Private) => info!("libp2p autonat: role auto-demoted to private"),
+                _ => {}
             }
         }
     }
@@ -2036,8 +2120,12 @@ impl SwarmDriver {
             && !endpoint_uses_relay(&endpoint)
         {
             auto_role.record_direct_inbound(Instant::now());
-            if auto_role.maybe_promote(Instant::now(), has_external_addr) {
-                info!("libp2p auto role: promoted to public after direct inbound");
+        }
+        if let Some(auto_role) = self.auto_role.as_mut() {
+            match auto_role.update_role(Instant::now(), has_external_addr) {
+                Some(crate::Role::Public) => info!("libp2p auto role: promoted to public after direct inbound"),
+                Some(crate::Role::Private) => info!("libp2p auto role: demoted to private"),
+                _ => {}
             }
         }
 
@@ -3079,6 +3167,8 @@ struct MockProvider {
     responses: std::sync::Mutex<std::collections::VecDeque<Result<(), Libp2pError>>>,
     attempts: std::sync::atomic::AtomicUsize,
     drops: Arc<std::sync::atomic::AtomicUsize>,
+    probe_peer: std::sync::Mutex<Option<PeerId>>,
+    last_probe: std::sync::Mutex<Option<Multiaddr>>,
 }
 
 #[cfg(test)]
@@ -3130,11 +3220,35 @@ impl MockProvider {
         responses: std::collections::VecDeque<Result<(), Libp2pError>>,
         drops: Arc<std::sync::atomic::AtomicUsize>,
     ) -> Self {
-        Self { responses: std::sync::Mutex::new(responses), attempts: std::sync::atomic::AtomicUsize::new(0), drops }
+        Self {
+            responses: std::sync::Mutex::new(responses),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            drops,
+            probe_peer: std::sync::Mutex::new(None),
+            last_probe: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn with_probe_peer(
+        responses: std::collections::VecDeque<Result<(), Libp2pError>>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+        probe_peer: PeerId,
+    ) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(responses),
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            drops,
+            probe_peer: std::sync::Mutex::new(Some(probe_peer)),
+            last_probe: std::sync::Mutex::new(None),
+        }
     }
 
     fn attempts(&self) -> usize {
         self.attempts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn last_probe(&self) -> Option<Multiaddr> {
+        self.last_probe.lock().expect("probe addr").clone()
     }
 }
 
@@ -3178,6 +3292,13 @@ impl Libp2pStreamProvider for MockProvider {
             let mut guard = self.responses.lock().expect("responses");
             let resp = guard.pop_front().unwrap_or(Err(Libp2pError::ProviderUnavailable));
             resp.map(|_| ReservationHandle::noop())
+        })
+    }
+
+    fn probe_relay<'a>(&'a self, address: Multiaddr) -> BoxFuture<'a, Result<PeerId, Libp2pError>> {
+        Box::pin(async move {
+            *self.last_probe.lock().expect("probe addr") = Some(address);
+            (*self.probe_peer.lock().expect("probe peer")).ok_or_else(|| Libp2pError::DialFailed("probe peer not configured".into()))
         })
     }
 
