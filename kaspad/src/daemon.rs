@@ -824,13 +824,8 @@ Do you confirm? (y/n)";
     ));
     #[cfg(feature = "libp2p")]
     let libp2p_node_service = if libp2p_config.mode.is_enabled() {
-        libp2p_provider_cell.clone().and_then(|cell| {
-            Some(Arc::new(crate::libp2p::Libp2pNodeService::new(
-                libp2p_config.clone(),
-                cell,
-                flow_context.clone(),
-                libp2p_peer_id.clone(),
-            )))
+        libp2p_provider_cell.clone().map(|cell| {
+            Arc::new(crate::libp2p::Libp2pNodeService::new(libp2p_config.clone(), cell, flow_context.clone(), libp2p_peer_id.clone()))
         })
     } else {
         None

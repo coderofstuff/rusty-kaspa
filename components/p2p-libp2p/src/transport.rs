@@ -1845,229 +1845,264 @@ impl SwarmDriver {
 
     async fn handle_event(&mut self, event: SwarmEvent<Libp2pEvent>) {
         match event {
-            SwarmEvent::Behaviour(Libp2pEvent::Stream(event)) => self.handle_stream_event(event).await,
-            SwarmEvent::Behaviour(Libp2pEvent::Ping(event)) => {
-                let _ = event;
-            }
-            SwarmEvent::Behaviour(Libp2pEvent::Identify(event)) => match event {
-                identify::Event::Received { peer_id, ref info, .. } => {
-                    let supports_dcutr = info.protocols.iter().any(|p| p.as_ref() == dcutr::PROTOCOL_NAME.as_ref());
-                    info!(
-                        target: "libp2p_identify",
-                        "identify received from {peer_id}: protocols={:?} (dcutr={supports_dcutr}) listen_addrs={:?}",
-                        info.protocols,
-                        info.listen_addrs
-                    );
-                    // Only add observed address if it's a valid TCP address (has IP+TCP).
-                    // Relay circuit peers may report observed addresses like `/p2p/<peer_id>` without
-                    // any IP information, which are useless for DCUtR hole punching and pollute
-                    // the external address set.
-                    self.update_remote_dcutr_candidates(peer_id, &info.listen_addrs);
-                    let observed_refreshed = self.refresh_local_dcutr_candidates(peer_id, &info.observed_addr);
-                    // NOTE: We intentionally do NOT add info.listen_addrs as external addresses.
-                    // Those are the REMOTE peer's addresses, not ours. Adding them would pollute
-                    // our external address set with unreachable addresses, breaking DCUtR hole punch.
-                    self.prune_unusable_external_addrs("identify_received");
-                    self.prune_stale_external_addrs("identify_received");
-                    self.mark_dcutr_support(peer_id, supports_dcutr);
-                    if self.active_relay.as_ref().is_some_and(|relay| relay.relay_peer == peer_id) {
-                        debug!("libp2p dcutr: skipping dial-back trigger for active relay peer {}", peer_id);
-                        return;
-                    }
-                    if observed_refreshed {
-                        self.request_dialback(peer_id, true, "observed_addr_refresh");
-                    } else {
-                        self.maybe_request_dialback(peer_id);
-                    }
-                }
-                identify::Event::Pushed { peer_id, ref info, .. } => {
-                    let supports_dcutr = info.protocols.iter().any(|p| p.as_ref() == dcutr::PROTOCOL_NAME.as_ref());
-                    info!(
-                        target: "libp2p_identify",
-                        "identify pushed to {peer_id}: protocols={:?} (dcutr={supports_dcutr}) listen_addrs={:?}",
-                        info.protocols,
-                        info.listen_addrs
-                    );
-                }
-                identify::Event::Sent { peer_id, .. } => {
-                    info!(
-                        target: "libp2p_identify",
-                        "identify sent to {peer_id}; expecting advertisement of {}",
-                        dcutr::PROTOCOL_NAME
-                    );
-                }
-                other => debug!("libp2p identify event: {:?}", other),
-            },
-            SwarmEvent::Behaviour(Libp2pEvent::RelayClient(event)) =>
-            {
-                #[allow(unreachable_patterns)]
-                match event {
-                    relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
-                        info!("libp2p reservation accepted by {relay_peer_id}, renewal={renewal}");
-                    }
-                    relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
-                        info!("libp2p outbound circuit established via {relay_peer_id}");
-                    }
-                    relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
-                        info!("libp2p inbound circuit established from {src_peer_id}");
-                        self.mark_relay_path(src_peer_id);
-                        self.maybe_request_dialback(src_peer_id);
-                    }
-                    _ => {}
-                }
-            }
-            SwarmEvent::Behaviour(Libp2pEvent::RelayServer(event)) => {
-                debug!("libp2p relay server event: {:?}", event);
-            }
-            SwarmEvent::Behaviour(Libp2pEvent::Dcutr(event)) => {
-                let external_addrs: Vec<_> = self.swarm.external_addresses().collect();
-                let is_spurious_attempts = self
-                    .connections
-                    .values()
-                    .any(|conn| conn.peer_id == event.remote_peer_id && matches!(conn.path, PathKind::Direct) && conn.dcutr_upgraded);
-                match &event.result {
-                    Err(e) if is_dcutr_retry_trigger_error(e) && !(is_attempts_exceeded(e) && is_spurious_attempts) => {
-                        warn!(
-                            "libp2p dcutr retry-trigger failure for {}: {:?} (local_candidates={} remote_candidates={})",
-                            event.remote_peer_id,
-                            e,
-                            self.local_dcutr_candidates().len(),
-                            self.peer_states.get(&event.remote_peer_id).map_or(0, |state| state.remote_dcutr_candidates.len())
-                        );
-                        self.refresh_dcutr_retry_path(event.remote_peer_id, e);
-                    }
-                    Err(e) if is_attempts_exceeded(e) && is_spurious_attempts => {
-                        debug!(
-                            "Ignored spurious DCUtR error for connected peer {}: {:?} (swarm has {} external addrs: {:?})",
-                            event.remote_peer_id,
-                            e,
-                            external_addrs.len(),
-                            external_addrs
-                        );
-                    }
-                    _ => {
-                        info!(
-                            "libp2p dcutr event: {:?} (swarm has {} external addrs: {:?})",
-                            event,
-                            external_addrs.len(),
-                            external_addrs
-                        );
-                    }
-                }
-            }
-            SwarmEvent::Behaviour(Libp2pEvent::Autonat(event)) => {
-                debug!("libp2p autonat event: {:?}", event);
-                let has_external_addr = self.has_usable_external_addr();
-                match &event {
-                    autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Response { .. }) => {
-                        self.autonat_private_until = None;
-                    }
-                    autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Error { error, .. }) => {
-                        if !self.allow_private_addrs
-                            && matches!(error, autonat::OutboundProbeError::Response(autonat::ResponseError::DialError))
-                        {
-                            self.autonat_private_until = Some(Instant::now() + AUTONAT_PRIVATE_COOLDOWN);
-                        }
-                    }
-                    _ => {}
-                }
-                if let Some(auto_role) = self.auto_role.as_mut() {
-                    let is_public_probe = matches!(event, autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Response { .. }));
-                    if is_public_probe {
-                        auto_role.record_autonat_public(Instant::now());
-                        if auto_role.maybe_promote(Instant::now(), has_external_addr) {
-                            info!("libp2p autonat: role auto-promoted to public");
-                        }
-                    }
-                }
-            }
-            SwarmEvent::NewListenAddr { address, .. } => {
-                info!("libp2p listening on {address}");
-                if self.active_relay.is_none()
-                    && let Some(info) = relay_info_from_multiaddr(&address, *self.swarm.local_peer_id())
-                {
-                    self.set_active_relay(info, None);
-                }
-                if self.is_usable_external_addr(&address) {
-                    self.record_local_candidate(address.clone(), LocalCandidateSource::Dynamic);
-                }
-                self.prune_unusable_external_addrs("new_listen_addr");
-                self.prune_stale_external_addrs("new_listen_addr");
-                self.listening = true;
-            }
+            SwarmEvent::Behaviour(event) => self.handle_behaviour_event(event).await,
+            SwarmEvent::NewListenAddr { address, .. } => self.handle_new_listen_addr_event(address),
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
-                debug!("libp2p connection established with {peer_id} on {connection_id:?}");
-                self.track_established(peer_id, &endpoint);
-
-                let has_external_addr = self.has_usable_external_addr();
-                if let Some(auto_role) = self.auto_role.as_mut()
-                    && !endpoint.is_dialer()
-                    && !endpoint_uses_relay(&endpoint)
-                {
-                    auto_role.record_direct_inbound(Instant::now());
-                    if auto_role.maybe_promote(Instant::now(), has_external_addr) {
-                        info!("libp2p auto role: promoted to public after direct inbound");
-                    }
-                }
-
-                if let Some(pending) = self.pending_probes.remove(&connection_id) {
-                    info!("libp2p relay probe connected to {peer_id}");
-                    self.record_connection(connection_id, peer_id, &endpoint, false);
-                    let _ = pending.respond_to.send(Ok(peer_id));
-                    return;
-                }
-
-                // For DCUtR direct connections spawned from relay dials, transfer the earliest
-                // pending relay dial for this peer onto the new connection_id.
-                let mut had_pending_relay = false;
-                if !endpoint_uses_relay(&endpoint)
-                    && let Some((_old_req, pending)) = self.take_pending_relay_by_peer(&peer_id)
-                {
-                    info!("libp2p DCUtR success: direct connection to {peer_id} resolves pending relay dial");
-                    self.pending_dials.insert(connection_id, pending);
-                    had_pending_relay = true;
-                }
-                if had_pending_relay && let Some(metrics) = self.metrics.as_ref() {
-                    metrics.dcutr().record_dialback_success();
-                }
-
-                if endpoint.is_dialer() {
-                    info!("libp2p initiating stream to {peer_id} (as dialer)");
-                    self.request_stream_bridge(peer_id, connection_id);
-                } else if had_pending_relay {
-                    // DCUtR succeeded but we're the listener - still need to initiate stream
-                    // because we had a pending outbound dial that needs to be resolved
-                    info!("libp2p DCUtR: initiating stream to {peer_id} (as listener with pending dial)");
-                    self.request_stream_bridge(peer_id, connection_id);
-                } else {
-                    debug!("libp2p waiting for stream from {peer_id} (as listener)");
-                    // If we are only a listener on a relayed connection and the peer supports DCUtR,
-                    // initiate a bidirectional dial-back via the active relay so we become a dialer too.
-                    self.maybe_request_dialback(peer_id);
-                }
-                self.record_connection(connection_id, peer_id, &endpoint, had_pending_relay);
-                if !endpoint_uses_relay(&endpoint) {
-                    self.note_direct_upgrade(peer_id, had_pending_relay);
-                }
-                if endpoint_uses_relay(&endpoint) {
-                    self.enforce_relay_cap(connection_id);
-                } else {
-                    self.close_relay_connections_for_peer(peer_id, connection_id);
-                }
+                self.handle_connection_established_event(peer_id, connection_id, endpoint)
             }
             SwarmEvent::ConnectionClosed { peer_id, connection_id, endpoint, .. } => {
-                self.fail_pending(connection_id, "connection closed before stream");
-                self.fail_probe(connection_id, "relay probe connection closed");
-                self.track_closed(peer_id, &endpoint);
-                self.connections.remove(&connection_id);
+                self.handle_connection_closed_event(peer_id, connection_id, endpoint)
             }
             SwarmEvent::OutgoingConnectionError { connection_id, error, .. } => {
-                self.fail_pending(connection_id, error.to_string());
-                self.fail_probe(connection_id, error.to_string());
-                self.connections.remove(&connection_id);
+                self.handle_outgoing_connection_error_event(connection_id, error.to_string())
             }
             _ => {}
         }
+    }
+
+    async fn handle_behaviour_event(&mut self, event: Libp2pEvent) {
+        match event {
+            Libp2pEvent::Stream(event) => self.handle_stream_event(event).await,
+            Libp2pEvent::Ping(event) => {
+                let _ = event;
+            }
+            Libp2pEvent::Identify(event) => self.handle_identify_event(event),
+            Libp2pEvent::RelayClient(event) => self.handle_relay_client_event(event),
+            Libp2pEvent::RelayServer(event) => {
+                debug!("libp2p relay server event: {:?}", event);
+            }
+            Libp2pEvent::Dcutr(event) => self.handle_dcutr_event(event),
+            Libp2pEvent::DcutrBootstrap(_) => {}
+            Libp2pEvent::Autonat(event) => self.handle_autonat_event(event),
+        }
+    }
+
+    fn handle_identify_event(&mut self, event: identify::Event) {
+        match event {
+            identify::Event::Received { peer_id, ref info, .. } => {
+                let supports_dcutr = info.protocols.iter().any(|p| p.as_ref() == dcutr::PROTOCOL_NAME.as_ref());
+                info!(
+                    target: "libp2p_identify",
+                    "identify received from {peer_id}: protocols={:?} (dcutr={supports_dcutr}) listen_addrs={:?}",
+                    info.protocols,
+                    info.listen_addrs
+                );
+                // Only add observed address if it's a valid TCP address (has IP+TCP).
+                // Relay circuit peers may report observed addresses like `/p2p/<peer_id>` without
+                // any IP information, which are useless for DCUtR hole punching and pollute
+                // the external address set.
+                self.update_remote_dcutr_candidates(peer_id, &info.listen_addrs);
+                let observed_refreshed = self.refresh_local_dcutr_candidates(peer_id, &info.observed_addr);
+                // NOTE: We intentionally do NOT add info.listen_addrs as external addresses.
+                // Those are the REMOTE peer's addresses, not ours. Adding them would pollute
+                // our external address set with unreachable addresses, breaking DCUtR hole punch.
+                self.prune_unusable_external_addrs("identify_received");
+                self.prune_stale_external_addrs("identify_received");
+                self.mark_dcutr_support(peer_id, supports_dcutr);
+                if self.active_relay.as_ref().is_some_and(|relay| relay.relay_peer == peer_id) {
+                    debug!("libp2p dcutr: skipping dial-back trigger for active relay peer {}", peer_id);
+                    return;
+                }
+                if observed_refreshed {
+                    self.request_dialback(peer_id, true, "observed_addr_refresh");
+                } else {
+                    self.maybe_request_dialback(peer_id);
+                }
+            }
+            identify::Event::Pushed { peer_id, ref info, .. } => {
+                let supports_dcutr = info.protocols.iter().any(|p| p.as_ref() == dcutr::PROTOCOL_NAME.as_ref());
+                info!(
+                    target: "libp2p_identify",
+                    "identify pushed to {peer_id}: protocols={:?} (dcutr={supports_dcutr}) listen_addrs={:?}",
+                    info.protocols,
+                    info.listen_addrs
+                );
+            }
+            identify::Event::Sent { peer_id, .. } => {
+                info!(
+                    target: "libp2p_identify",
+                    "identify sent to {peer_id}; expecting advertisement of {}",
+                    dcutr::PROTOCOL_NAME
+                );
+            }
+            other => debug!("libp2p identify event: {:?}", other),
+        }
+    }
+
+    fn handle_relay_client_event(&mut self, event: relay::client::Event) {
+        #[allow(unreachable_patterns)]
+        match event {
+            relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
+                info!("libp2p reservation accepted by {relay_peer_id}, renewal={renewal}");
+            }
+            relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
+                info!("libp2p outbound circuit established via {relay_peer_id}");
+            }
+            relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
+                info!("libp2p inbound circuit established from {src_peer_id}");
+                self.mark_relay_path(src_peer_id);
+                self.maybe_request_dialback(src_peer_id);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_dcutr_event(&mut self, event: dcutr::Event) {
+        let external_addrs: Vec<_> = self.swarm.external_addresses().collect();
+        let is_spurious_attempts = self
+            .connections
+            .values()
+            .any(|conn| conn.peer_id == event.remote_peer_id && matches!(conn.path, PathKind::Direct) && conn.dcutr_upgraded);
+        match &event.result {
+            Err(e) if is_dcutr_retry_trigger_error(e) && !(is_attempts_exceeded(e) && is_spurious_attempts) => {
+                warn!(
+                    "libp2p dcutr retry-trigger failure for {}: {:?} (local_candidates={} remote_candidates={})",
+                    event.remote_peer_id,
+                    e,
+                    self.local_dcutr_candidates().len(),
+                    self.peer_states.get(&event.remote_peer_id).map_or(0, |state| state.remote_dcutr_candidates.len())
+                );
+                self.refresh_dcutr_retry_path(event.remote_peer_id, e);
+            }
+            Err(e) if is_attempts_exceeded(e) && is_spurious_attempts => {
+                debug!(
+                    "Ignored spurious DCUtR error for connected peer {}: {:?} (swarm has {} external addrs: {:?})",
+                    event.remote_peer_id,
+                    e,
+                    external_addrs.len(),
+                    external_addrs
+                );
+            }
+            _ => {
+                info!("libp2p dcutr event: {:?} (swarm has {} external addrs: {:?})", event, external_addrs.len(), external_addrs);
+            }
+        }
+    }
+
+    fn handle_autonat_event(&mut self, event: autonat::Event) {
+        debug!("libp2p autonat event: {:?}", event);
+        let has_external_addr = self.has_usable_external_addr();
+        match &event {
+            autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Response { .. }) => {
+                self.autonat_private_until = None;
+            }
+            autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Error { error, .. }) => {
+                if !self.allow_private_addrs
+                    && matches!(error, autonat::OutboundProbeError::Response(autonat::ResponseError::DialError))
+                {
+                    self.autonat_private_until = Some(Instant::now() + AUTONAT_PRIVATE_COOLDOWN);
+                }
+            }
+            _ => {}
+        }
+        if let Some(auto_role) = self.auto_role.as_mut() {
+            let is_public_probe = matches!(event, autonat::Event::OutboundProbe(autonat::OutboundProbeEvent::Response { .. }));
+            if is_public_probe {
+                auto_role.record_autonat_public(Instant::now());
+                if auto_role.maybe_promote(Instant::now(), has_external_addr) {
+                    info!("libp2p autonat: role auto-promoted to public");
+                }
+            }
+        }
+    }
+
+    fn handle_new_listen_addr_event(&mut self, address: Multiaddr) {
+        info!("libp2p listening on {address}");
+        if self.active_relay.is_none()
+            && let Some(info) = relay_info_from_multiaddr(&address, *self.swarm.local_peer_id())
+        {
+            self.set_active_relay(info, None);
+        }
+        if self.is_usable_external_addr(&address) {
+            self.record_local_candidate(address.clone(), LocalCandidateSource::Dynamic);
+        }
+        self.prune_unusable_external_addrs("new_listen_addr");
+        self.prune_stale_external_addrs("new_listen_addr");
+        self.listening = true;
+    }
+
+    fn handle_connection_established_event(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: StreamRequestId,
+        endpoint: libp2p::core::ConnectedPoint,
+    ) {
+        debug!("libp2p connection established with {peer_id} on {connection_id:?}");
+        self.track_established(peer_id, &endpoint);
+
+        let has_external_addr = self.has_usable_external_addr();
+        if let Some(auto_role) = self.auto_role.as_mut()
+            && !endpoint.is_dialer()
+            && !endpoint_uses_relay(&endpoint)
+        {
+            auto_role.record_direct_inbound(Instant::now());
+            if auto_role.maybe_promote(Instant::now(), has_external_addr) {
+                info!("libp2p auto role: promoted to public after direct inbound");
+            }
+        }
+
+        if let Some(pending) = self.pending_probes.remove(&connection_id) {
+            info!("libp2p relay probe connected to {peer_id}");
+            self.record_connection(connection_id, peer_id, &endpoint, false);
+            let _ = pending.respond_to.send(Ok(peer_id));
+            return;
+        }
+
+        // For DCUtR direct connections spawned from relay dials, transfer the earliest
+        // pending relay dial for this peer onto the new connection_id.
+        let mut had_pending_relay = false;
+        if !endpoint_uses_relay(&endpoint)
+            && let Some((_old_req, pending)) = self.take_pending_relay_by_peer(&peer_id)
+        {
+            info!("libp2p DCUtR success: direct connection to {peer_id} resolves pending relay dial");
+            self.pending_dials.insert(connection_id, pending);
+            had_pending_relay = true;
+        }
+        if had_pending_relay && let Some(metrics) = self.metrics.as_ref() {
+            metrics.dcutr().record_dialback_success();
+        }
+
+        if endpoint.is_dialer() {
+            info!("libp2p initiating stream to {peer_id} (as dialer)");
+            self.request_stream_bridge(peer_id, connection_id);
+        } else if had_pending_relay {
+            // DCUtR succeeded but we're the listener - still need to initiate stream
+            // because we had a pending outbound dial that needs to be resolved
+            info!("libp2p DCUtR: initiating stream to {peer_id} (as listener with pending dial)");
+            self.request_stream_bridge(peer_id, connection_id);
+        } else {
+            debug!("libp2p waiting for stream from {peer_id} (as listener)");
+            // If we are only a listener on a relayed connection and the peer supports DCUtR,
+            // initiate a bidirectional dial-back via the active relay so we become a dialer too.
+            self.maybe_request_dialback(peer_id);
+        }
+        self.record_connection(connection_id, peer_id, &endpoint, had_pending_relay);
+        if !endpoint_uses_relay(&endpoint) {
+            self.note_direct_upgrade(peer_id, had_pending_relay);
+        }
+        if endpoint_uses_relay(&endpoint) {
+            self.enforce_relay_cap(connection_id);
+        } else {
+            self.close_relay_connections_for_peer(peer_id, connection_id);
+        }
+    }
+
+    fn handle_connection_closed_event(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: StreamRequestId,
+        endpoint: libp2p::core::ConnectedPoint,
+    ) {
+        self.fail_pending(connection_id, "connection closed before stream");
+        self.fail_probe(connection_id, "relay probe connection closed");
+        self.track_closed(peer_id, &endpoint);
+        self.connections.remove(&connection_id);
+    }
+
+    fn handle_outgoing_connection_error_event(&mut self, connection_id: StreamRequestId, error: String) {
+        self.fail_pending(connection_id, &error);
+        self.fail_probe(connection_id, &error);
+        self.connections.remove(&connection_id);
     }
 
     fn start_listening(&mut self) -> Result<(), Libp2pError> {

@@ -439,23 +439,35 @@ impl ConnectionManager {
         }
     }
 
+    fn relay_cooldown_allows(cooldowns: &mut HashMap<String, Instant>, key: &str, now: Instant) -> bool {
+        if let Some(deadline) = cooldowns.get(key).copied() {
+            if deadline > now {
+                return false;
+            }
+            cooldowns.remove(key);
+        }
+        true
+    }
+
+    fn set_relay_cooldown(cooldowns: &mut HashMap<String, Instant>, key: &str, deadline: Instant) {
+        cooldowns.insert(key.to_string(), deadline);
+    }
+
+    fn clear_relay_cooldown(cooldowns: &mut HashMap<String, Instant>, key: &str) {
+        cooldowns.remove(key);
+    }
+
     async fn relay_dial_allowed(&self, target: &RelayDialTarget, now: Instant) -> bool {
         {
             let mut cooldowns = self.relay_target_cooldowns.lock().await;
-            if let Some(deadline) = cooldowns.get(&target.target_peer_id).cloned() {
-                if deadline > now {
-                    return false;
-                }
-                cooldowns.remove(&target.target_peer_id);
+            if !Self::relay_cooldown_allows(&mut cooldowns, &target.target_peer_id, now) {
+                return false;
             }
         }
         {
             let mut cooldowns = self.relay_hint_cooldowns.lock().await;
-            if let Some(deadline) = cooldowns.get(&target.relay_key).cloned() {
-                if deadline > now {
-                    return false;
-                }
-                cooldowns.remove(&target.relay_key);
+            if !Self::relay_cooldown_allows(&mut cooldowns, &target.relay_key, now) {
+                return false;
             }
         }
 
@@ -464,14 +476,26 @@ impl ConnectionManager {
     }
 
     async fn record_relay_dial_success(&self, target: &RelayDialTarget) {
-        self.relay_target_cooldowns.lock().await.remove(&target.target_peer_id);
-        self.relay_hint_cooldowns.lock().await.remove(&target.relay_key);
+        {
+            let mut cooldowns = self.relay_target_cooldowns.lock().await;
+            Self::clear_relay_cooldown(&mut cooldowns, &target.target_peer_id);
+        }
+        {
+            let mut cooldowns = self.relay_hint_cooldowns.lock().await;
+            Self::clear_relay_cooldown(&mut cooldowns, &target.relay_key);
+        }
     }
 
     async fn record_relay_dial_failure(&self, target: &RelayDialTarget, now: Instant) {
         let deadline = now + RELAY_DIAL_COOLDOWN;
-        self.relay_target_cooldowns.lock().await.insert(target.target_peer_id.clone(), deadline);
-        self.relay_hint_cooldowns.lock().await.insert(target.relay_key.clone(), deadline);
+        {
+            let mut cooldowns = self.relay_target_cooldowns.lock().await;
+            Self::set_relay_cooldown(&mut cooldowns, &target.target_peer_id, deadline);
+        }
+        {
+            let mut cooldowns = self.relay_hint_cooldowns.lock().await;
+            Self::set_relay_cooldown(&mut cooldowns, &target.relay_key, deadline);
+        }
     }
 
     async fn handle_inbound_connections(self: &Arc<Self>, peer_by_address: &HashMap<SocketAddr, Peer>) {
@@ -827,6 +851,60 @@ mod tests {
         assert_eq!(target.target_peer_id, "12D3KooTarget");
         assert_eq!(target.relay_key, "203.0.113.9:16112");
         assert_eq!(target.relay_peer_id.as_deref(), Some("12D3KooRelay"));
+    }
+
+    #[test]
+    fn relay_dial_budget_enforces_window_and_resets() {
+        let now = Instant::now();
+        let mut budget = RelayDialBudget { window_start: now, count: 0 };
+
+        for _ in 0..RELAY_DIAL_MAX_PER_WINDOW {
+            assert!(budget.allow(now), "dial should be allowed while under budget");
+        }
+        assert!(!budget.allow(now), "dial should be blocked once budget is exhausted");
+
+        let before_reset = now + RELAY_DIAL_WINDOW - Duration::from_millis(1);
+        assert!(!budget.allow(before_reset), "budget should still block before window expires");
+
+        let after_reset = now + RELAY_DIAL_WINDOW;
+        assert!(budget.allow(after_reset), "budget should reset once window expires");
+    }
+
+    #[test]
+    fn relay_cooldown_allows_after_expiry_and_cleans_entry() {
+        let now = Instant::now();
+        let mut cooldowns = HashMap::new();
+        cooldowns.insert("target".to_string(), now + Duration::from_secs(5));
+
+        assert!(!ConnectionManager::relay_cooldown_allows(&mut cooldowns, "target", now));
+        assert!(cooldowns.contains_key("target"));
+
+        let at_deadline = now + Duration::from_secs(5);
+        assert!(ConnectionManager::relay_cooldown_allows(&mut cooldowns, "target", at_deadline));
+        assert!(!cooldowns.contains_key("target"));
+    }
+
+    #[test]
+    fn relay_failure_and_success_update_target_and_hint_cooldowns() {
+        let now = Instant::now();
+        let deadline = now + RELAY_DIAL_COOLDOWN;
+        let target = RelayDialTarget {
+            target_peer_id: "12D3KooTarget".to_string(),
+            relay_key: "203.0.113.9:16112".to_string(),
+            relay_peer_id: Some("12D3KooRelay".to_string()),
+        };
+
+        let mut target_cooldowns = HashMap::new();
+        let mut hint_cooldowns = HashMap::new();
+        ConnectionManager::set_relay_cooldown(&mut target_cooldowns, &target.target_peer_id, deadline);
+        ConnectionManager::set_relay_cooldown(&mut hint_cooldowns, &target.relay_key, deadline);
+        assert_eq!(target_cooldowns.get(&target.target_peer_id).copied(), Some(deadline));
+        assert_eq!(hint_cooldowns.get(&target.relay_key).copied(), Some(deadline));
+
+        ConnectionManager::clear_relay_cooldown(&mut target_cooldowns, &target.target_peer_id);
+        ConnectionManager::clear_relay_cooldown(&mut hint_cooldowns, &target.relay_key);
+        assert!(!target_cooldowns.contains_key(&target.target_peer_id));
+        assert!(!hint_cooldowns.contains_key(&target.relay_key));
     }
 
     #[test]

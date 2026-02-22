@@ -722,6 +722,8 @@ impl Args {
             libp2p: Libp2pCliArgs {
                 libp2p_mode: arg_match_unwrap_or::<Libp2pMode>(&m, "libp2p-mode", defaults.libp2p.libp2p_mode),
                 libp2p_role: arg_match_unwrap_or::<Libp2pRole>(&m, "libp2p-role", defaults.libp2p.libp2p_role),
+                libp2p_mode_set_from_cli: m.value_source("libp2p-mode") == Some(CommandLine),
+                libp2p_role_set_from_cli: m.value_source("libp2p-role") == Some(CommandLine),
                 libp2p_identity_path: m
                     .get_one::<String>("libp2p-identity-path")
                     .cloned()
@@ -809,6 +811,8 @@ impl Args {
     }
 }
 
+#[cfg(feature = "libp2p")]
+use clap::parser::ValueSource::CommandLine;
 use clap::parser::ValueSource::DefaultValue;
 use std::marker::{Send, Sync};
 fn arg_match_unwrap_or<T: Clone + Send + Sync + 'static>(m: &clap::ArgMatches, arg_id: &str, default: T) -> T {
