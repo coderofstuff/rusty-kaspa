@@ -558,6 +558,104 @@ mod tests {
     }
 
     #[test]
+    fn dcutr_dialback_skips_for_active_relay_peer() {
+        let (mut driver, _peer) = dialback_ready_driver();
+        let relay_peer = driver.active_relay.as_ref().expect("active relay").relay_peer;
+        driver
+            .dcutr_retries
+            .insert(relay_peer, DcutrRetryState { failures: 1, next_retry_at: Instant::now(), last_reason: "test".to_string() });
+
+        driver.request_dialback(relay_peer, true, "test");
+
+        assert!(!driver.dcutr_retries.contains_key(&relay_peer));
+        assert!(!driver.dialback_cooldowns.contains_key(&relay_peer));
+    }
+
+    #[test]
+    fn force_dialback_does_not_assume_relay_path() {
+        let (mut driver, _) = test_driver(1);
+        let peer = PeerId::random();
+        let remote_candidate: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
+        driver.peer_states.insert(
+            peer,
+            PeerState {
+                supports_dcutr: false,
+                connected_via_relay: false,
+                outgoing: 0,
+                remote_dcutr_candidates: vec![remote_candidate],
+                remote_candidates_last_seen: Some(Instant::now()),
+            },
+        );
+        let relay_peer = PeerId::random();
+        let circuit_base: Multiaddr = format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay_peer}").parse().unwrap();
+        driver.active_relay = Some(RelayInfo { relay_peer, circuit_base });
+        let observed: Multiaddr = "/ip4/203.0.113.1/tcp/16112".parse().unwrap();
+        driver.swarm.add_external_address(observed.clone());
+        driver.record_local_candidate(observed, LocalCandidateSource::Observed);
+
+        driver.request_dialback(peer, true, "test");
+
+        let state = driver.peer_states.get(&peer).expect("peer state");
+        assert!(state.supports_dcutr);
+        assert!(!state.connected_via_relay);
+        assert!(!driver.dcutr_retries.contains_key(&peer));
+        assert!(!driver.dialback_cooldowns.contains_key(&peer));
+    }
+
+    #[test]
+    fn scheduled_retry_is_consumed_when_preconditions_fail() {
+        let (mut driver, _) = test_driver(1);
+        let peer = PeerId::random();
+        driver.peer_states.insert(
+            peer,
+            PeerState {
+                supports_dcutr: true,
+                connected_via_relay: false,
+                outgoing: 0,
+                remote_dcutr_candidates: vec![],
+                remote_candidates_last_seen: None,
+            },
+        );
+        driver.dcutr_retries.insert(
+            peer,
+            DcutrRetryState {
+                failures: 0,
+                next_retry_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now),
+                last_reason: "test".to_string(),
+            },
+        );
+
+        driver.process_scheduled_dcutr_retries();
+
+        assert!(!driver.dcutr_retries.contains_key(&peer));
+    }
+
+    #[test]
+    fn observed_candidates_dedupe_by_ip() {
+        let (mut driver, _) = test_driver(1);
+        let first: Multiaddr = "/ip4/8.8.8.8/tcp/41001".parse().unwrap();
+        let second: Multiaddr = "/ip4/8.8.8.8/tcp/41002".parse().unwrap();
+
+        driver.swarm.add_external_address(first.clone());
+        driver.record_local_candidate(first.clone(), LocalCandidateSource::Observed);
+        driver.swarm.add_external_address(second.clone());
+        driver.record_local_candidate(second.clone(), LocalCandidateSource::Observed);
+
+        let observed: Vec<_> = driver
+            .local_candidate_meta
+            .iter()
+            .filter_map(|(addr, meta)| (meta.source == LocalCandidateSource::Observed).then_some(addr.clone()))
+            .collect();
+        assert_eq!(observed.len(), 1);
+        assert!(observed.contains(&second));
+        assert!(!observed.contains(&first));
+
+        let local = driver.local_dcutr_candidates();
+        assert!(local.contains(&second));
+        assert!(!local.contains(&first));
+    }
+
+    #[test]
     fn retryable_dcutr_error_detection_matches_known_failures() {
         assert!(is_retryable_dcutr_error_text("NoAddresses"));
         assert!(is_retryable_dcutr_error_text("io error: UnexpectedEof"));
@@ -1586,15 +1684,17 @@ impl SwarmDriver {
 
     fn process_scheduled_dcutr_retries(&mut self) {
         let now = Instant::now();
-        let due: Vec<_> = self
-            .dcutr_retries
-            .iter()
-            .filter(|(_, state)| state.next_retry_at <= now)
-            .map(|(peer_id, state)| (*peer_id, state.failures, state.last_reason.clone()))
-            .collect();
+        let due: Vec<_> =
+            self.dcutr_retries.iter().filter(|(_, state)| state.next_retry_at <= now).map(|(peer_id, _)| *peer_id).collect();
 
-        for (peer_id, failures, last_reason) in due {
-            info!("libp2p dcutr scheduled retry firing for {}: failures={} last_reason={}", peer_id, failures, last_reason);
+        for peer_id in due {
+            let Some(state) = self.dcutr_retries.remove(&peer_id) else {
+                continue;
+            };
+            info!(
+                "libp2p dcutr scheduled retry firing for {}: failures={} last_reason={}",
+                peer_id, state.failures, state.last_reason
+            );
             self.force_identify_refresh(peer_id, "scheduled_retry");
             self.refresh_relay_connection(peer_id, "scheduled_retry");
             self.request_dialback(peer_id, true, "scheduled_retry");
@@ -1770,6 +1870,10 @@ impl SwarmDriver {
                     self.prune_unusable_external_addrs("identify_received");
                     self.prune_stale_external_addrs("identify_received");
                     self.mark_dcutr_support(peer_id, supports_dcutr);
+                    if self.active_relay.as_ref().is_some_and(|relay| relay.relay_peer == peer_id) {
+                        debug!("libp2p dcutr: skipping dial-back trigger for active relay peer {}", peer_id);
+                        return;
+                    }
                     if observed_refreshed {
                         self.request_dialback(peer_id, true, "observed_addr_refresh");
                     } else {
@@ -2064,7 +2168,7 @@ impl SwarmDriver {
         let relay_addr = relay_probe_base(&relay.circuit_base);
         let opts = DialOpts::peer_id(relay.relay_peer)
             .addresses(vec![relay_addr.clone()])
-            .condition(PeerCondition::Always)
+            .condition(PeerCondition::Disconnected)
             .extend_addresses_through_behaviour()
             .build();
         match self.swarm.dial(opts) {
@@ -2332,6 +2436,30 @@ impl SwarmDriver {
     }
 
     fn record_local_candidate(&mut self, addr: Multiaddr, source: LocalCandidateSource) {
+        if matches!(source, LocalCandidateSource::Observed)
+            && let Some(candidate_ip) = candidate_ip_addr(&addr)
+        {
+            // Keep one observed candidate per IP so frequent observed port updates
+            // cannot grow the local candidate set without bound.
+            let stale_same_ip: Vec<_> = self
+                .local_candidate_meta
+                .iter()
+                .filter_map(|(existing, meta)| {
+                    if existing != &addr
+                        && meta.source == LocalCandidateSource::Observed
+                        && candidate_ip_addr(existing).is_some_and(|existing_ip| existing_ip == candidate_ip)
+                    {
+                        Some(existing.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for stale in stale_same_ip {
+                self.swarm.remove_external_address(&stale);
+                self.local_candidate_meta.remove(&stale);
+            }
+        }
         self.local_candidate_meta.insert(addr, LocalCandidateMeta { source, updated_at: Instant::now() });
     }
 
@@ -2390,10 +2518,18 @@ impl SwarmDriver {
     fn request_dialback(&mut self, peer_id: PeerId, force: bool, reason: &str) {
         self.prune_unusable_external_addrs("request_dialback");
         self.prune_stale_external_addrs("request_dialback");
+        if self.active_relay.as_ref().is_some_and(|relay| relay.relay_peer == peer_id) {
+            self.clear_dcutr_retry(peer_id);
+            debug!("libp2p dcutr: skipping dial-back to active relay peer {}", peer_id);
+            return;
+        }
         if force {
+            let has_relay_connection = self.has_relay_connection(peer_id);
             let state = self.peer_states.entry(peer_id).or_default();
             state.supports_dcutr = true;
-            state.connected_via_relay = true;
+            if has_relay_connection {
+                state.connected_via_relay = true;
+            }
         }
 
         let Some(state) = self.peer_states.get(&peer_id) else {
