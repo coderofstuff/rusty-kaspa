@@ -48,6 +48,22 @@ ssh -J root@10.0.3.11 ubuntu@192.168.1.10
 ssh -J root@10.0.3.11 ubuntu@192.168.2.10
 ```
 
+## Mandatory Prerequisite: Build With `libp2p` Feature (All Hosts)
+
+`--libp2p-mode` and related flags are available **only** when `kaspad` is compiled with `--features libp2p`.
+Run this on Relay, Node A, and Node B before Step 1:
+
+```bash
+cd ~/rusty-kaspa
+cargo build --release --bin kaspad --features libp2p
+~/rusty-kaspa/target/release/kaspad --help | grep -E -- "--libp2p-mode|--libp2p-role|--libp2p-helper-listen"
+```
+
+Expected: grep prints those flags.
+
+If grep prints nothing, **stop** and rebuild with `--features libp2p` before continuing.
+If you run `cargo clean`, rebuild with the same `--features libp2p` command again.
+
 ## Step 1: Start Relay
 
 SSH to relay and run:
@@ -738,6 +754,7 @@ pkill kaspad
 | `AttemptsExceeded(3)` | AutoNAT not allowing private IPs | Use `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true` env var |
 | `AttemptsExceeded(3)` on first attempt only | Cold-start candidate/relay convergence | Apply Step 5 bounded retries (up to 3), then classify PASS/PASS-FLAKY/FAIL |
 | `AttemptsExceeded(3)` | NAT not full-cone | Load `nft_fullcone` kernel module on routers |
+| `unexpected argument '--libp2p-mode'` | `kaspad` binary built without `libp2p` feature | Rebuild with `cargo build --release --bin kaspad --features libp2p` and verify flags in `kaspad --help` |
 | `reservation rejected` | Wrong relay peer ID | Verify relay peer ID in reservation multiaddr |
 | No `path: Direct` | External multiaddr wrong | Use NAT IP, not private IP |
 | Helper API timeout | Helper not started | Check `--libp2p-helper-listen` flag |
@@ -745,6 +762,7 @@ pkill kaspad
 ## Quick Checklist
 
 - [ ] Full-cone NAT enabled on both routers
+- [ ] `kaspad --help` shows `--libp2p-mode` on Relay, Node A, Node B
 - [ ] `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true` env var set on ALL nodes
 - [ ] `--libp2p-mode=bridge` on all nodes
 - [ ] `--libp2p-external-multiaddrs` set to NAT IP (not private IP)
