@@ -14,7 +14,7 @@ use kaspa_addressmanager::{AddressManager, NetAddress};
 use kaspa_core::{debug, info, warn};
 use kaspa_p2p_lib::{ConnectionError, PathKind, Peer, common::ProtocolError};
 use kaspa_utils::{
-    networking::{NET_ADDRESS_SERVICE_LIBP2P_RELAY, RelayRole},
+    networking::{NET_ADDRESS_SERVICE_LIBP2P_RELAY, RelayRole, is_synthetic_relay_ip},
     triggers::SingleTrigger,
 };
 use parking_lot::Mutex as ParkingLotMutex;
@@ -95,6 +95,7 @@ pub struct ConnectionManager {
     relay_target_cooldowns: TokioMutex<HashMap<String, Instant>>,
     relay_hint_cooldowns: TokioMutex<HashMap<String, Instant>>,
     relay_dial_budget: TokioMutex<RelayDialBudget>,
+    relay_peer_id_by_key: TokioMutex<HashMap<String, String>>,
     force_next_iteration: UnboundedSender<()>,
     shutdown_signal: SingleTrigger,
 }
@@ -149,6 +150,7 @@ impl ConnectionManager {
             relay_target_cooldowns: TokioMutex::new(HashMap::new()),
             relay_hint_cooldowns: TokioMutex::new(HashMap::new()),
             relay_dial_budget: TokioMutex::new(RelayDialBudget::new()),
+            relay_peer_id_by_key: TokioMutex::new(HashMap::new()),
             force_next_iteration: tx,
             shutdown_signal: SingleTrigger::new(),
             dns_seeders,
@@ -260,6 +262,7 @@ impl ConnectionManager {
         let mut missing_connections = self.outbound_target - active_outbound.len();
         let mut addr_iter = self.address_manager.lock().iterate_prioritized_random_addresses(active_outbound);
         let mut used_relays = Self::active_relay_usage(peer_by_address);
+        let mut relay_peer_id_by_key = self.relay_peer_id_by_key.lock().await.clone();
         let mut assigned_relays_by_target: HashMap<String, String> = HashMap::new();
         let mut progressing = true;
         let mut connecting = true;
@@ -275,20 +278,24 @@ impl ConnectionManager {
                     break;
                 };
                 if let Some((dial_addr, relay_target)) = Self::relay_dial_plan(&net_addr) {
+                    if let Some(relay_peer_id) = relay_target.relay_peer_id.as_ref() {
+                        relay_peer_id_by_key.insert(relay_target.relay_key.clone(), relay_peer_id.clone());
+                    }
+                    let diversity_keys = Self::relay_diversity_keys(&relay_target, &relay_peer_id_by_key);
                     if Self::relay_hint_requires_bootstrap(relay_target.relay_peer_id.as_deref(), &active_libp2p_peer_ids) {
                         debug!(
                             "Relay hint {} references relay peer {:?} without active libp2p session; allowing bootstrap dial",
                             relay_target.relay_key, relay_target.relay_peer_id
                         );
                     }
-                    if !Self::assign_relay_for_target(&mut assigned_relays_by_target, &relay_target) {
+                    if !Self::assign_relay_for_target(&mut assigned_relays_by_target, &relay_target, &diversity_keys) {
                         continue;
                     }
-                    let used = used_relays.get(&relay_target.diversity_key).copied().unwrap_or_default();
+                    let used = Self::relay_usage_count(&used_relays, &diversity_keys);
                     if used < RELAY_TARGETS_PER_RELAY_LIMIT {
                         let now = Instant::now();
                         if self.relay_dial_allowed(&relay_target, now).await {
-                            used_relays.insert(relay_target.diversity_key.clone(), used + 1);
+                            Self::reserve_relay_usage(&mut used_relays, &diversity_keys, used + 1);
                             debug!("Connecting to relay target {}", &dial_addr);
                             addrs_to_connect.push(DialPlan { address: net_addr, relay: Some(relay_target) });
                             jobs.push(self.p2p_adaptor.connect_peer(dial_addr));
@@ -382,17 +389,54 @@ impl ConnectionManager {
     }
 
     fn has_direct_tcp_target(address: &NetAddress) -> bool {
-        !address.is_synthetic_relay_hint() && address.ip.is_publicly_routable() && address.port != 0
+        !is_synthetic_relay_ip(address.ip)
+            && !address.is_synthetic_relay_hint()
+            && address.ip.is_publicly_routable()
+            && address.port != 0
     }
 
-    fn assign_relay_for_target(assigned_relays_by_target: &mut HashMap<String, String>, target: &RelayDialTarget) -> bool {
+    fn assign_relay_for_target(
+        assigned_relays_by_target: &mut HashMap<String, String>,
+        target: &RelayDialTarget,
+        diversity_keys: &[String],
+    ) -> bool {
+        if diversity_keys.is_empty() {
+            return false;
+        }
         if let Some(assigned) = assigned_relays_by_target.get(&target.target_peer_id)
-            && assigned != &target.diversity_key
+            && !diversity_keys.iter().any(|key| key == assigned)
         {
             return false;
         }
         assigned_relays_by_target.entry(target.target_peer_id.clone()).or_insert_with(|| target.diversity_key.clone());
         true
+    }
+
+    fn relay_diversity_keys(target: &RelayDialTarget, relay_peer_id_by_key: &HashMap<String, String>) -> Vec<String> {
+        let mut keys = Vec::with_capacity(2);
+        Self::push_unique_key(&mut keys, target.diversity_key.clone());
+        if target.relay_peer_id.is_some() {
+            Self::push_unique_key(&mut keys, target.relay_key.clone());
+        } else if let Some(relay_peer_id) = relay_peer_id_by_key.get(&target.relay_key) {
+            Self::push_unique_key(&mut keys, relay_peer_id.clone());
+        }
+        keys
+    }
+
+    fn push_unique_key(keys: &mut Vec<String>, key: String) {
+        if !keys.iter().any(|candidate| candidate == &key) {
+            keys.push(key);
+        }
+    }
+
+    fn relay_usage_count(usage: &HashMap<String, usize>, keys: &[String]) -> usize {
+        keys.iter().filter_map(|key| usage.get(key).copied()).max().unwrap_or_default()
+    }
+
+    fn reserve_relay_usage(usage: &mut HashMap<String, usize>, keys: &[String], value: usize) {
+        for key in keys {
+            usage.insert(key.clone(), value);
+        }
     }
 
     fn active_relay_usage(peer_by_address: &HashMap<SocketAddr, Peer>) -> HashMap<String, usize> {
@@ -517,6 +561,9 @@ impl ConnectionManager {
     }
 
     async fn record_relay_dial_success(&self, target: &RelayDialTarget) {
+        if let Some(relay_peer_id) = target.relay_peer_id.as_ref() {
+            self.relay_peer_id_by_key.lock().await.insert(target.relay_key.clone(), relay_peer_id.clone());
+        }
         {
             let mut cooldowns = self.relay_target_cooldowns.lock().await;
             Self::clear_relay_cooldown(&mut cooldowns, &target.target_peer_id);
@@ -927,8 +974,11 @@ mod tests {
     #[test]
     fn direct_fallback_requires_public_tcp_target() {
         let private = NetAddress::new(IpAddress::from_str("10.0.0.1").unwrap(), 16112);
+        let synthetic_private =
+            NetAddress::new(IpAddress::from_str("240.0.0.1").unwrap(), 16112).with_libp2p_peer_id(Some("12D3KooTarget".to_string()));
         let public = NetAddress::new(IpAddress::from_str("8.8.8.8").unwrap(), 16112);
         assert!(!ConnectionManager::has_direct_tcp_target(&private));
+        assert!(!ConnectionManager::has_direct_tcp_target(&synthetic_private));
         assert!(ConnectionManager::has_direct_tcp_target(&public));
     }
 
@@ -947,10 +997,56 @@ mod tests {
             relay_peer_id: Some("12D3KooRelayB".to_string()),
             diversity_key: "12D3KooRelayB".to_string(),
         };
+        let relay_peer_id_by_key = HashMap::new();
+        let first_keys = ConnectionManager::relay_diversity_keys(&first, &relay_peer_id_by_key);
+        let second_keys = ConnectionManager::relay_diversity_keys(&second, &relay_peer_id_by_key);
 
-        assert!(ConnectionManager::assign_relay_for_target(&mut assigned, &first));
-        assert!(!ConnectionManager::assign_relay_for_target(&mut assigned, &second));
+        assert!(ConnectionManager::assign_relay_for_target(&mut assigned, &first, &first_keys));
+        assert!(!ConnectionManager::assign_relay_for_target(&mut assigned, &second, &second_keys));
         assert_eq!(assigned.get("12D3KooTarget").map(String::as_str), Some("12D3KooRelayA"));
+    }
+
+    #[test]
+    fn relay_usage_count_matches_known_relay_peer_alias_for_hint_without_peer_id() {
+        let target = RelayDialTarget {
+            target_peer_id: "12D3KooTarget".to_string(),
+            relay_key: "203.0.113.9:16112".to_string(),
+            relay_peer_id: None,
+            diversity_key: "203.0.113.9:16112".to_string(),
+        };
+
+        let mut relay_peer_id_by_key = HashMap::new();
+        relay_peer_id_by_key.insert(target.relay_key.clone(), "12D3KooRelay".to_string());
+        let keys = ConnectionManager::relay_diversity_keys(&target, &relay_peer_id_by_key);
+
+        let mut usage = HashMap::new();
+        usage.insert("12D3KooRelay".to_string(), 1);
+        assert_eq!(ConnectionManager::relay_usage_count(&usage, &keys), 1);
+    }
+
+    #[test]
+    fn relay_assignment_accepts_same_relay_via_key_alias() {
+        let mut assigned = HashMap::new();
+        let with_peer_id = RelayDialTarget {
+            target_peer_id: "12D3KooTarget".to_string(),
+            relay_key: "203.0.113.9:16112".to_string(),
+            relay_peer_id: Some("12D3KooRelay".to_string()),
+            diversity_key: "12D3KooRelay".to_string(),
+        };
+        let without_peer_id = RelayDialTarget {
+            target_peer_id: "12D3KooTarget".to_string(),
+            relay_key: "203.0.113.9:16112".to_string(),
+            relay_peer_id: None,
+            diversity_key: "203.0.113.9:16112".to_string(),
+        };
+
+        let mut relay_peer_id_by_key = HashMap::new();
+        relay_peer_id_by_key.insert(with_peer_id.relay_key.clone(), "12D3KooRelay".to_string());
+        let first_keys = ConnectionManager::relay_diversity_keys(&with_peer_id, &relay_peer_id_by_key);
+        let second_keys = ConnectionManager::relay_diversity_keys(&without_peer_id, &relay_peer_id_by_key);
+
+        assert!(ConnectionManager::assign_relay_for_target(&mut assigned, &with_peer_id, &first_keys));
+        assert!(ConnectionManager::assign_relay_for_target(&mut assigned, &without_peer_id, &second_keys));
     }
 
     #[test]
