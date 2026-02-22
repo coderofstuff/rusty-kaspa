@@ -360,7 +360,10 @@ mod tests {
     fn dialback_ready_driver_with_allow_private(allow_private_addrs: bool) -> (SwarmDriver, PeerId) {
         let (mut driver, _) = test_driver_with_allow_private(1, allow_private_addrs);
         let peer = PeerId::random();
-        driver.peer_states.insert(peer, PeerState { supports_dcutr: true, connected_via_relay: true, outgoing: 0 });
+        driver.peer_states.insert(
+            peer,
+            PeerState { supports_dcutr: true, connected_via_relay: true, outgoing: 0, remote_dcutr_candidates: Vec::new() },
+        );
         let relay_peer = PeerId::random();
         let circuit_base: Multiaddr = format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay_peer}").parse().unwrap();
         driver.active_relay = Some(RelayInfo { relay_peer, circuit_base });
@@ -515,6 +518,30 @@ mod tests {
 
         driver.maybe_request_dialback(peer);
         assert!(driver.dialback_cooldowns.is_empty());
+    }
+
+    #[test]
+    fn retryable_dcutr_error_detection_matches_known_failures() {
+        assert!(is_retryable_dcutr_error_text("NoAddresses"));
+        assert!(is_retryable_dcutr_error_text("io error: UnexpectedEof"));
+        assert!(!is_retryable_dcutr_error_text("AttemptsExceeded"));
+    }
+
+    #[test]
+    fn extract_remote_dcutr_candidates_filters_undialable_addrs() {
+        let relay_peer = PeerId::random();
+        let target_peer = PeerId::random();
+        let public_addr: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
+        let private_addr: Multiaddr = "/ip4/192.168.1.20/tcp/16112".parse().unwrap();
+        let udp_addr: Multiaddr = "/ip4/8.8.4.4/udp/16112".parse().unwrap();
+        let relay_addr: Multiaddr = format!("/ip4/8.8.8.8/tcp/16112/p2p/{relay_peer}/p2p-circuit/p2p/{target_peer}").parse().unwrap();
+
+        let remote =
+            extract_remote_dcutr_candidates(&[public_addr.clone(), private_addr.clone(), udp_addr.clone(), relay_addr.clone()], false);
+        assert_eq!(remote, vec![public_addr.clone()]);
+
+        let remote_allow_private = extract_remote_dcutr_candidates(std::slice::from_ref(&private_addr), true);
+        assert_eq!(remote_allow_private, vec![private_addr]);
     }
 
     #[test]
@@ -1567,12 +1594,12 @@ impl SwarmDriver {
                     // Relay circuit peers may report observed addresses like `/p2p/<peer_id>` without
                     // any IP information, which are useless for DCUtR hole punching and pollute
                     // the external address set.
-                    if self.is_usable_external_addr(&info.observed_addr) {
-                        self.swarm.add_external_address(info.observed_addr.clone());
-                    }
+                    self.update_remote_dcutr_candidates(peer_id, &info.listen_addrs);
+                    self.refresh_local_dcutr_candidates(peer_id, &info.observed_addr);
                     // NOTE: We intentionally do NOT add info.listen_addrs as external addresses.
                     // Those are the REMOTE peer's addresses, not ours. Adding them would pollute
                     // our external address set with unreachable addresses, breaking DCUtR hole punch.
+                    self.prune_unusable_external_addrs("identify_received");
                     self.mark_dcutr_support(peer_id, supports_dcutr);
                     self.maybe_request_dialback(peer_id);
                 }
@@ -1619,6 +1646,16 @@ impl SwarmDriver {
                 // Enhanced DCUtR logging to diagnose NoAddresses issue
                 let external_addrs: Vec<_> = self.swarm.external_addresses().collect();
                 match &event.result {
+                    Err(e) if is_retryable_dcutr_error(e) => {
+                        warn!(
+                            "libp2p dcutr retryable failure for {}: {:?} (local_candidates={} remote_candidates={})",
+                            event.remote_peer_id,
+                            e,
+                            self.local_dcutr_candidates().len(),
+                            self.peer_states.get(&event.remote_peer_id).map_or(0, |state| state.remote_dcutr_candidates.len())
+                        );
+                        self.refresh_dcutr_retry_path(event.remote_peer_id, e);
+                    }
                     Err(e) if is_attempts_exceeded(e) => {
                         // Check if we have an active DIRECT connection that was upgraded via DCUtR
                         let is_spurious = self.connections.values().any(|conn| {
@@ -1685,6 +1722,7 @@ impl SwarmDriver {
                 {
                     self.set_active_relay(info, None);
                 }
+                self.prune_unusable_external_addrs("new_listen_addr");
                 self.listening = true;
             }
             SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
@@ -2006,23 +2044,101 @@ impl SwarmDriver {
         self.peer_states.entry(peer_id).or_default().connected_via_relay = true;
     }
 
+    fn update_remote_dcutr_candidates(&mut self, peer_id: PeerId, listen_addrs: &[Multiaddr]) {
+        let remote_dcutr_candidates = extract_remote_dcutr_candidates(listen_addrs, self.allow_private_addrs);
+        let remote_count = remote_dcutr_candidates.len();
+        self.peer_states.entry(peer_id).or_default().remote_dcutr_candidates = remote_dcutr_candidates;
+        info!(
+            "libp2p dcutr candidates refreshed from identify for {peer_id}: local_candidates={} remote_candidates={remote_count}",
+            self.local_dcutr_candidates().len()
+        );
+    }
+
+    fn local_dcutr_candidates(&self) -> Vec<Multiaddr> {
+        self.swarm.external_addresses().filter(|addr| self.is_usable_external_addr(addr)).cloned().collect()
+    }
+
+    fn prune_unusable_external_addrs(&mut self, source: &str) {
+        let stale_addrs: Vec<_> =
+            self.swarm.external_addresses().filter(|addr| !self.is_usable_external_addr(addr)).cloned().collect();
+        if stale_addrs.is_empty() {
+            return;
+        }
+        for addr in &stale_addrs {
+            self.swarm.remove_external_address(addr);
+        }
+        info!(
+            "libp2p dcutr candidate prune ({source}): removed={} remaining_usable={} removed_addrs={:?}",
+            stale_addrs.len(),
+            self.local_dcutr_candidates().len(),
+            stale_addrs
+        );
+    }
+
+    fn refresh_local_dcutr_candidates(&mut self, peer_id: PeerId, observed_addr: &Multiaddr) {
+        if !self.is_usable_external_addr(observed_addr) {
+            return;
+        }
+        self.swarm.add_external_address(observed_addr.clone());
+        // Force immediate re-attempt for this peer when a fresh observed address appears.
+        self.dialback_cooldowns.remove(&peer_id);
+        self.direct_upgrade_cooldowns.remove(&peer_id);
+        let remote_count = self.peer_states.get(&peer_id).map_or(0, |state| state.remote_dcutr_candidates.len());
+        info!(
+            "libp2p dcutr local candidate refresh for {peer_id}: observed_addr={} local_candidates={} remote_candidates={remote_count}",
+            observed_addr,
+            self.local_dcutr_candidates().len()
+        );
+    }
+
+    fn refresh_dcutr_retry_path(&mut self, peer_id: PeerId, error: &dcutr::Error) {
+        let relay_connections =
+            self.connections.values().filter(|conn| conn.peer_id == peer_id && matches!(conn.path, PathKind::Relay { .. })).count();
+        self.mark_relay_path(peer_id);
+        self.dialback_cooldowns.remove(&peer_id);
+        self.direct_upgrade_cooldowns.remove(&peer_id);
+        info!(
+            "libp2p dcutr retry-path refresh for {peer_id}: error={error} relay_connections={relay_connections} local_candidates={} remote_candidates={}",
+            self.local_dcutr_candidates().len(),
+            self.peer_states.get(&peer_id).map_or(0, |state| state.remote_dcutr_candidates.len())
+        );
+        self.request_dialback(peer_id, true, "retryable_dcutr_error");
+    }
+
     fn maybe_request_dialback(&mut self, peer_id: PeerId) {
+        self.request_dialback(peer_id, false, "standard");
+    }
+
+    fn request_dialback(&mut self, peer_id: PeerId, force: bool, reason: &str) {
+        self.prune_unusable_external_addrs("request_dialback");
+        if force {
+            let state = self.peer_states.entry(peer_id).or_default();
+            state.supports_dcutr = true;
+            state.connected_via_relay = true;
+        }
+
         let Some(state) = self.peer_states.get(&peer_id) else {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: no peer state");
             return;
         };
-        if !state.supports_dcutr {
+        let supports_dcutr = state.supports_dcutr;
+        let connected_via_relay = state.connected_via_relay;
+        let outgoing = state.outgoing;
+        let remote_candidates_count = state.remote_dcutr_candidates.len();
+
+        if !supports_dcutr {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: peer does not support dcutr");
             return;
         }
-        if !state.connected_via_relay {
+        if !connected_via_relay {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: not connected via relay");
             return;
         }
-        if state.outgoing > 0 {
+        if !force && outgoing > 0 {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: already have outgoing connection");
             return;
         }
+
         let now = Instant::now();
         if !self.allow_private_addrs
             && let Some(until) = self.autonat_private_until
@@ -2036,7 +2152,8 @@ impl SwarmDriver {
             }
             self.autonat_private_until = None;
         }
-        if let Some(next_allowed) = self.dialback_cooldowns.get(&peer_id)
+        if !force
+            && let Some(next_allowed) = self.dialback_cooldowns.get(&peer_id)
             && *next_allowed > now
         {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: cooldown until {:?}", *next_allowed);
@@ -2044,17 +2161,27 @@ impl SwarmDriver {
         }
         if let Some(until) = self.direct_upgrade_cooldowns.get(&peer_id).copied() {
             if until > now {
-                debug!("libp2p dcutr: skipping dial-back to {peer_id}: direct-upgrade cooldown until {:?}", until);
-                return;
+                if force {
+                    self.direct_upgrade_cooldowns.remove(&peer_id);
+                } else {
+                    debug!("libp2p dcutr: skipping dial-back to {peer_id}: direct-upgrade cooldown until {:?}", until);
+                    return;
+                }
+            } else {
+                self.direct_upgrade_cooldowns.remove(&peer_id);
             }
-            self.direct_upgrade_cooldowns.remove(&peer_id);
         }
-        if !self.has_usable_external_addr() {
+
+        let local_candidates = self.local_dcutr_candidates();
+        if local_candidates.is_empty() {
             if let Some(metrics) = self.metrics.as_ref() {
                 metrics.dcutr().record_dialback_skipped_no_external();
             }
-            debug!("libp2p dcutr: skipping dial-back to {peer_id}: no usable external address");
-            return;
+            if !force {
+                debug!("libp2p dcutr: skipping dial-back to {peer_id}: no usable external address");
+                return;
+            }
+            warn!("libp2p dcutr: forcing dial-back to {peer_id} without usable local candidates");
         }
 
         let Some(relay) = &self.active_relay else {
@@ -2068,9 +2195,17 @@ impl SwarmDriver {
             circuit_addr.push(Protocol::P2pCircuit);
         }
         circuit_addr.push(Protocol::P2p(peer_id));
+        let chosen_dial_addrs = vec![circuit_addr.clone()];
+
+        info!(
+            "libp2p dcutr dial-back attempt to {peer_id} reason={reason} local_candidates={} remote_candidates={} chosen_dial_addrs={:?}",
+            local_candidates.len(),
+            remote_candidates_count,
+            chosen_dial_addrs
+        );
 
         let opts = DialOpts::peer_id(peer_id)
-            .addresses(vec![circuit_addr.clone()])
+            .addresses(chosen_dial_addrs)
             .condition(PeerCondition::Always)
             .extend_addresses_through_behaviour()
             .build();
@@ -2224,6 +2359,52 @@ fn is_attempts_exceeded(err: &dcutr::Error) -> bool {
     err.to_string().contains("AttemptsExceeded")
 }
 
+fn is_retryable_dcutr_error(err: &dcutr::Error) -> bool {
+    is_retryable_dcutr_error_text(&err.to_string())
+}
+
+fn is_retryable_dcutr_error_text(err: &str) -> bool {
+    err.contains("NoAddresses") || err.contains("UnexpectedEof")
+}
+
+fn extract_remote_dcutr_candidates(listen_addrs: &[Multiaddr], allow_private_addrs: bool) -> Vec<Multiaddr> {
+    listen_addrs
+        .iter()
+        .filter(|addr| {
+            if !is_tcp_dialable(addr) {
+                return false;
+            }
+            let Some(ip) = candidate_ip_addr(addr) else {
+                return false;
+            };
+            is_usable_dcutr_candidate_ip(ip, allow_private_addrs)
+        })
+        .cloned()
+        .collect()
+}
+
+fn candidate_ip_addr(addr: &Multiaddr) -> Option<std::net::IpAddr> {
+    let mut ip = None;
+    for protocol in addr.iter() {
+        match protocol {
+            Protocol::Ip4(v4) => ip = Some(std::net::IpAddr::V4(v4)),
+            Protocol::Ip6(v6) => ip = Some(std::net::IpAddr::V6(v6)),
+            _ => {}
+        }
+    }
+    ip
+}
+
+fn is_usable_dcutr_candidate_ip(ip: std::net::IpAddr, allow_private_addrs: bool) -> bool {
+    if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+        return false;
+    }
+    if allow_private_addrs {
+        return true;
+    }
+    kaspa_utils::networking::IpAddress::new(ip).is_publicly_routable()
+}
+
 #[derive(Clone)]
 struct RelayInfo {
     relay_peer: PeerId,
@@ -2235,6 +2416,7 @@ struct PeerState {
     supports_dcutr: bool,
     outgoing: usize,
     connected_via_relay: bool,
+    remote_dcutr_candidates: Vec<Multiaddr>,
 }
 
 #[derive(Clone, Debug)]

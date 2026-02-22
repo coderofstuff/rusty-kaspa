@@ -63,6 +63,9 @@ impl ReceiveAddressesFlow {
             {
                 let mut amgr_lock = self.ctx.address_manager.lock();
                 for addr in address_list {
+                    if self.ctx.is_local_libp2p_peer_id(addr.libp2p_peer_id.as_deref()) {
+                        continue;
+                    }
                     amgr_lock.add_address(addr)
                 }
             }

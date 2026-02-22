@@ -157,6 +157,20 @@ fn libp2p_fallback_advertise_address(config: &kaspa_p2p_libp2p::Config) -> Optio
     config.external_multiaddrs.iter().find_map(|value| parse_ip_tcp_from_multiaddr(value).map(Into::into))
 }
 
+fn resolve_connection_limits(
+    connect_mode: bool,
+    outbound_target: usize,
+    inbound_limit: usize,
+    libp2p_connect_bootstrap_mode: bool,
+) -> (usize, usize) {
+    if connect_mode && !libp2p_connect_bootstrap_mode { (0, 0) } else { (outbound_target, inbound_limit) }
+}
+
+#[cfg(feature = "libp2p")]
+fn uses_libp2p_outbound_connector(mode: kaspa_p2p_libp2p::Mode) -> bool {
+    !matches!(mode.effective(), kaspa_p2p_libp2p::Mode::Off)
+}
+
 pub fn validate_args(args: &Args) -> ConfigResult<()> {
     #[cfg(feature = "devnet-prealloc")]
     {
@@ -614,11 +628,6 @@ Do you confirm? (y/n)";
     let connect_peers = args.connect_peers.iter().map(|x| x.normalize(config.default_p2p_port())).collect::<Vec<_>>();
     let add_peers = args.add_peers.iter().map(|x| x.normalize(config.default_p2p_port())).collect();
     let p2p_server_addr = args.listen.unwrap_or(ContextualNetAddress::unspecified()).normalize(config.default_p2p_port());
-    // connect_peers means no DNS seeding and no outbound/inbound peers
-    let outbound_target = if connect_peers.is_empty() { args.outbound_target } else { 0 };
-    let inbound_limit = if connect_peers.is_empty() { args.inbound_limit } else { 0 };
-    let dns_seeders = if connect_peers.is_empty() && !args.disable_dns_seeding { config.dns_seeders } else { &[] };
-
     let grpc_server_addr = args.rpclisten.unwrap_or(ContextualNetAddress::loopback()).normalize(config.default_rpc_port());
 
     #[cfg(feature = "libp2p")]
@@ -626,11 +635,8 @@ Do you confirm? (y/n)";
         let cfg = libp2p_config_from_args(&args.libp2p, &app_dir, SocketAddr::new(p2p_server_addr.ip.into(), p2p_server_addr.port));
         let runtime = crate::libp2p::libp2p_runtime_from_config(&cfg);
         let status: GetLibp2pStatusResponse = crate::libp2p::libp2p_status_from_config(&cfg, runtime.peer_id.clone());
-        let outbound: Arc<dyn kaspa_p2p_lib::OutboundConnector> = match cfg.mode.effective() {
-            kaspa_p2p_libp2p::Mode::Off => Arc::new(kaspa_p2p_lib::TcpConnector),
-            kaspa_p2p_libp2p::Mode::Full | kaspa_p2p_libp2p::Mode::Helper => runtime.outbound.clone(),
-            kaspa_p2p_libp2p::Mode::Bridge => Arc::new(kaspa_p2p_lib::TcpConnector),
-        };
+        let outbound: Arc<dyn kaspa_p2p_lib::OutboundConnector> =
+            if uses_libp2p_outbound_connector(cfg.mode) { runtime.outbound.clone() } else { Arc::new(kaspa_p2p_lib::TcpConnector) };
         (cfg, status, runtime.peer_id.clone(), outbound, runtime.init_service, runtime.provider_cell)
     };
     #[cfg(feature = "libp2p")]
@@ -685,6 +691,21 @@ Do you confirm? (y/n)";
             && matches!(libp2p_config.role, kaspa_p2p_libp2p::Role::Private | kaspa_p2p_libp2p::Role::Auto);
         set_libp2p_role_config(Libp2pRoleConfig { is_private, libp2p_inbound_cap_private: libp2p_config.libp2p_inbound_cap_private });
     }
+
+    let connect_mode = !connect_peers.is_empty();
+    #[cfg(feature = "libp2p")]
+    let libp2p_connect_bootstrap_mode = connect_mode
+        && libp2p_config.mode.is_enabled()
+        && matches!(libp2p_config.role, kaspa_p2p_libp2p::Role::Private | kaspa_p2p_libp2p::Role::Auto);
+    #[cfg(not(feature = "libp2p"))]
+    let libp2p_connect_bootstrap_mode = false;
+
+    // `--connect` always disables DNS seeding.
+    // For TCP-only mode we keep strict connect-only semantics (no extra peer manager dials).
+    // For libp2p private/auto we keep peer manager active so relay-hint gossip can form hole-punch paths.
+    let (outbound_target, inbound_limit) =
+        resolve_connection_limits(connect_mode, args.outbound_target, args.inbound_limit, libp2p_connect_bootstrap_mode);
+    let dns_seeders = if !connect_mode && !args.disable_dns_seeding { config.dns_seeders } else { &[] };
 
     let core = Arc::new(Core::new());
 
@@ -965,5 +986,31 @@ mod tests {
             .build();
         let advertised = libp2p_fallback_advertise_address(&config).expect("expected fallback address");
         assert_eq!(SocketAddr::from(advertised), "203.0.113.10:17112".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn connect_mode_keeps_legacy_limits_without_libp2p_bootstrap() {
+        let (outbound, inbound) = resolve_connection_limits(true, 8, 128, false);
+        assert_eq!((outbound, inbound), (0, 0));
+    }
+
+    #[test]
+    fn connect_mode_keeps_peer_manager_for_libp2p_bootstrap() {
+        let (outbound, inbound) = resolve_connection_limits(true, 8, 128, true);
+        assert_eq!((outbound, inbound), (8, 128));
+    }
+
+    #[test]
+    fn non_connect_mode_keeps_configured_limits() {
+        let (outbound, inbound) = resolve_connection_limits(false, 8, 128, false);
+        assert_eq!((outbound, inbound), (8, 128));
+    }
+
+    #[test]
+    fn bridge_mode_uses_libp2p_outbound_connector() {
+        assert!(!uses_libp2p_outbound_connector(AdapterMode::Off));
+        assert!(uses_libp2p_outbound_connector(AdapterMode::Full));
+        assert!(uses_libp2p_outbound_connector(AdapterMode::Helper));
+        assert!(uses_libp2p_outbound_connector(AdapterMode::Bridge));
     }
 }

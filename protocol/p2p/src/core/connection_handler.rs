@@ -155,11 +155,17 @@ impl ConnectionHandler {
 
     /// Connect to a new peer
     pub(crate) async fn connect(&self, peer_address: String) -> Result<Arc<Router>, ConnectionError> {
-        let Some(socket_address) = peer_address.to_socket_addrs()?.next() else {
-            return Err(ConnectionError::NoAddress);
+        let metadata = if peer_address.starts_with('/') {
+            // libp2p multiaddrs are not valid socket addresses; let the outbound
+            // connector resolve them without pre-parsing as TCP.
+            TransportMetadata::default()
+        } else {
+            let Some(socket_address) = peer_address.to_socket_addrs()?.next() else {
+                return Err(ConnectionError::NoAddress);
+            };
+            let reported_ip: IpAddress = socket_address.ip().into();
+            self.metadata_factory.for_outbound(reported_ip)
         };
-        let reported_ip: IpAddress = socket_address.ip().into();
-        let metadata = self.metadata_factory.for_outbound(reported_ip);
 
         // Delegate to the configured outbound connector (defaults to TCP)
         self.outbound_connector.connect(peer_address, metadata, self).await
@@ -474,6 +480,7 @@ mod tests {
     use kaspa_utils::networking::PeerId;
     use std::net::Ipv4Addr;
     use std::net::SocketAddr;
+    use std::sync::Mutex;
     use std::task::{Context, Poll};
     use tokio::io::{AsyncRead, AsyncWrite, duplex};
     use tokio::sync::mpsc;
@@ -650,6 +657,47 @@ mod tests {
         fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingOutboundConnector {
+        calls: Mutex<Vec<(String, TransportMetadata)>>,
+    }
+
+    impl OutboundConnector for RecordingOutboundConnector {
+        fn connect<'a>(
+            &'a self,
+            address: String,
+            metadata: TransportMetadata,
+            _handler: &'a ConnectionHandler,
+        ) -> Pin<Box<dyn futures::Future<Output = Result<Arc<Router>, ConnectionError>> + Send + 'a>> {
+            self.calls.lock().unwrap().push((address, metadata));
+            Box::pin(async { Err(ConnectionError::ProtocolError(ProtocolError::Other("recording connector"))) })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connect_forwards_multiaddr_without_socket_parsing() {
+        let initializer = Arc::new(SilentInitializer);
+        let counters = Arc::new(TowerConnectionCounters::default());
+        let hub = Hub::new();
+        let (hub_tx, hub_rx) = mpsc::channel(Adaptor::hub_channel_size());
+        hub.clone().start_event_loop(hub_rx, initializer.clone());
+
+        let connector = Arc::new(RecordingOutboundConnector::default());
+        let handler = ConnectionHandler::new(hub_tx, initializer, counters, Arc::new(DirectMetadataFactory), connector.clone());
+
+        let relay_multiaddr = "/ip4/10.0.3.26/tcp/16112/p2p/12D3KooWA2jw4ycPqjtbffumkH97QUARFojtmpHT8Ki5aWXW6BtK/p2p-circuit/p2p/12D3KooWP2x9RVcnFnr6kPt1MQw7SHdJr9c6sB8BiFSrenSSzXfx";
+        let err = handler.connect(relay_multiaddr.to_string()).await.expect_err("recording connector always errors");
+        assert!(matches!(err, ConnectionError::ProtocolError(ProtocolError::Other("recording connector"))));
+
+        let mut calls = connector.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (address, metadata) = calls.pop().unwrap();
+        assert_eq!(address, relay_multiaddr);
+        assert_eq!(metadata.reported_ip, None);
+        assert!(matches!(metadata.path, PathKind::Unknown));
+        assert!(!metadata.capabilities.libp2p);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

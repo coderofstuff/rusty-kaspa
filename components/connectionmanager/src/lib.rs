@@ -114,6 +114,7 @@ impl ConnectionRequest {
 struct RelayDialTarget {
     target_peer_id: String,
     relay_key: String,
+    relay_peer_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -248,6 +249,13 @@ impl ConnectionManager {
         if active_outbound.len() >= self.outbound_target {
             return;
         }
+        let active_libp2p_peer_ids: HashSet<String> = peer_by_address
+            .values()
+            .filter_map(|peer| {
+                let md = peer.metadata();
+                if md.capabilities.libp2p { md.libp2p_peer_id.clone() } else { None }
+            })
+            .collect();
 
         let mut missing_connections = self.outbound_target - active_outbound.len();
         let mut addr_iter = self.address_manager.lock().iterate_prioritized_random_addresses(active_outbound);
@@ -266,6 +274,11 @@ impl ConnectionManager {
                     break;
                 };
                 if let Some((dial_addr, relay_target)) = Self::relay_dial_plan(&net_addr) {
+                    if let Some(relay_peer_id) = relay_target.relay_peer_id.as_ref()
+                        && !active_libp2p_peer_ids.contains(relay_peer_id)
+                    {
+                        continue;
+                    }
                     if used_relays.contains(&relay_target.relay_key) {
                         continue;
                     }
@@ -353,8 +366,9 @@ impl ConnectionManager {
         let target_peer_id = address.libp2p_peer_id.as_ref()?;
         let hint = address.relay_circuit_hint.as_ref()?;
         let relay_key = Self::relay_hint_key(hint)?;
+        let relay_peer_id = Self::relay_hint_peer_id(hint);
         let dial_addr = Self::relay_circuit_addr(hint, target_peer_id)?;
-        Some((dial_addr, RelayDialTarget { target_peer_id: target_peer_id.clone(), relay_key }))
+        Some((dial_addr, RelayDialTarget { target_peer_id: target_peer_id.clone(), relay_key, relay_peer_id }))
     }
 
     fn relay_circuit_addr(hint: &str, target_peer_id: &str) -> Option<String> {
@@ -385,6 +399,19 @@ impl ConnectionManager {
         }
 
         SocketAddr::from_str(hint).ok().map(|socket| socket.to_string())
+    }
+
+    fn relay_hint_peer_id(hint: &str) -> Option<String> {
+        if !hint.starts_with('/') {
+            return None;
+        }
+        let parts: Vec<&str> = hint.split('/').filter(|part| !part.is_empty()).collect();
+        for idx in 0..parts.len().saturating_sub(1) {
+            if parts[idx] == "p2p" {
+                return Some(parts[idx + 1].to_string());
+            }
+        }
+        None
     }
 
     fn parse_multiaddr_ip_port(hint: &str) -> Option<(IpAddr, u16)> {
@@ -760,14 +787,22 @@ mod tests {
     }
 
     #[test]
+    fn relay_hint_peer_id_extracts_first_multiaddr_peer() {
+        let hint = "/ip4/203.0.113.9/tcp/16112/p2p/12D3KooRelay/p2p-circuit";
+        assert_eq!(ConnectionManager::relay_hint_peer_id(hint).as_deref(), Some("12D3KooRelay"));
+        assert!(ConnectionManager::relay_hint_peer_id("203.0.113.9:16112").is_none());
+    }
+
+    #[test]
     fn relay_dial_plan_requires_fields() {
         let addr = NetAddress::new(IpAddress::from_str("10.0.0.1").unwrap(), 16112)
             .with_relay_role(Some(RelayRole::Private))
             .with_libp2p_peer_id(Some("12D3KooTarget".to_string()))
-            .with_relay_circuit_hint(Some("203.0.113.9:16112".to_string()));
+            .with_relay_circuit_hint(Some("/ip4/203.0.113.9/tcp/16112/p2p/12D3KooRelay".to_string()));
         let (dial_addr, target) = ConnectionManager::relay_dial_plan(&addr).unwrap();
-        assert_eq!(dial_addr, "/ip4/203.0.113.9/tcp/16112/p2p-circuit/p2p/12D3KooTarget");
+        assert_eq!(dial_addr, "/ip4/203.0.113.9/tcp/16112/p2p/12D3KooRelay/p2p-circuit/p2p/12D3KooTarget");
         assert_eq!(target.target_peer_id, "12D3KooTarget");
         assert_eq!(target.relay_key, "203.0.113.9:16112");
+        assert_eq!(target.relay_peer_id.as_deref(), Some("12D3KooRelay"));
     }
 }

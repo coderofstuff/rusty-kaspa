@@ -437,6 +437,11 @@ impl FlowContext {
         (services, relay_port, relay_capacity, relay_ttl_ms, relay_role, libp2p_peer_id, relay_hint)
     }
 
+    pub fn is_local_libp2p_peer_id(&self, peer_id: Option<&str>) -> bool {
+        let (_, _, _, _, _, local_peer_id, _) = self.libp2p_advertisement();
+        matches!((peer_id, local_peer_id.as_deref()), (Some(peer_id), Some(local_peer_id)) if peer_id == local_peer_id)
+    }
+
     pub fn set_libp2p_advertisement(
         &self,
         services: u64,
@@ -969,13 +974,20 @@ impl ConnectionInitializer for FlowContext {
             }
 
             if let Some(mut peer_ip_address) = peer_version.address {
-                if peer_ip_address.has_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY) && peer_ip_address.relay_port.is_none() {
-                    peer_ip_address.set_relay_port(Some(peer_ip_address.port.saturating_add(1)));
+                if self.is_local_libp2p_peer_id(peer_ip_address.libp2p_peer_id.as_deref()) {
+                    debug!(
+                        "Skipping self-address gossip entry for local libp2p peer id {}",
+                        peer_ip_address.libp2p_peer_id.as_deref().unwrap_or_default()
+                    );
+                } else {
+                    if peer_ip_address.has_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY) && peer_ip_address.relay_port.is_none() {
+                        peer_ip_address.set_relay_port(Some(peer_ip_address.port.saturating_add(1)));
+                    }
+                    if peer_ip_address.has_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY) && peer_ip_address.relay_role.is_none() {
+                        peer_ip_address.set_relay_role(Some(RelayRole::Public));
+                    }
+                    address_manager.add_address(self.normalize_libp2p_address(peer_ip_address));
                 }
-                if peer_ip_address.has_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY) && peer_ip_address.relay_role.is_none() {
-                    peer_ip_address.set_relay_role(Some(RelayRole::Public));
-                }
-                address_manager.add_address(self.normalize_libp2p_address(peer_ip_address));
             }
         }
 

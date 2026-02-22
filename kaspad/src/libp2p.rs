@@ -565,8 +565,22 @@ impl AsyncService for Libp2pNodeService {
                 let current_role = current_role.clone();
                 let current_hint = current_hint.clone();
                 let libp2p_peer_id = libp2p_peer_id.clone();
+                let initial_hint = hint_rx.borrow().clone();
+                if initial_hint.is_some() {
+                    *current_hint.lock() = initial_hint.clone();
+                    apply_role_update(
+                        &flow_context,
+                        *current_role.lock(),
+                        relay_port,
+                        relay_capacity,
+                        relay_ttl_ms,
+                        inbound_cap_private,
+                        libp2p_peer_id.clone(),
+                        initial_hint.clone(),
+                    );
+                }
                 tokio::spawn(async move {
-                    let mut current = hint_rx.borrow().clone();
+                    let mut current = initial_hint;
                     loop {
                         if hint_rx.changed().await.is_err() {
                             break;
