@@ -2,6 +2,8 @@
 
 Tested and verified guide for running DCUtR hole punch tests in the NAT lab.
 
+For lab infrastructure and router/NAT setup record, see `tcp-hole-punch/docs/NAT-LAB-RECORD.md`.
+
 ## Lab Topology
 
 ```
