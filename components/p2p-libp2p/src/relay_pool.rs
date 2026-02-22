@@ -132,6 +132,15 @@ pub struct RelayCandidateStats {
 }
 
 #[derive(Clone, Debug)]
+pub struct RelayCandidateObservability {
+    pub key: String,
+    pub source_count: usize,
+    pub in_backoff: bool,
+    pub has_peer_id: bool,
+    pub score: f64,
+}
+
+#[derive(Clone, Debug)]
 struct RelayEntry {
     key: String,
     address: Multiaddr,
@@ -311,6 +320,24 @@ impl RelayPool {
         let min_sources = self.config.min_sources.max(1);
         let high_confidence = eligible.iter().filter(|entry| entry.sources.count_ones() as usize >= min_sources).count();
         RelayCandidateStats { total, eligible: eligible.len(), high_confidence }
+    }
+
+    pub fn candidate_observability(&self, now: Instant) -> Vec<RelayCandidateObservability> {
+        let mut entries: Vec<_> = self
+            .entries
+            .values()
+            .filter(|entry| entry.expires_at > now)
+            .map(|entry| RelayCandidateObservability {
+                key: entry.key.clone(),
+                source_count: entry.sources.count_ones() as usize,
+                in_backoff: entry.backoff_until.map(|until| until > now).unwrap_or(false),
+                has_peer_id: entry.relay_peer_id.is_some(),
+                score: entry.score(now, &self.config),
+            })
+            .collect();
+
+        entries.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.key.cmp(&b.key)));
+        entries
     }
 
     pub fn select_relays(&mut self, now: Instant) -> Vec<RelaySelection> {
@@ -689,5 +716,26 @@ mod tests {
 
         let addr = pool.reservation_multiaddr(&key).expect("reservation addr");
         assert!(addr.iter().any(|p| matches!(p, Protocol::P2p(id) if id == peer_id)));
+    }
+
+    #[test]
+    fn candidate_observability_reports_backoff_and_sources() {
+        let mut config = RelayPoolConfig::new(1, 1);
+        config.min_sources = 2;
+        config.rng_seed = Some(13);
+        let mut pool = RelayPool::new(config);
+        let now = Instant::now();
+
+        let update = make_update(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 20)), 16112, RelaySource::AddressGossip);
+        let key = update.key.clone();
+        pool.update_candidates(now, vec![update]);
+        pool.record_failure(&key, now);
+
+        let entries = pool.candidate_observability(now);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, key);
+        assert_eq!(entries[0].source_count, 1);
+        assert!(entries[0].in_backoff);
+        assert!(!entries[0].has_peer_id);
     }
 }

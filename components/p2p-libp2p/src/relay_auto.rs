@@ -21,6 +21,14 @@ struct ActiveReservation {
     relay_peer_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateLogState {
+    Selected,
+    Backoff,
+    InsufficientSources,
+    EligibleNotSelected,
+}
+
 pub async fn run_relay_auto_worker(
     provider: Arc<dyn Libp2pStreamProvider>,
     source: Arc<dyn RelayCandidateSource>,
@@ -45,6 +53,7 @@ pub async fn run_relay_auto_worker(
     let mut pool = RelayPool::new(pool_config);
     let mut backoff = ReservationManager::new(AUTO_RELAY_BASE_BACKOFF, AUTO_RELAY_MAX_BACKOFF);
     let mut active: HashMap<String, ActiveReservation> = HashMap::new();
+    let mut candidate_log_states: HashMap<String, CandidateLogState> = HashMap::new();
     let metrics = provider.metrics();
 
     loop {
@@ -94,6 +103,44 @@ pub async fn run_relay_auto_worker(
         } else if has_candidates && min_sources > 1 {
             debug!("libp2p relay auto: insufficient multi-source relay candidates (min_sources={})", min_sources);
         }
+        let mut observed_candidate_keys: HashSet<String> = HashSet::new();
+        for candidate in pool.candidate_observability(now) {
+            observed_candidate_keys.insert(candidate.key.clone());
+            let state = if desired_keys.contains(&candidate.key) {
+                CandidateLogState::Selected
+            } else if candidate.in_backoff {
+                CandidateLogState::Backoff
+            } else if candidate.source_count < min_sources {
+                CandidateLogState::InsufficientSources
+            } else {
+                CandidateLogState::EligibleNotSelected
+            };
+
+            if candidate_log_states.get(&candidate.key).copied() == Some(state) {
+                continue;
+            }
+            candidate_log_states.insert(candidate.key.clone(), state);
+
+            match state {
+                CandidateLogState::Selected => info!(
+                    "libp2p relay auto: candidate {} state=selected sources={}/{} has_peer_id={} score={:.2}",
+                    candidate.key, candidate.source_count, min_sources, candidate.has_peer_id, candidate.score
+                ),
+                CandidateLogState::Backoff => info!(
+                    "libp2p relay auto: candidate {} state=backoff sources={}/{} has_peer_id={} score={:.2}",
+                    candidate.key, candidate.source_count, min_sources, candidate.has_peer_id, candidate.score
+                ),
+                CandidateLogState::InsufficientSources => info!(
+                    "libp2p relay auto: candidate {} state=insufficient_sources sources={}/{} has_peer_id={} score={:.2}",
+                    candidate.key, candidate.source_count, min_sources, candidate.has_peer_id, candidate.score
+                ),
+                CandidateLogState::EligibleNotSelected => info!(
+                    "libp2p relay auto: candidate {} state=eligible_not_selected sources={}/{} has_peer_id={} score={:.2}",
+                    candidate.key, candidate.source_count, min_sources, candidate.has_peer_id, candidate.score
+                ),
+            }
+        }
+        candidate_log_states.retain(|key, _| observed_candidate_keys.contains(key));
 
         // Release reservations that are no longer desired or are rotated out.
         let mut released = Vec::new();
