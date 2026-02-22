@@ -707,6 +707,14 @@ grep -E "Connecting to relay target|Connecting to 24[0-9]\\." /tmp/kaspa-a.log |
 
 ## Critical Configuration Notes
 
+### NAT Behavior Primer (Brief)
+
+- NAT rewrites private source IP/port to a public mapping and usually blocks unsolicited inbound.
+- DCUtR depends on compatible NAT behavior on both private nodes.
+- Full-cone (endpoint-independent mapping/filtering) gives the highest success rate for hole punching.
+- Symmetric or strict endpoint-dependent NATs commonly cause repeated DCUtR failures even when config is correct.
+- In this lab, if direct upgrade is unstable, verify NAT mode first before changing node settings.
+
 ### Environment Variable is REQUIRED
 
 **You MUST use the environment variable, not just the CLI flag:**
