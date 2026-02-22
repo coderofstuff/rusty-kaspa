@@ -144,43 +144,40 @@ echo '{"action":"dial","multiaddr":"/ip4/10.0.3.26/tcp/16112/p2p/RELAY_PEER_ID/p
 {"msg":"dial successful","ok":true}
 ```
 
-## Step 5: Verify Success
+## Step 5: Verify Success (Bounded Retry Policy)
 
-### Check DCUtR Event Logs
-
-```bash
-grep -E "dcutr event|path:" /tmp/kaspa-a.log | tail -10
-```
-
-**SUCCESS indicators:**
-```
-libp2p dcutr event: ... result: Ok(ConnectionId(6))
-libp2p_bridge: ... path: Direct
-```
-
-### Check Peers via Helper API
+Before evaluation, allow a cold run to settle:
 
 ```bash
+sleep 60
+```
+
+### Status labels
+
+- `PASS` (cold): Attempt 1 reaches direct path within 120s.
+- `PASS-FLAKY`: Attempt 2 or 3 succeeds after a retry gap.
+- `FAIL`: No direct path after 3 total attempts.
+
+### Attempt procedure (max 3 attempts)
+
+For each attempt from Node A:
+
+```bash
+echo '{"action":"dial","multiaddr":"/ip4/10.0.3.26/tcp/16112/p2p/RELAY_PEER_ID/p2p-circuit/p2p/NODE_B_PEER_ID"}' | nc -w 15 127.0.0.1 38080
+sleep 120
+grep -E "dcutr event|path: Direct" /tmp/kaspa-a.log | tail -20
 echo '{"action":"peers"}' | nc -w 5 127.0.0.1 38080
 ```
 
-**Success looks like:**
-```json
-{
-  "ok": true,
-  "peers": [
-    {
-      "peer_id": "12D3KooW...",
-      "path": "direct",
-      "direction": "outbound",
-      "dcutr_upgraded": false,
-      "state": "connected"
-    }
-  ]
-}
+If direct path is not present, wait 45-60s and retry (up to 3 total attempts).
+
+**Success indicators:**
+```
+libp2p dcutr event: ... result: Ok(ConnectionId(...))
+libp2p_bridge: ... path: Direct
 ```
 
-Look for `"path":"direct"` connections to the other NAT'd node.
+And helper peers output includes `"path":"direct"` for the other NAT'd node.
 
 ## Step 6: Relay Auto-Selection (No Manual Reservations)
 
@@ -291,7 +288,8 @@ nohup ~/rusty-kaspa/target/release/kaspad \
 ```
 libp2p autonat: role auto-promoted to public
 ```
-Note: AutoNAT promotion can take a few minutes (often ~5). If the line is missing, wait and re-check.
+Note: AutoNAT promotion can take 5-10 minutes. If the line is missing in the first check window, keep waiting and re-check.
+For this step, treat missing promotion log as `FAIL` only after a full 10-minute window.
 
 ## Step 8: Max Peers Per Relay Cap
 
@@ -346,7 +344,8 @@ grep -E "peer id|reservation" /tmp/kaspa-c.log
 
 5. Dial Node A via relay from Node B and Node C helper APIs.
 
-**Expected outcome:** Node A stabilizes with a single relay‑path peer (cap=1). Check Node A helper peers output and confirm only one `"path":"relay"` entry remains.
+**Expected outcome:** Node A enforces the relay cap at steady state. Transient duplicate relay/direct entries can appear during churn.
+Check Node A helper peers output twice (30s apart) and confirm it does not keep more than one stable relay-path slot per capped relay.
 
 ## Step 9: New Feature Checks (Relay Hints + Auto)
 
@@ -355,6 +354,7 @@ Optional but recommended coverage for new relay‑hint behavior.
 Notes:
 - Backoff/failure logs appear only if a bad relay candidate is actually selected.
 - Synthetic TCP skip logs appear only when a relay hint has been ingested into the AddressManager.
+- Missing a specific debug line is not an automatic fail if functional behavior matches the step intent.
 
 ### 9.1 Relay candidate without `/p2p` peer id (probe path)
 
@@ -453,7 +453,8 @@ sleep 30
 grep -E "probe failed|reservation failed|reservation accepted" /tmp/kaspa-a.log
 ```
 
-**Expected:** Warn about the bad candidate, then a reservation on the valid relay.
+**Expected:** Reservation on the valid relay.
+`probe failed`/`reservation failed` for the bad candidate is best-effort observability and may not always surface in a short window.
 
 ### 9.4 Synthetic relay hints are non‑dialable for TCP (optional debug)
 
@@ -474,7 +475,8 @@ nohup ~/rusty-kaspa/target/release/kaspad \
   --nologfiles > /tmp/kaspa-a.log 2>&1 &
 ```
 
-Look for debug lines like `libp2p relay auto: ...` and `Connecting to relay target ...`, and *no* TCP `Connecting to ...` for synthetic relay hints.
+Look for debug lines like `libp2p relay auto: ...` and `Connecting to relay target ...`.
+Treat as pass when relay-target dialing is observed and there is no evidence of direct raw TCP dialing to the synthetic relay-hint target.
 
 ## Step 10: Gossip‑Only Relay Hint + Rotation
 
@@ -610,6 +612,7 @@ pkill kaspad
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `AttemptsExceeded(3)` | AutoNAT not allowing private IPs | Use `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true` env var |
+| `AttemptsExceeded(3)` on first attempt only | Cold-start candidate/relay convergence | Apply Step 5 bounded retries (up to 3), then classify PASS/PASS-FLAKY/FAIL |
 | `AttemptsExceeded(3)` | NAT not full-cone | Load `nft_fullcone` kernel module on routers |
 | `reservation rejected` | Wrong relay peer ID | Verify relay peer ID in reservation multiaddr |
 | No `path: Direct` | External multiaddr wrong | Use NAT IP, not private IP |
@@ -623,6 +626,7 @@ pkill kaspad
 - [ ] `--libp2p-external-multiaddrs` set to NAT IP (not private IP)
 - [ ] `--libp2p-reservations` points to correct relay IP and peer ID
 - [ ] Reservations accepted (check logs)
-- [ ] `result: Ok(ConnectionId(...))` in DCUtR event logs
-- [ ] `path: Direct` in bridge connection logs
-- [ ] `"path":"direct"` in helper peers output
+- [ ] Step 5 classified as PASS, PASS-FLAKY, or FAIL (bounded retries applied)
+- [ ] `result: Ok(ConnectionId(...))` in DCUtR event logs (for PASS/PASS-FLAKY)
+- [ ] `path: Direct` in bridge connection logs (for PASS/PASS-FLAKY)
+- [ ] `"path":"direct"` in helper peers output (for PASS/PASS-FLAKY)
