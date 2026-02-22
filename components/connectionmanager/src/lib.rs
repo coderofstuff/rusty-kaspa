@@ -84,8 +84,6 @@ pub struct ConnectionManager {
     relay_inbound_cap: usize,
     /// Soft cap for inbound libp2p connections without a parsed relay id.
     relay_inbound_unknown_cap: usize,
-    is_private_role: bool,
-    libp2p_inbound_cap_private: usize,
     dns_seeders: &'static [&'static str],
     default_port: u16,
     address_manager: Arc<ParkingLotMutex<AddressManager>>,
@@ -135,15 +133,12 @@ impl ConnectionManager {
         address_manager: Arc<ParkingLotMutex<AddressManager>>,
     ) -> Arc<Self> {
         let (tx, rx) = unbounded_channel::<()>();
-        let role_config = current_role_config();
         let manager = Arc::new(Self {
             p2p_adaptor,
             outbound_target,
             inbound_limit,
             relay_inbound_cap: relay_inbound_cap.unwrap_or(4),
             relay_inbound_unknown_cap: relay_inbound_unknown_cap.unwrap_or(8),
-            is_private_role: role_config.is_private,
-            libp2p_inbound_cap_private: role_config.libp2p_inbound_cap_private,
             address_manager,
             connection_requests: Default::default(),
             relay_target_cooldowns: TokioMutex::new(HashMap::new()),
@@ -498,8 +493,9 @@ impl ConnectionManager {
             libp2p_peers.retain(|p| !keep.contains(&p.key()));
         }
 
-        if self.is_private_role {
-            let private_cap = self.libp2p_inbound_cap_private.min(self.inbound_limit.max(1));
+        let role_config = current_role_config();
+        if role_config.is_private {
+            let private_cap = Self::private_libp2p_cap(self.inbound_limit, role_config.libp2p_inbound_cap_private);
             let to_drop = Self::drop_libp2p_over_cap(&libp2p_peers, private_cap);
             if !to_drop.is_empty() {
                 let drop_keys: HashSet<_> = to_drop.iter().map(|peer| peer.key()).collect();
@@ -507,7 +503,7 @@ impl ConnectionManager {
                 libp2p_peers.retain(|p| !drop_keys.contains(&p.key()));
             }
         } else {
-            let libp2p_cap = (self.inbound_limit / 2).max(1);
+            let libp2p_cap = Self::public_libp2p_cap(self.inbound_limit);
             let to_drop = Self::drop_libp2p_over_cap(&libp2p_peers, libp2p_cap);
             if !to_drop.is_empty() {
                 let drop_keys: HashSet<_> = to_drop.iter().map(|peer| peer.key()).collect();
@@ -551,6 +547,14 @@ impl ConnectionManager {
 
     fn drop_libp2p_over_cap<'a>(peers: &'a [&Peer], cap: usize) -> Vec<&'a Peer> {
         if peers.len() > cap { peers.choose_multiple(&mut thread_rng(), peers.len() - cap).cloned().collect_vec() } else { Vec::new() }
+    }
+
+    fn private_libp2p_cap(inbound_limit: usize, private_role_cap: usize) -> usize {
+        private_role_cap.min(inbound_limit.max(1))
+    }
+
+    fn public_libp2p_cap(inbound_limit: usize) -> usize {
+        (inbound_limit / 2).max(1)
     }
 
     fn relay_overflow<'a>(peers: &'a [&Peer], per_relay_cap: usize, unknown_cap: usize) -> Vec<&'a Peer> {
@@ -669,6 +673,7 @@ mod tests {
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::str::FromStr;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
     fn make_peer_with_path(path: PathKind, ip: Ipv4Addr, caps: Capabilities) -> Peer {
@@ -688,6 +693,8 @@ mod tests {
         let path = PathKind::Relay { relay_id: relay_id.map(|id| id.to_string()) };
         make_peer_with_path(path, Ipv4Addr::new(127, 0, 0, 1), Capabilities { libp2p: true })
     }
+
+    static ROLE_CONFIG_TEST_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn relay_overflow_drops_expected_counts() {
@@ -820,5 +827,38 @@ mod tests {
         assert_eq!(target.target_peer_id, "12D3KooTarget");
         assert_eq!(target.relay_key, "203.0.113.9:16112");
         assert_eq!(target.relay_peer_id.as_deref(), Some("12D3KooRelay"));
+    }
+
+    #[test]
+    fn private_libp2p_cap_respects_inbound_limit() {
+        assert_eq!(ConnectionManager::private_libp2p_cap(16, 8), 8);
+        assert_eq!(ConnectionManager::private_libp2p_cap(4, 8), 4);
+        assert_eq!(ConnectionManager::private_libp2p_cap(0, 8), 1);
+    }
+
+    #[test]
+    fn public_libp2p_cap_has_floor_of_one() {
+        assert_eq!(ConnectionManager::public_libp2p_cap(16), 8);
+        assert_eq!(ConnectionManager::public_libp2p_cap(3), 1);
+        assert_eq!(ConnectionManager::public_libp2p_cap(0), 1);
+    }
+
+    #[test]
+    fn role_config_updates_are_visible_immediately() {
+        let guard = ROLE_CONFIG_TEST_GUARD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let original = current_role_config();
+
+        set_libp2p_role_config(Libp2pRoleConfig { is_private: true, libp2p_inbound_cap_private: 5 });
+        let updated_private = current_role_config();
+        assert!(updated_private.is_private);
+        assert_eq!(updated_private.libp2p_inbound_cap_private, 5);
+
+        set_libp2p_role_config(Libp2pRoleConfig { is_private: false, libp2p_inbound_cap_private: 11 });
+        let updated_public = current_role_config();
+        assert!(!updated_public.is_private);
+        assert_eq!(updated_public.libp2p_inbound_cap_private, 11);
+
+        set_libp2p_role_config(original);
+        drop(guard);
     }
 }
