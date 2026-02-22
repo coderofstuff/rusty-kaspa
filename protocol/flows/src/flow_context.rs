@@ -466,13 +466,9 @@ impl FlowContext {
     }
 
     fn normalize_libp2p_address(&self, address: NetAddress) -> NetAddress {
-        let is_private = matches!(address.relay_role, Some(RelayRole::Private));
         let Some(peer_id) = address.libp2p_peer_id.as_deref() else {
             return address;
         };
-        if !is_private {
-            return address;
-        }
         if address.ip.is_publicly_routable() {
             return address;
         }
@@ -956,7 +952,7 @@ impl ConnectionInitializer for FlowContext {
         if router.is_outbound() || peer_version.address.is_some() {
             let mut address_manager = self.address_manager.lock();
 
-            if router.is_outbound() {
+            if router.is_outbound() && !libp2p_peer {
                 let mut outbound_address: NetAddress = router.net_address().into();
                 if peer_version.services != 0 {
                     outbound_address.set_services(peer_version.services);

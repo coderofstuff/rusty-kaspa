@@ -45,11 +45,11 @@ const DEFAULT_RELAY_CANDIDATE_TTL: Duration = Duration::from_secs(30 * 60);
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Libp2pMode {
-    #[default]
     Off,
     Full,
     /// Alias for full until a narrower helper-only mode is introduced.
     Helper,
+    #[default]
     Bridge,
 }
 
@@ -137,7 +137,7 @@ pub struct Libp2pArgs {
 impl Default for Libp2pArgs {
     fn default() -> Self {
         Self {
-            libp2p_mode: Libp2pMode::Off,
+            libp2p_mode: Libp2pMode::Bridge,
             libp2p_role: Libp2pRole::Auto,
             libp2p_mode_set_from_cli: false,
             libp2p_role_set_from_cli: false,
@@ -512,7 +512,14 @@ impl AsyncService for Libp2pNodeService {
                     log::info!("libp2p provider initialised; starting node service");
                     break provider.clone();
                 }
-                sleep(Duration::from_millis(50)).await;
+                tokio::select! {
+                    _ = self.shutdown.listener.clone() => {
+                        return Err(AsyncServiceError::Service(
+                            "libp2p node service stopped while waiting for provider initialization".to_owned(),
+                        ));
+                    }
+                    _ = sleep(Duration::from_millis(50)) => {}
+                }
             };
 
             let relay_port = self.config.listen_addresses.first().map(|addr| addr.port());
@@ -617,7 +624,14 @@ impl AsyncService for Libp2pNodeService {
                     log::info!("libp2p connection handler available; wiring inbound bridge");
                     break handler;
                 }
-                sleep(Duration::from_millis(50)).await;
+                tokio::select! {
+                    _ = self.shutdown.listener.clone() => {
+                        return Err(AsyncServiceError::Service(
+                            "libp2p node service stopped while waiting for connection handler".to_owned(),
+                        ));
+                    }
+                    _ = sleep(Duration::from_millis(50)) => {}
+                }
             };
 
             let mut svc = kaspa_p2p_libp2p::Libp2pService::with_provider(self.config.clone(), provider)
@@ -726,6 +740,14 @@ mod tests {
         remove_env_var("KASPAD_LIBP2P_RELAY_MIN_SOURCES");
         remove_env_var("KASPAD_LIBP2P_RELAY_RNG_SEED");
         remove_env_var("KASPAD_LIBP2P_ROLE");
+    }
+
+    #[test]
+    fn libp2p_default_mode_is_bridge() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        remove_env_var("KASPAD_LIBP2P_MODE");
+        let cfg = libp2p_config_from_args(&Libp2pArgs::default(), Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
+        assert_eq!(cfg.mode, AdapterMode::Bridge);
     }
 
     #[test]
