@@ -274,10 +274,11 @@ impl ConnectionManager {
                     break;
                 };
                 if let Some((dial_addr, relay_target)) = Self::relay_dial_plan(&net_addr) {
-                    if let Some(relay_peer_id) = relay_target.relay_peer_id.as_ref()
-                        && !active_libp2p_peer_ids.contains(relay_peer_id)
-                    {
-                        continue;
+                    if Self::relay_hint_requires_bootstrap(relay_target.relay_peer_id.as_deref(), &active_libp2p_peer_ids) {
+                        debug!(
+                            "Relay hint {} references relay peer {:?} without active libp2p session; allowing bootstrap dial",
+                            relay_target.relay_key, relay_target.relay_peer_id
+                        );
                     }
                     if used_relays.contains(&relay_target.relay_key) {
                         continue;
@@ -412,6 +413,10 @@ impl ConnectionManager {
             }
         }
         None
+    }
+
+    fn relay_hint_requires_bootstrap(relay_peer_id: Option<&str>, active_libp2p_peer_ids: &HashSet<String>) -> bool {
+        relay_peer_id.is_some_and(|relay_peer_id| !active_libp2p_peer_ids.contains(relay_peer_id))
     }
 
     fn parse_multiaddr_ip_port(hint: &str) -> Option<(IpAddr, u16)> {
@@ -791,6 +796,17 @@ mod tests {
         let hint = "/ip4/203.0.113.9/tcp/16112/p2p/12D3KooRelay/p2p-circuit";
         assert_eq!(ConnectionManager::relay_hint_peer_id(hint).as_deref(), Some("12D3KooRelay"));
         assert!(ConnectionManager::relay_hint_peer_id("203.0.113.9:16112").is_none());
+    }
+
+    #[test]
+    fn relay_hint_bootstrap_detection_requires_active_relay_session() {
+        let relay_peer_id = "12D3KooRelay";
+        let mut active = HashSet::new();
+        assert!(ConnectionManager::relay_hint_requires_bootstrap(Some(relay_peer_id), &active));
+
+        active.insert(relay_peer_id.to_string());
+        assert!(!ConnectionManager::relay_hint_requires_bootstrap(Some(relay_peer_id), &active));
+        assert!(!ConnectionManager::relay_hint_requires_bootstrap(None, &active));
     }
 
     #[test]
