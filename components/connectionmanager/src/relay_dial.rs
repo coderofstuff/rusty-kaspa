@@ -7,6 +7,7 @@ use std::{
 use kaspa_addressmanager::NetAddress;
 use kaspa_p2p_lib::{PathKind, Peer};
 use kaspa_utils::networking::{NET_ADDRESS_SERVICE_LIBP2P_RELAY, RelayRole, is_synthetic_relay_ip};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::ConnectionManager;
 
@@ -173,45 +174,86 @@ impl ConnectionManager {
     }
 
     pub(super) async fn relay_dial_allowed(&self, target: &RelayDialTarget, now: Instant) -> bool {
+        Self::relay_dial_allowed_with_gates(
+            &self.relay_target_cooldowns,
+            &self.relay_hint_cooldowns,
+            &self.relay_dial_budget,
+            target,
+            now,
+        )
+        .await
+    }
+
+    pub(super) async fn relay_dial_allowed_with_gates(
+        relay_target_cooldowns: &AsyncMutex<HashMap<String, Instant>>,
+        relay_hint_cooldowns: &AsyncMutex<HashMap<String, Instant>>,
+        relay_dial_budget: &AsyncMutex<RelayDialBudget>,
+        target: &RelayDialTarget,
+        now: Instant,
+    ) -> bool {
         {
-            let mut cooldowns = self.relay_target_cooldowns.lock().await;
+            let mut cooldowns = relay_target_cooldowns.lock().await;
             if !Self::relay_cooldown_allows(&mut cooldowns, &target.target_peer_id, now) {
                 return false;
             }
         }
         {
-            let mut cooldowns = self.relay_hint_cooldowns.lock().await;
+            let mut cooldowns = relay_hint_cooldowns.lock().await;
             if !Self::relay_cooldown_allows(&mut cooldowns, &target.relay_key, now) {
                 return false;
             }
         }
 
-        let mut budget = self.relay_dial_budget.lock().await;
+        let mut budget = relay_dial_budget.lock().await;
         budget.allow(now)
     }
 
     pub(super) async fn record_relay_dial_success(&self, target: &RelayDialTarget) {
+        Self::record_relay_dial_success_with_gates(
+            &self.relay_target_cooldowns,
+            &self.relay_hint_cooldowns,
+            &self.relay_peer_id_by_key,
+            target,
+        )
+        .await;
+    }
+
+    pub(super) async fn record_relay_dial_success_with_gates(
+        relay_target_cooldowns: &AsyncMutex<HashMap<String, Instant>>,
+        relay_hint_cooldowns: &AsyncMutex<HashMap<String, Instant>>,
+        relay_peer_id_by_key: &AsyncMutex<HashMap<String, String>>,
+        target: &RelayDialTarget,
+    ) {
         if let Some(relay_peer_id) = target.relay_peer_id.as_ref() {
-            self.relay_peer_id_by_key.lock().await.insert(target.relay_key.clone(), relay_peer_id.clone());
+            relay_peer_id_by_key.lock().await.insert(target.relay_key.clone(), relay_peer_id.clone());
         }
         {
-            let mut cooldowns = self.relay_target_cooldowns.lock().await;
+            let mut cooldowns = relay_target_cooldowns.lock().await;
             Self::clear_relay_cooldown(&mut cooldowns, &target.target_peer_id);
         }
         {
-            let mut cooldowns = self.relay_hint_cooldowns.lock().await;
+            let mut cooldowns = relay_hint_cooldowns.lock().await;
             Self::clear_relay_cooldown(&mut cooldowns, &target.relay_key);
         }
     }
 
     pub(super) async fn record_relay_dial_failure(&self, target: &RelayDialTarget, now: Instant) {
+        Self::record_relay_dial_failure_with_gates(&self.relay_target_cooldowns, &self.relay_hint_cooldowns, target, now).await;
+    }
+
+    pub(super) async fn record_relay_dial_failure_with_gates(
+        relay_target_cooldowns: &AsyncMutex<HashMap<String, Instant>>,
+        relay_hint_cooldowns: &AsyncMutex<HashMap<String, Instant>>,
+        target: &RelayDialTarget,
+        now: Instant,
+    ) {
         let deadline = now + RELAY_DIAL_COOLDOWN;
         {
-            let mut cooldowns = self.relay_target_cooldowns.lock().await;
+            let mut cooldowns = relay_target_cooldowns.lock().await;
             Self::set_relay_cooldown(&mut cooldowns, &target.target_peer_id, deadline);
         }
         {
-            let mut cooldowns = self.relay_hint_cooldowns.lock().await;
+            let mut cooldowns = relay_hint_cooldowns.lock().await;
             Self::set_relay_cooldown(&mut cooldowns, &target.relay_key, deadline);
         }
     }
@@ -226,6 +268,7 @@ pub(crate) mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::str::FromStr;
     use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
 
     fn make_peer_with_path_and_direction(path: PathKind, ip: Ipv4Addr, caps: Capabilities, is_outbound: bool) -> Peer {
         let metadata = TransportMetadata { path, capabilities: caps, ..Default::default() };
@@ -485,5 +528,80 @@ pub(crate) mod tests {
         ConnectionManager::clear_relay_cooldown(&mut hint_cooldowns, &target.relay_key);
         assert!(!target_cooldowns.contains_key(&target.target_peer_id));
         assert!(!hint_cooldowns.contains_key(&target.relay_key));
+    }
+
+    #[tokio::test]
+    async fn relay_dial_allowed_with_gates_honors_cooldowns_and_budget() {
+        let target = RelayDialTarget {
+            target_peer_id: "12D3KooTarget".to_string(),
+            relay_key: "203.0.113.9:16112".to_string(),
+            relay_peer_id: Some("12D3KooRelay".to_string()),
+            diversity_key: "12D3KooRelay".to_string(),
+        };
+        let now = Instant::now();
+
+        let target_cooldowns = AsyncMutex::new(HashMap::new());
+        let hint_cooldowns = AsyncMutex::new(HashMap::new());
+        let budget = AsyncMutex::new(RelayDialBudget { window_start: now, count: 0 });
+
+        {
+            let mut cooldowns = target_cooldowns.lock().await;
+            cooldowns.insert(target.target_peer_id.clone(), now + Duration::from_secs(30));
+        }
+
+        assert!(!ConnectionManager::relay_dial_allowed_with_gates(&target_cooldowns, &hint_cooldowns, &budget, &target, now).await);
+
+        {
+            let mut cooldowns = target_cooldowns.lock().await;
+            cooldowns.insert(target.target_peer_id.clone(), now - Duration::from_secs(1));
+        }
+
+        for _ in 0..RELAY_DIAL_MAX_PER_WINDOW {
+            assert!(ConnectionManager::relay_dial_allowed_with_gates(&target_cooldowns, &hint_cooldowns, &budget, &target, now).await);
+        }
+        assert!(!ConnectionManager::relay_dial_allowed_with_gates(&target_cooldowns, &hint_cooldowns, &budget, &target, now).await);
+    }
+
+    #[tokio::test]
+    async fn record_relay_dial_failure_with_gates_sets_cooldowns() {
+        let target = RelayDialTarget {
+            target_peer_id: "12D3KooTarget".to_string(),
+            relay_key: "203.0.113.9:16112".to_string(),
+            relay_peer_id: None,
+            diversity_key: "203.0.113.9:16112".to_string(),
+        };
+        let now = Instant::now();
+
+        let target_cooldowns = AsyncMutex::new(HashMap::new());
+        let hint_cooldowns = AsyncMutex::new(HashMap::new());
+
+        ConnectionManager::record_relay_dial_failure_with_gates(&target_cooldowns, &hint_cooldowns, &target, now).await;
+
+        let target_deadline = target_cooldowns.lock().await.get(&target.target_peer_id).copied();
+        let hint_deadline = hint_cooldowns.lock().await.get(&target.relay_key).copied();
+        assert_eq!(target_deadline, Some(now + RELAY_DIAL_COOLDOWN));
+        assert_eq!(hint_deadline, Some(now + RELAY_DIAL_COOLDOWN));
+    }
+
+    #[tokio::test]
+    async fn record_relay_dial_success_with_gates_clears_cooldowns_and_persists_peer_id() {
+        let target = RelayDialTarget {
+            target_peer_id: "12D3KooTarget".to_string(),
+            relay_key: "203.0.113.9:16112".to_string(),
+            relay_peer_id: Some("12D3KooRelay".to_string()),
+            diversity_key: "12D3KooRelay".to_string(),
+        };
+        let now = Instant::now();
+
+        let target_cooldowns = AsyncMutex::new(HashMap::from([(target.target_peer_id.clone(), now + Duration::from_secs(30))]));
+        let hint_cooldowns = AsyncMutex::new(HashMap::from([(target.relay_key.clone(), now + Duration::from_secs(30))]));
+        let relay_peer_id_by_key = AsyncMutex::new(HashMap::new());
+
+        ConnectionManager::record_relay_dial_success_with_gates(&target_cooldowns, &hint_cooldowns, &relay_peer_id_by_key, &target)
+            .await;
+
+        assert!(!target_cooldowns.lock().await.contains_key(&target.target_peer_id));
+        assert!(!hint_cooldowns.lock().await.contains_key(&target.relay_key));
+        assert_eq!(relay_peer_id_by_key.lock().await.get(&target.relay_key).cloned(), target.relay_peer_id);
     }
 }

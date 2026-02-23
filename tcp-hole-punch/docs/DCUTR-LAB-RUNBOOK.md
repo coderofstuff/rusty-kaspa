@@ -68,6 +68,8 @@ If you run `cargo clean`, rebuild with the same `--features libp2p` command agai
 
 SSH to relay and run:
 
+`KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true` is **lab-only**. It allows AutoNAT to accept private/NATed observations in this topology. Do not keep it set for normal/public deployments.
+
 ```bash
 # Clean any existing instance
 pkill -9 kaspad
