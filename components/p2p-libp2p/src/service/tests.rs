@@ -1,6 +1,8 @@
 use super::Libp2pService;
 use super::helper::{HELPER_MAX_LINE, handle_helper_connection};
-use super::inbound::{INBOUND_LISTEN_MAX_RETRYABLE_ERRORS, InboundListenErrorAction, inbound_listen_error_action};
+use super::inbound::{
+    INBOUND_LISTEN_MAX_RETRYABLE_ERRORS, InboundListenErrorAction, inbound_listen_error_action, start_inbound_bridge,
+};
 use super::reservations::{ReservationState, refresh_reservations, reservation_worker};
 
 use std::collections::VecDeque;
@@ -11,9 +13,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use futures_util::future::BoxFuture;
+use kaspa_p2p_lib::common::ProtocolError;
+use kaspa_p2p_lib::{Adaptor, ConnectionInitializer, DirectMetadataFactory, Hub, Router, TcpConnector};
 use libp2p::{Multiaddr, PeerId};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, duplex};
 use tokio::time::Duration;
+use tonic::async_trait;
 
 use crate::config::Config;
 use crate::helper_api::HelperApi;
@@ -21,6 +26,7 @@ use crate::metadata::TransportMetadata;
 use crate::reservations::ReservationManager;
 use crate::transport::{BoxedLibp2pStream, Libp2pError, Libp2pStreamProvider, ReservationHandle, StreamDirection};
 use kaspa_utils::networking::NetAddress;
+use kaspa_utils_tower::counters::TowerConnectionCounters;
 
 #[tokio::test]
 async fn start_disabled_returns_disabled() {
@@ -47,6 +53,157 @@ fn inbound_listen_error_action_retries_provider_unavailable_until_limit() {
 
     let action = inbound_listen_error_action(&Libp2pError::ProviderUnavailable, INBOUND_LISTEN_MAX_RETRYABLE_ERRORS);
     assert_eq!(action, InboundListenErrorAction::Abort);
+}
+
+struct AcceptAllInitializer;
+
+#[async_trait]
+impl ConnectionInitializer for AcceptAllInitializer {
+    async fn initialize_connection(&self, _new_router: Arc<Router>) -> Result<(), ProtocolError> {
+        Ok(())
+    }
+}
+
+fn test_connection_handler() -> (Arc<Adaptor>, Arc<kaspa_p2p_lib::ConnectionHandler>) {
+    let adaptor = Adaptor::client_only(
+        Hub::new(),
+        Arc::new(AcceptAllInitializer),
+        Arc::new(TowerConnectionCounters::default()),
+        Arc::new(DirectMetadataFactory),
+        Arc::new(TcpConnector),
+    );
+    let handler = Arc::new(adaptor.connection_handler());
+    (adaptor, handler)
+}
+
+#[derive(Clone, Copy)]
+enum ListenPlan {
+    ProviderUnavailable,
+    ListenFailed,
+    OutboundOk,
+}
+
+struct ScriptedListenProvider {
+    listen_plans: StdMutex<VecDeque<ListenPlan>>,
+    fallback: ListenPlan,
+    listen_attempts: AtomicUsize,
+}
+
+impl ScriptedListenProvider {
+    fn with_plans(listen_plans: VecDeque<ListenPlan>, fallback: ListenPlan) -> Self {
+        Self { listen_plans: StdMutex::new(listen_plans), fallback, listen_attempts: AtomicUsize::new(0) }
+    }
+
+    fn listen_attempts(&self) -> usize {
+        self.listen_attempts.load(Ordering::SeqCst)
+    }
+}
+
+impl Libp2pStreamProvider for ScriptedListenProvider {
+    fn dial<'a>(&'a self, _address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+        Box::pin(async { Err(Libp2pError::ProviderUnavailable) })
+    }
+
+    fn dial_multiaddr<'a>(
+        &'a self,
+        _address: Multiaddr,
+    ) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
+        Box::pin(async { Err(Libp2pError::ProviderUnavailable) })
+    }
+
+    fn listen<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
+        self.listen_attempts.fetch_add(1, Ordering::SeqCst);
+        let plan = {
+            let mut guard = self.listen_plans.lock().expect("listen plans");
+            guard.pop_front().unwrap_or(self.fallback)
+        };
+
+        Box::pin(async move {
+            match plan {
+                ListenPlan::ProviderUnavailable => Err(Libp2pError::ProviderUnavailable),
+                ListenPlan::ListenFailed => Err(Libp2pError::ListenFailed("address in use".into())),
+                ListenPlan::OutboundOk => {
+                    let (client, _server) = duplex(64);
+                    let stream: BoxedLibp2pStream = Box::new(client);
+                    let closer: Box<dyn FnOnce() + Send> = Box::new(|| {});
+                    Ok((TransportMetadata::default(), StreamDirection::Outbound, closer, stream))
+                }
+            }
+        })
+    }
+
+    fn reserve<'a>(&'a self, _target: Multiaddr) -> BoxFuture<'a, Result<ReservationHandle, Libp2pError>> {
+        Box::pin(async { Err(Libp2pError::ProviderUnavailable) })
+    }
+}
+
+async fn wait_for_listen_attempts(provider: &ScriptedListenProvider, target: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while provider.listen_attempts() < target {
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for listen attempts to reach {target}; got {}", provider.listen_attempts());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn assert_listen_attempts_stable(provider: &ScriptedListenProvider, expected: usize, wait: Duration) {
+    tokio::time::sleep(wait).await;
+    assert_eq!(provider.listen_attempts(), expected, "listen attempts should remain stable after bridge loop terminates");
+}
+
+#[tokio::test]
+async fn inbound_bridge_retries_provider_unavailable_until_bound() {
+    let provider = Arc::new(ScriptedListenProvider::with_plans(VecDeque::new(), ListenPlan::ProviderUnavailable));
+    let (_adaptor, handler) = test_connection_handler();
+
+    start_inbound_bridge(provider.clone(), handler, None);
+
+    let expected = INBOUND_LISTEN_MAX_RETRYABLE_ERRORS + 1;
+    wait_for_listen_attempts(&provider, expected, Duration::from_secs(5)).await;
+    assert_listen_attempts_stable(&provider, expected, Duration::from_millis(300)).await;
+}
+
+#[tokio::test]
+async fn inbound_bridge_aborts_immediately_on_terminal_listen_error() {
+    let provider = Arc::new(ScriptedListenProvider::with_plans(VecDeque::new(), ListenPlan::ListenFailed));
+    let (_adaptor, handler) = test_connection_handler();
+
+    start_inbound_bridge(provider.clone(), handler, None);
+
+    wait_for_listen_attempts(&provider, 1, Duration::from_secs(1)).await;
+    assert_listen_attempts_stable(&provider, 1, Duration::from_millis(300)).await;
+}
+
+#[tokio::test]
+async fn inbound_bridge_resets_retry_counter_after_success() {
+    let provider = Arc::new(ScriptedListenProvider::with_plans(
+        VecDeque::from([ListenPlan::ProviderUnavailable, ListenPlan::ProviderUnavailable, ListenPlan::OutboundOk]),
+        ListenPlan::ProviderUnavailable,
+    ));
+    let (_adaptor, handler) = test_connection_handler();
+
+    start_inbound_bridge(provider.clone(), handler, None);
+
+    // With reset on success: 2 transient errors + 1 success + 11 transient errors to abort.
+    let expected = 3 + INBOUND_LISTEN_MAX_RETRYABLE_ERRORS + 1;
+    wait_for_listen_attempts(&provider, expected, Duration::from_secs(6)).await;
+    assert_listen_attempts_stable(&provider, expected, Duration::from_millis(300)).await;
+}
+
+#[tokio::test]
+async fn inbound_bridge_shutdown_during_backoff_stops_retries() {
+    let provider = Arc::new(ScriptedListenProvider::with_plans(VecDeque::new(), ListenPlan::ProviderUnavailable));
+    let (_adaptor, handler) = test_connection_handler();
+    let (trigger, listener) = triggered::trigger();
+
+    start_inbound_bridge(provider.clone(), handler, Some(listener));
+
+    wait_for_listen_attempts(&provider, 1, Duration::from_secs(1)).await;
+    trigger.trigger();
+    assert_listen_attempts_stable(&provider, 1, Duration::from_millis(300)).await;
 }
 
 #[tokio::test]
