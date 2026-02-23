@@ -11,19 +11,17 @@ use libp2p::autonat;
 use libp2p::core::transport::ListenerId;
 use libp2p::dcutr;
 use libp2p::identify;
-use libp2p::identity::Keypair;
 use libp2p::multiaddr::Multiaddr;
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::SwarmEvent;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
-use libp2p::{PeerId, identity, relay};
+use libp2p::{PeerId, relay};
 use log::{debug, info, warn};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::{fs, io, path::Path};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Mutex, OnceCell, mpsc, oneshot, watch};
@@ -35,6 +33,7 @@ use triggered::{Listener, Trigger};
 
 mod auto_role;
 mod driver;
+mod identity;
 mod multiaddr;
 mod provider;
 mod provider_types;
@@ -44,6 +43,7 @@ mod test_support;
 mod tests;
 
 use self::auto_role::{AUTO_ROLE_REQUIRED_DIRECT, AUTO_ROLE_WINDOW, AutoRoleState};
+pub use self::identity::Libp2pIdentity;
 use self::multiaddr::{
     addr_uses_relay, candidate_ip_addr, default_listen_addr, endpoint_uses_relay, extract_circuit_target_peer, extract_relay_peer,
     extract_remote_dcutr_candidates, insert_relay_peer, is_tcp_dialable, parse_multiaddrs, parse_reservation_targets,
@@ -344,54 +344,6 @@ pub trait Libp2pStreamProvider: Send + Sync {
     fn metrics_snapshot(&self) -> Option<Libp2pMetricsSnapshot> {
         self.metrics().map(|metrics| metrics.snapshot())
     }
-}
-
-/// Libp2p identity wrapper (ed25519).
-#[derive(Clone)]
-pub struct Libp2pIdentity {
-    pub keypair: Keypair,
-    pub peer_id: PeerId,
-    pub persisted_path: Option<std::path::PathBuf>,
-}
-
-impl Libp2pIdentity {
-    pub fn from_config(config: &Config) -> Result<Self, Libp2pError> {
-        match &config.identity {
-            crate::Identity::Ephemeral => {
-                let keypair = identity::Keypair::generate_ed25519();
-                let peer_id = PeerId::from(keypair.public());
-                Ok(Self { keypair, peer_id, persisted_path: None })
-            }
-            crate::Identity::Persisted(path) => {
-                let keypair = load_or_generate_key(path).map_err(|e| Libp2pError::Identity(e.to_string()))?;
-                let peer_id = PeerId::from(keypair.public());
-                Ok(Self { keypair, peer_id, persisted_path: Some(path.clone()) })
-            }
-        }
-    }
-
-    pub fn peer_id_string(&self) -> String {
-        self.peer_id.to_string()
-    }
-}
-
-fn load_or_generate_key(path: &Path) -> io::Result<Keypair> {
-    if let Ok(bytes) = fs::read(path) {
-        return Keypair::from_protobuf_encoding(&bytes).map_err(map_identity_err);
-    }
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let keypair = identity::Keypair::generate_ed25519();
-    let bytes = keypair.to_protobuf_encoding().map_err(map_identity_err)?;
-    fs::write(path, bytes)?;
-    Ok(keypair)
-}
-
-fn map_identity_err(err: impl ToString) -> io::Error {
-    io::Error::other(err.to_string())
 }
 
 const COMMAND_CHANNEL_BOUND: usize = 16;
