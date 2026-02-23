@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn local_dcutr_candidates_prioritize_config_over_observed() {
+    fn local_dcutr_candidates_prioritize_observed_over_config() {
         let (mut driver, _) = test_driver(1);
         let config_addr: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
         let observed_addr: Multiaddr = "/ip4/9.9.9.9/tcp/16112".parse().unwrap();
@@ -782,12 +782,12 @@ mod tests {
         driver.record_local_candidate(observed_addr.clone(), LocalCandidateSource::Observed);
 
         let candidates = driver.local_dcutr_candidates();
-        let expected_first: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
+        let expected_first: Multiaddr = "/ip4/9.9.9.9/tcp/16112".parse().unwrap();
         assert_eq!(candidates.first(), Some(&expected_first));
     }
 
     #[test]
-    fn observed_candidate_with_configured_ip_is_ignored() {
+    fn observed_candidate_with_configured_ip_and_different_port_is_retained() {
         let (mut driver, _) = test_driver(1);
         let config_addr: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
         let observed_addr: Multiaddr = "/ip4/8.8.8.8/tcp/34190".parse().unwrap();
@@ -799,7 +799,8 @@ mod tests {
 
         let candidates = driver.local_dcutr_candidates();
         assert!(candidates.contains(&config_addr));
-        assert!(!candidates.contains(&observed_addr));
+        assert!(candidates.contains(&observed_addr));
+        assert_eq!(candidates.first(), Some(&observed_addr));
     }
 
     #[test]
@@ -2660,22 +2661,19 @@ impl SwarmDriver {
                     && candidate_ip_addr(existing).is_some_and(|existing_ip| existing_ip == candidate_ip)
             });
             if has_config_same_ip {
-                // Only clear the observed address if it is not itself the configured
-                // candidate. Otherwise we can accidentally drop the configured NAT addr.
-                let removed_observed =
-                    !matches!(self.local_candidate_meta.get(&addr).map(|meta| meta.source), Some(LocalCandidateSource::Config));
-                if removed_observed {
-                    self.swarm.remove_external_address(&addr);
-                    self.local_candidate_meta.remove(&addr);
+                // If observed equals the configured candidate exactly, keep config
+                // authoritative and ignore the observed duplicate.
+                let is_exact_config =
+                    matches!(self.local_candidate_meta.get(&addr).map(|meta| meta.source), Some(LocalCandidateSource::Config));
+                if is_exact_config {
+                    info!(
+                        "libp2p dcutr local candidate ignored: addr={} source={:?} reason=config_exact_addr local_candidates={}",
+                        addr,
+                        source,
+                        self.local_dcutr_candidates().len()
+                    );
+                    return;
                 }
-                info!(
-                    "libp2p dcutr local candidate ignored: addr={} source={:?} reason=config_same_ip removed_observed={} local_candidates={}",
-                    addr,
-                    source,
-                    removed_observed,
-                    self.local_dcutr_candidates().len()
-                );
-                return;
             }
 
             // Keep one observed candidate per IP so frequent observed port updates
@@ -3091,8 +3089,8 @@ fn is_dcutr_retry_trigger_error_text(err: &str) -> bool {
 
 fn local_candidate_priority(source: LocalCandidateSource) -> u8 {
     match source {
-        LocalCandidateSource::Config => 3,
-        LocalCandidateSource::Observed => 2,
+        LocalCandidateSource::Observed => 3,
+        LocalCandidateSource::Config => 2,
         LocalCandidateSource::Dynamic => 1,
     }
 }
