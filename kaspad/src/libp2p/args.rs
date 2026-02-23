@@ -7,11 +7,11 @@ use std::{net::SocketAddr, path::PathBuf};
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Libp2pMode {
+    #[default]
     Off,
     Full,
     /// Alias for full until a narrower helper-only mode is introduced.
     Helper,
-    #[default]
     Bridge,
 }
 
@@ -99,7 +99,7 @@ pub struct Libp2pArgs {
 impl Default for Libp2pArgs {
     fn default() -> Self {
         Self {
-            libp2p_mode: Libp2pMode::Bridge,
+            libp2p_mode: Libp2pMode::Off,
             libp2p_role: Libp2pRole::Auto,
             libp2p_mode_set_from_cli: false,
             libp2p_role_set_from_cli: false,

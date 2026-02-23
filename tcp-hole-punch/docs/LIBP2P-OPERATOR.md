@@ -37,6 +37,7 @@
 - Reservations: `--libp2p-reservations` (comma-separated) or `KASPAD_LIBP2P_RESERVATIONS`
 - External announce: `--libp2p-external-multiaddrs`, `--libp2p-advertise-addresses`
 - Inbound caps: `--libp2p-relay-inbound-cap`, `--libp2p-relay-inbound-unknown-cap`
+- Relay selection seed (deterministic lab/debug runs): `--libp2p-relay-rng-seed`, `KASPAD_LIBP2P_RELAY_RNG_SEED`
 - Relay advertise metadata: `--libp2p-relay-advertise-capacity`, `--libp2p-relay-advertise-ttl-ms`
 - Relay advertise env vars: `KASPAD_LIBP2P_RELAY_ADVERTISE_CAPACITY`, `KASPAD_LIBP2P_RELAY_ADVERTISE_TTL_MS`
 - Env overrides all have `KASPAD_LIBP2P_*` prefix; **CLI > env > defaults** for precedence.

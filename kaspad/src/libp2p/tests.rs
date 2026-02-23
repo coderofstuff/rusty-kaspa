@@ -54,11 +54,11 @@ fn libp2p_env_overrides_defaults() {
 }
 
 #[test]
-fn libp2p_default_mode_is_bridge() {
+fn libp2p_default_mode_is_off() {
     let _guard = ENV_LOCK.lock().unwrap();
     remove_env_var("KASPAD_LIBP2P_MODE");
     let cfg = libp2p_config_from_args(&Libp2pArgs::default(), Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
-    assert_eq!(cfg.mode, AdapterMode::Bridge);
+    assert_eq!(cfg.mode, AdapterMode::Off);
 }
 
 #[test]

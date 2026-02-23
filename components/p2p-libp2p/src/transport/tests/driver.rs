@@ -131,6 +131,94 @@ async fn direct_connection_with_existing_relay_marks_dcutr_upgraded() {
 }
 
 #[test]
+fn relay_close_keeps_connected_via_relay_when_other_circuit_remains() {
+    let (mut driver, _) = test_driver(1);
+    let peer = PeerId::random();
+    let relay_a = PeerId::random();
+    let relay_b = PeerId::random();
+
+    let conn_a = make_request_id();
+    let endpoint_a = libp2p::core::ConnectedPoint::Dialer {
+        address: format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay_a}/p2p-circuit/p2p/{peer}").parse().unwrap(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+    let conn_b = make_request_id();
+    let endpoint_b = libp2p::core::ConnectedPoint::Dialer {
+        address: format!("/ip4/198.51.100.2/tcp/16112/p2p/{relay_b}/p2p-circuit/p2p/{peer}").parse().unwrap(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+
+    driver.track_established(peer, &endpoint_a);
+    driver.track_established(peer, &endpoint_b);
+    driver.record_connection(conn_a, peer, &endpoint_a, false);
+    driver.record_connection(conn_b, peer, &endpoint_b, false);
+    assert!(driver.peer_states.get(&peer).expect("peer state").connected_via_relay);
+
+    driver.handle_connection_closed_event(peer, conn_a, endpoint_a);
+
+    assert!(driver.has_relay_connection(peer), "second relay connection should remain");
+    assert!(driver.peer_states.get(&peer).expect("peer state").connected_via_relay);
+
+    driver.handle_connection_closed_event(peer, conn_b, endpoint_b);
+    assert!(!driver.has_relay_connection(peer));
+    assert!(!driver.peer_states.get(&peer).expect("peer state").connected_via_relay);
+}
+
+#[test]
+fn enforce_relay_cap_applies_per_unique_peer() {
+    let (mut driver, _) = test_driver(1);
+    let relay = PeerId::random();
+    let peer_a = PeerId::random();
+    let peer_b = PeerId::random();
+
+    let conn_a = make_request_id();
+    let endpoint_a = libp2p::core::ConnectedPoint::Dialer {
+        address: format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay}/p2p-circuit/p2p/{peer_a}").parse().unwrap(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+    let conn_b = make_request_id();
+    let endpoint_b = libp2p::core::ConnectedPoint::Dialer {
+        address: format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay}/p2p-circuit/p2p/{peer_b}").parse().unwrap(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+
+    driver.record_connection(conn_a, peer_a, &endpoint_a, false);
+    driver.record_connection(conn_b, peer_b, &endpoint_b, false);
+
+    driver.enforce_relay_cap(conn_b);
+    assert!(driver.connections.contains_key(&conn_a), "existing relay peer should remain");
+    assert!(!driver.connections.contains_key(&conn_b), "new relay peer should be dropped by cap");
+
+    let conn_c = make_request_id();
+    let endpoint_c = libp2p::core::ConnectedPoint::Dialer {
+        address: format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay}/p2p-circuit/p2p/{peer_a}").parse().unwrap(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+    driver.record_connection(conn_c, peer_a, &endpoint_c, false);
+    driver.enforce_relay_cap(conn_c);
+    assert!(driver.connections.contains_key(&conn_c), "same peer should not count toward relay diversity cap");
+}
+
+#[tokio::test]
+async fn dialback_uses_live_relay_connections_even_if_state_flag_stale() {
+    let (mut driver, peer) = dialback_ready_driver();
+    driver.peer_states.get_mut(&peer).expect("peer state").connected_via_relay = false;
+    let config_addr: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
+    driver.swarm.add_external_address(config_addr.clone());
+    driver.record_local_candidate(config_addr, LocalCandidateSource::Config);
+
+    driver.maybe_request_dialback(peer);
+
+    assert!(driver.dialback_cooldowns.contains_key(&peer));
+    assert!(driver.peer_states.get(&peer).expect("peer state").connected_via_relay);
+}
+
+#[test]
 fn dcutr_dialback_skips_when_autonat_private() {
     let (mut driver, peer) = dialback_ready_driver();
     driver.autonat_private_until = Some(Instant::now() + Duration::from_secs(60));

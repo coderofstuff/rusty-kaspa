@@ -320,8 +320,8 @@ impl SwarmDriver {
             debug!("libp2p dcutr: skipping dial-back to active relay peer {}", peer_id);
             return;
         }
+        let has_relay_connection = self.has_relay_connection(peer_id);
         if force {
-            let has_relay_connection = self.has_relay_connection(peer_id);
             let state = self.peer_states.entry(peer_id).or_default();
             state.supports_dcutr = true;
             if has_relay_connection {
@@ -329,10 +329,13 @@ impl SwarmDriver {
             }
         }
 
-        let Some(state) = self.peer_states.get(&peer_id) else {
+        let Some(state) = self.peer_states.get_mut(&peer_id) else {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: no peer state");
             return;
         };
+        if has_relay_connection {
+            state.connected_via_relay = true;
+        }
         let supports_dcutr = state.supports_dcutr;
         let connected_via_relay = state.connected_via_relay;
         let outgoing = state.outgoing;
@@ -351,7 +354,7 @@ impl SwarmDriver {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: already have outgoing connection");
             return;
         }
-        if !self.has_relay_connection(peer_id) {
+        if !has_relay_connection {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: no active relay circuit connection");
             self.force_identify_refresh(peer_id, "missing_relay_circuit");
             self.refresh_relay_connection(peer_id, "missing_relay_circuit");

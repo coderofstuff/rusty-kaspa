@@ -123,11 +123,12 @@ impl SwarmDriver {
         }
     }
     pub(super) fn track_closed(&mut self, peer_id: PeerId, endpoint: &libp2p::core::ConnectedPoint) {
+        let relay_connection_remaining = endpoint_uses_relay(endpoint) && self.has_relay_connection(peer_id);
         if let Some(state) = self.peer_states.get_mut(&peer_id) {
             if matches!(endpoint, libp2p::core::ConnectedPoint::Dialer { .. }) && state.outgoing > 0 {
                 state.outgoing -= 1;
             }
-            if endpoint_uses_relay(endpoint) {
+            if endpoint_uses_relay(endpoint) && !relay_connection_remaining {
                 state.connected_via_relay = false;
             }
         }

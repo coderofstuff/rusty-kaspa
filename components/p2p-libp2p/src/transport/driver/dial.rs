@@ -200,8 +200,8 @@ impl SwarmDriver {
     ) {
         self.fail_pending(connection_id, "connection closed before stream");
         self.fail_probe(connection_id, "relay probe connection closed");
-        self.track_closed(peer_id, &endpoint);
         self.connections.remove(&connection_id);
+        self.track_closed(peer_id, &endpoint);
     }
     pub(super) fn handle_outgoing_connection_error_event(&mut self, connection_id: StreamRequestId, error: String) {
         self.fail_pending(connection_id, &error);
