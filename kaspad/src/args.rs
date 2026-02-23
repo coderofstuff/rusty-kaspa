@@ -829,18 +829,16 @@ fn arg_match_many_unwrap_or<T: Clone + Send + Sync + 'static>(m: &clap::ArgMatch
 #[cfg(all(test, feature = "libp2p"))]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_sync::lock_env;
 
     fn clear_libp2p_mode_env() {
-        // SAFETY: ENV_LOCK serializes process-wide environment mutations in this module.
+        // SAFETY: lock_env serializes process-wide environment mutations across test modules.
         unsafe { std::env::remove_var("KASPAD_LIBP2P_MODE") }
     }
 
     #[test]
     fn parse_defaults_libp2p_mode_to_off_when_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         clear_libp2p_mode_env();
 
         let args = Args::parse(["kaspad"]).expect("parse should succeed");
@@ -850,7 +848,7 @@ mod tests {
 
     #[test]
     fn parse_marks_explicit_libp2p_mode_as_cli_set() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         clear_libp2p_mode_env();
 
         let args = Args::parse(["kaspad", "--libp2p-mode=bridge"]).expect("parse should succeed");

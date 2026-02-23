@@ -1,23 +1,22 @@
 use super::config::DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE;
 use super::{Libp2pArgs, Libp2pMode, Libp2pRole, libp2p_config_from_args};
+use crate::test_sync::lock_env;
 use kaspa_p2p_libp2p::{Identity as AdapterIdentity, Mode as AdapterMode, Role as AdapterRole};
-use std::{env, path::Path, sync::Mutex};
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+use std::{env, path::Path};
 
 fn set_env_var(key: &str, value: &str) {
-    // SAFETY: ENV_LOCK serializes all test env mutations in this module.
+    // SAFETY: lock_env serializes process-wide env mutations across test modules.
     unsafe { env::set_var(key, value) }
 }
 
 fn remove_env_var(key: &str) {
-    // SAFETY: ENV_LOCK serializes all test env mutations in this module.
+    // SAFETY: lock_env serializes process-wide env mutations across test modules.
     unsafe { env::remove_var(key) }
 }
 
 #[test]
 fn libp2p_env_overrides_defaults() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = lock_env();
     set_env_var("KASPAD_LIBP2P_MODE", "full");
     set_env_var("KASPAD_LIBP2P_IDENTITY_PATH", "/tmp/libp2p-id.key");
     set_env_var("KASPAD_LIBP2P_HELPER_LISTEN", "127.0.0.1:12345");
@@ -55,7 +54,7 @@ fn libp2p_env_overrides_defaults() {
 
 #[test]
 fn libp2p_default_mode_is_off() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = lock_env();
     remove_env_var("KASPAD_LIBP2P_MODE");
     let cfg = libp2p_config_from_args(&Libp2pArgs::default(), Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
     assert_eq!(cfg.mode, AdapterMode::Off);
@@ -63,7 +62,7 @@ fn libp2p_default_mode_is_off() {
 
 #[test]
 fn libp2p_cli_mode_overrides_env() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = lock_env();
     set_env_var("KASPAD_LIBP2P_MODE", "full");
     let args = Libp2pArgs { libp2p_mode: Libp2pMode::Helper, libp2p_mode_set_from_cli: true, ..Libp2pArgs::default() };
 
@@ -77,7 +76,7 @@ fn libp2p_cli_mode_overrides_env() {
 
 #[test]
 fn libp2p_explicit_default_mode_and_role_override_env() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = lock_env();
     set_env_var("KASPAD_LIBP2P_MODE", "full");
     set_env_var("KASPAD_LIBP2P_ROLE", "public");
 
@@ -99,7 +98,7 @@ fn libp2p_explicit_default_mode_and_role_override_env() {
 
 #[test]
 fn libp2p_role_auto_resolution() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = lock_env();
     let args_public = Libp2pArgs {
         libp2p_mode: Libp2pMode::Full,
         libp2p_helper_listen: Some("127.0.0.1:12345".parse().unwrap()),
