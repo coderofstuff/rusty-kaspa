@@ -6,7 +6,7 @@ use crate::transport::{BoxedLibp2pStream, Libp2pStreamProvider, ReservationHandl
 use crate::{config::Config, transport::Libp2pError};
 use kaspa_p2p_lib::{ConnectionHandler, MetadataConnectInfo, PathKind};
 use libp2p::Multiaddr;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -34,8 +34,33 @@ const RESERVATION_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const RESERVATION_BASE_BACKOFF: Duration = Duration::from_secs(5);
 const RESERVATION_MAX_BACKOFF: Duration = Duration::from_secs(60);
 const INBOUND_LISTEN_RETRY_DELAY: Duration = Duration::from_millis(200);
+const INBOUND_LISTEN_MAX_RETRYABLE_ERRORS: usize = 10;
 const HELPER_MAX_LINE: usize = 8 * 1024;
 const HELPER_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InboundListenErrorAction {
+    Retry { attempt: usize },
+    Abort,
+}
+
+fn inbound_listen_error_action(err: &Libp2pError, retryable_errors: usize) -> InboundListenErrorAction {
+    match err {
+        Libp2pError::ProviderUnavailable => {
+            if retryable_errors < INBOUND_LISTEN_MAX_RETRYABLE_ERRORS {
+                InboundListenErrorAction::Retry { attempt: retryable_errors + 1 }
+            } else {
+                InboundListenErrorAction::Abort
+            }
+        }
+        Libp2pError::Disabled
+        | Libp2pError::ListenFailed(_)
+        | Libp2pError::ReservationFailed(_)
+        | Libp2pError::DialFailed(_)
+        | Libp2pError::Identity(_)
+        | Libp2pError::Multiaddr(_) => InboundListenErrorAction::Abort,
+    }
+}
 
 impl Libp2pService {
     pub fn new(config: Config) -> Self {
@@ -159,6 +184,7 @@ impl Libp2pService {
         let mut shutdown = self.shutdown.clone();
 
         tokio::spawn(async move {
+            let mut retryable_errors = 0usize;
             loop {
                 let listen_fut = provider.listen();
                 let listen_result = if let Some(ref mut shutdown) = shutdown {
@@ -175,6 +201,7 @@ impl Libp2pService {
 
                 match listen_result {
                     Ok((metadata, direction, close, stream)) => {
+                        retryable_errors = 0;
                         match direction {
                             StreamDirection::Outbound => {
                                 // For locally initiated streams, act as the client and connect directly.
@@ -200,20 +227,27 @@ impl Libp2pService {
                             }
                         }
                     }
-                    Err(err) => {
-                        warn!("libp2p inbound listen error: {err}");
-                        if let Some(shutdown) = shutdown.as_mut() {
-                            tokio::select! {
-                                _ = shutdown.clone() => {
-                                    debug!("libp2p inbound bridge shutting down after listen error");
-                                    break;
+                    Err(err) => match inbound_listen_error_action(&err, retryable_errors) {
+                        InboundListenErrorAction::Retry { attempt } => {
+                            retryable_errors = attempt;
+                            warn!("libp2p inbound listen error (retry {attempt}/{INBOUND_LISTEN_MAX_RETRYABLE_ERRORS}): {err}");
+                            if let Some(shutdown) = shutdown.as_mut() {
+                                tokio::select! {
+                                    _ = shutdown.clone() => {
+                                        debug!("libp2p inbound bridge shutting down after listen error");
+                                        break;
+                                    }
+                                    _ = sleep(INBOUND_LISTEN_RETRY_DELAY) => {}
                                 }
-                                _ = sleep(INBOUND_LISTEN_RETRY_DELAY) => {}
+                            } else {
+                                sleep(INBOUND_LISTEN_RETRY_DELAY).await;
                             }
-                        } else {
-                            sleep(INBOUND_LISTEN_RETRY_DELAY).await;
                         }
-                    }
+                        InboundListenErrorAction::Abort => {
+                            error!("libp2p inbound listen terminated: {err}");
+                            break;
+                        }
+                    },
                 }
             }
         });
@@ -477,6 +511,26 @@ mod tests {
         let svc = Libp2pService::new(Config::default());
         let res = svc.start().await;
         assert!(matches!(res, Err(Libp2pError::Disabled)));
+    }
+
+    #[test]
+    fn inbound_listen_error_action_aborts_on_terminal_errors() {
+        let action = inbound_listen_error_action(&Libp2pError::ListenFailed("address in use".into()), 0);
+        assert_eq!(action, InboundListenErrorAction::Abort);
+
+        let action = inbound_listen_error_action(&Libp2pError::Disabled, 0);
+        assert_eq!(action, InboundListenErrorAction::Abort);
+    }
+
+    #[test]
+    fn inbound_listen_error_action_retries_provider_unavailable_until_limit() {
+        for retryable_errors in 0..INBOUND_LISTEN_MAX_RETRYABLE_ERRORS {
+            let action = inbound_listen_error_action(&Libp2pError::ProviderUnavailable, retryable_errors);
+            assert_eq!(action, InboundListenErrorAction::Retry { attempt: retryable_errors + 1 });
+        }
+
+        let action = inbound_listen_error_action(&Libp2pError::ProviderUnavailable, INBOUND_LISTEN_MAX_RETRYABLE_ERRORS);
+        assert_eq!(action, InboundListenErrorAction::Abort);
     }
 
     #[tokio::test]
