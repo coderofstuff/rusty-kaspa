@@ -36,6 +36,8 @@ use triggered::{Listener, Trigger};
 mod auto_role;
 mod driver;
 mod multiaddr;
+mod provider;
+mod provider_types;
 #[cfg(test)]
 mod tests;
 
@@ -46,6 +48,8 @@ use self::multiaddr::{
     relay_id_from_multiaddr, relay_info_from_multiaddr, relay_probe_base, strip_peer_suffix,
 };
 pub use self::multiaddr::{multiaddr_to_metadata, to_multiaddr};
+pub use self::provider::SwarmStreamProvider;
+use self::provider_types::{DialRequest, IncomingStream, PendingProbe, SwarmCommand, metadata_from_endpoint};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Libp2pError {
@@ -403,260 +407,6 @@ const DCUTR_DYNAMIC_CANDIDATE_TTL: Duration = Duration::from_secs(10 * 60);
 const DCUTR_RETRY_BACKOFFS_SECS: [u64; 4] = [2, 5, 10, 20];
 const DCUTR_RETRY_JITTER_MS: u64 = 900;
 
-/// Libp2p stream provider backed by a libp2p swarm.
-pub struct SwarmStreamProvider {
-    config: Config,
-    command_tx: mpsc::Sender<SwarmCommand>,
-    incoming: Mutex<mpsc::Receiver<IncomingStream>>,
-    shutdown: Trigger,
-    task: Mutex<Option<JoinHandle<()>>>,
-    role_updates: Option<watch::Receiver<crate::Role>>,
-    relay_hint_updates: Option<watch::Receiver<Option<String>>>,
-    metrics: Arc<Libp2pMetrics>,
-}
-
-impl SwarmStreamProvider {
-    pub fn new(config: Config, identity: Libp2pIdentity) -> Result<Self, Libp2pError> {
-        let handle = tokio::runtime::Handle::try_current().map_err(|_| Libp2pError::ListenFailed("missing tokio runtime".into()))?;
-        Self::with_handle(config, identity, handle)
-    }
-
-    pub fn with_handle(config: Config, identity: Libp2pIdentity, handle: tokio::runtime::Handle) -> Result<Self, Libp2pError> {
-        let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_BOUND);
-        let (incoming_tx, incoming_rx) = mpsc::channel(INCOMING_CHANNEL_BOUND);
-        let (shutdown, shutdown_listener) = triggered::trigger();
-        let protocol = default_stream_protocol();
-        let metrics = Libp2pMetrics::new();
-        // Pass config to build_streaming_swarm to configure AutoNAT
-        let swarm = build_streaming_swarm(&identity, &config, protocol.clone())?;
-
-        let listen_multiaddrs = if config.listen_addresses.is_empty() {
-            vec![default_listen_addr()]
-        } else {
-            config
-                .listen_addresses
-                .iter()
-                .filter_map(|addr| match to_multiaddr(NetAddress::new((*addr).ip().into(), addr.port())) {
-                    Ok(ma) => Some(ma),
-                    Err(err) => {
-                        warn!("invalid libp2p listen address {}: {err}", addr);
-                        None
-                    }
-                })
-                .collect()
-        };
-        let mut external_multiaddrs = parse_multiaddrs(&config.external_multiaddrs)?;
-        external_multiaddrs.extend(config.advertise_addresses.iter().filter_map(|addr| {
-            match to_multiaddr(NetAddress::new((*addr).ip().into(), addr.port())) {
-                Ok(ma) => Some(ma),
-                Err(err) => {
-                    warn!("invalid libp2p advertise address {}: {err}", addr);
-                    None
-                }
-            }
-        }));
-        let reservations = parse_reservation_targets(&config.reservations)?;
-        let effective_role = if matches!(config.role, crate::Role::Auto) { crate::Role::Private } else { config.role };
-        let (role_tx, role_rx) = watch::channel(effective_role);
-        let (relay_hint_tx, relay_hint_rx) = watch::channel(None);
-        let auto_role_required_autonat = config.autonat.confidence_threshold.max(1);
-        let auto_role_required_direct = AUTO_ROLE_REQUIRED_DIRECT.max(1);
-        let allow_private_addrs = !config.autonat.server_only_if_public;
-        let task = handle.spawn(
-            SwarmDriver::new(
-                swarm,
-                command_rx,
-                incoming_tx,
-                listen_multiaddrs,
-                external_multiaddrs,
-                allow_private_addrs,
-                reservations,
-                role_tx,
-                relay_hint_tx,
-                config.role,
-                config.max_peers_per_relay,
-                AUTO_ROLE_WINDOW,
-                auto_role_required_autonat,
-                auto_role_required_direct,
-                shutdown_listener,
-                Some(metrics.clone()),
-            )
-            .run(),
-        );
-
-        Ok(Self {
-            config,
-            command_tx,
-            incoming: Mutex::new(incoming_rx),
-            shutdown,
-            task: Mutex::new(Some(task)),
-            role_updates: Some(role_rx),
-            relay_hint_updates: Some(relay_hint_rx),
-            metrics,
-        })
-    }
-
-    async fn ensure_listening(&self) -> Result<(), Libp2pError> {
-        let (tx, rx) = oneshot::channel();
-        info!("libp2p ensure listening on configured addresses");
-        self.command_tx
-            .send(SwarmCommand::EnsureListening { respond_to: tx })
-            .await
-            .map_err(|_| Libp2pError::ListenFailed("libp2p driver stopped".into()))?;
-
-        rx.await.map_err(|_| Libp2pError::ListenFailed("libp2p driver stopped".into()))?
-    }
-}
-
-impl Libp2pStreamProvider for SwarmStreamProvider {
-    fn dial<'a>(&'a self, address: NetAddress) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
-        let enabled = self.config.mode.is_enabled();
-        let tx = self.command_tx.clone();
-        Box::pin(async move {
-            if !enabled {
-                return Err(Libp2pError::Disabled);
-            }
-
-            let multiaddr = to_multiaddr(address)?;
-            let (respond_to, rx) = oneshot::channel();
-            tx.send(SwarmCommand::Dial { address: multiaddr, respond_to })
-                .await
-                .map_err(|_| Libp2pError::DialFailed("libp2p driver stopped".into()))?;
-
-            rx.await
-                .unwrap_or_else(|_| Err(Libp2pError::DialFailed("libp2p dial cancelled".into())))
-                .map(|(metadata, _, stream)| (metadata, stream))
-        })
-    }
-
-    fn dial_multiaddr<'a>(
-        &'a self,
-        multiaddr: Multiaddr,
-    ) -> BoxFuture<'a, Result<(TransportMetadata, BoxedLibp2pStream), Libp2pError>> {
-        let enabled = self.config.mode.is_enabled();
-        let tx = self.command_tx.clone();
-        Box::pin(async move {
-            if !enabled {
-                return Err(Libp2pError::Disabled);
-            }
-
-            let (respond_to, rx) = oneshot::channel();
-            tx.send(SwarmCommand::Dial { address: multiaddr, respond_to })
-                .await
-                .map_err(|_| Libp2pError::DialFailed("libp2p driver stopped".into()))?;
-
-            rx.await
-                .unwrap_or_else(|_| Err(Libp2pError::DialFailed("libp2p dial cancelled".into())))
-                .map(|(metadata, _, stream)| (metadata, stream))
-        })
-    }
-
-    fn probe_relay<'a>(&'a self, address: Multiaddr) -> BoxFuture<'a, Result<PeerId, Libp2pError>> {
-        let enabled = self.config.mode.is_enabled();
-        let tx = self.command_tx.clone();
-        Box::pin(async move {
-            if !enabled {
-                return Err(Libp2pError::Disabled);
-            }
-
-            let (respond_to, rx) = oneshot::channel();
-            tx.send(SwarmCommand::ProbeRelay { address, respond_to })
-                .await
-                .map_err(|_| Libp2pError::DialFailed("libp2p driver stopped".into()))?;
-
-            rx.await.unwrap_or_else(|_| Err(Libp2pError::DialFailed("relay probe cancelled".into())))
-        })
-    }
-
-    fn listen<'a>(
-        &'a self,
-    ) -> BoxFuture<'a, Result<(TransportMetadata, StreamDirection, Box<dyn FnOnce() + Send>, BoxedLibp2pStream), Libp2pError>> {
-        let enabled = self.config.mode.is_enabled();
-        let incoming = &self.incoming;
-        let provider = self;
-        Box::pin(async move {
-            if !enabled {
-                return Err(Libp2pError::Disabled);
-            }
-
-            provider.ensure_listening().await?;
-
-            let mut rx = incoming.lock().await;
-            match rx.recv().await {
-                Some(incoming) => {
-                    let closer: Box<dyn FnOnce() + Send> = Box::new(|| {});
-                    Ok((incoming.metadata, incoming.direction, closer, incoming.stream))
-                }
-                None => Err(Libp2pError::ListenFailed("libp2p incoming channel closed".into())),
-            }
-        })
-    }
-
-    fn reserve<'a>(&'a self, target: Multiaddr) -> BoxFuture<'a, Result<ReservationHandle, Libp2pError>> {
-        let enabled = self.config.mode.is_enabled();
-        let tx = self.command_tx.clone();
-        Box::pin(async move {
-            if !enabled {
-                return Err(Libp2pError::Disabled);
-            }
-
-            let (respond_to, rx) = oneshot::channel();
-            tx.send(SwarmCommand::Reserve { target, respond_to })
-                .await
-                .map_err(|_| Libp2pError::ReservationFailed("libp2p driver stopped".into()))?;
-
-            let listener = rx.await.unwrap_or_else(|_| Err(Libp2pError::ReservationFailed("libp2p reservation cancelled".into())))?;
-            let release_tx = tx.clone();
-            Ok(ReservationHandle::new(async move {
-                let (ack_tx, ack_rx) = oneshot::channel();
-                if release_tx.send(SwarmCommand::ReleaseReservation { listener_id: listener, respond_to: ack_tx }).await.is_ok() {
-                    let _ = ack_rx.await;
-                }
-            }))
-        })
-    }
-
-    fn peers_snapshot<'a>(&'a self) -> BoxFuture<'a, Vec<PeerSnapshot>> {
-        let tx = self.command_tx.clone();
-        Box::pin(async move {
-            let (respond_to, rx) = oneshot::channel();
-            if tx.send(SwarmCommand::PeersSnapshot { respond_to }).await.is_err() {
-                return Vec::new();
-            }
-            rx.await.unwrap_or_default()
-        })
-    }
-
-    fn role_updates(&self) -> Option<watch::Receiver<crate::Role>> {
-        self.role_updates.clone()
-    }
-
-    fn relay_hint_updates(&self) -> Option<watch::Receiver<Option<String>>> {
-        self.relay_hint_updates.clone()
-    }
-
-    fn metrics(&self) -> Option<Arc<Libp2pMetrics>> {
-        Some(self.metrics.clone())
-    }
-
-    fn shutdown(&self) -> BoxFuture<'_, ()> {
-        let trigger = self.shutdown.clone();
-        let task = &self.task;
-        Box::pin(async move {
-            trigger.trigger();
-            if let Some(handle) = task.lock().await.take() {
-                let _ = handle.await;
-            }
-        })
-    }
-}
-
-struct IncomingStream {
-    metadata: TransportMetadata,
-    direction: StreamDirection,
-    stream: BoxedLibp2pStream,
-}
-
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct PeerSnapshot {
     pub peer_id: String,
@@ -673,42 +423,6 @@ pub struct PeerSnapshot {
 struct ReservationTarget {
     multiaddr: Multiaddr,
     peer_id: PeerId,
-}
-
-enum SwarmCommand {
-    Dial {
-        address: Multiaddr,
-        respond_to: oneshot::Sender<Result<(TransportMetadata, StreamDirection, BoxedLibp2pStream), Libp2pError>>,
-    },
-    ProbeRelay {
-        address: Multiaddr,
-        respond_to: oneshot::Sender<Result<PeerId, Libp2pError>>,
-    },
-    EnsureListening {
-        respond_to: oneshot::Sender<Result<(), Libp2pError>>,
-    },
-    Reserve {
-        target: Multiaddr,
-        respond_to: oneshot::Sender<Result<ListenerId, Libp2pError>>,
-    },
-    ReleaseReservation {
-        listener_id: ListenerId,
-        respond_to: oneshot::Sender<()>,
-    },
-    PeersSnapshot {
-        respond_to: oneshot::Sender<Vec<PeerSnapshot>>,
-    },
-}
-
-struct DialRequest {
-    respond_to: oneshot::Sender<Result<(TransportMetadata, StreamDirection, BoxedLibp2pStream), Libp2pError>>,
-    started_at: Instant,
-    via: DialVia,
-}
-
-struct PendingProbe {
-    respond_to: oneshot::Sender<Result<PeerId, Libp2pError>>,
-    started_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -742,38 +456,6 @@ struct SwarmDriver {
     shutdown: Listener,
     connections: HashMap<StreamRequestId, ConnectionEntry>,
     relay_hint_tx: watch::Sender<Option<String>>,
-}
-
-fn metadata_from_endpoint(peer_id: &PeerId, endpoint: &libp2p::core::ConnectedPoint) -> TransportMetadata {
-    let mut md = TransportMetadata::default();
-    md.capabilities.libp2p = true;
-    md.libp2p_peer_id = Some(peer_id.to_string());
-    let (addr, path) = connected_point_to_metadata(endpoint);
-    md.path = path;
-    md.reported_ip = addr.map(|a| a.ip);
-
-    md
-}
-
-fn connected_point_to_metadata(endpoint: &libp2p::core::ConnectedPoint) -> (Option<NetAddress>, kaspa_p2p_lib::PathKind) {
-    match endpoint {
-        libp2p::core::ConnectedPoint::Dialer { address, .. } => multiaddr_to_metadata(address),
-        libp2p::core::ConnectedPoint::Listener { local_addr, send_back_addr } => {
-            // For relay circuit listeners, send_back_addr may be just "/p2p/<peer_id>" without
-            // the circuit marker. Check local_addr for circuit information since it contains
-            // the full relay path (e.g., "/ip4/.../p2p-circuit").
-            let (_, local_path) = multiaddr_to_metadata(local_addr);
-            if matches!(local_path, kaspa_p2p_lib::PathKind::Relay { .. }) {
-                // local_addr has circuit info; use its path. Address from send_back_addr is
-                // typically unusable for relay circuits (just peer ID, no IP).
-                let (addr, _) = multiaddr_to_metadata(send_back_addr);
-                (addr, local_path)
-            } else {
-                // No circuit in local_addr; use send_back_addr as before
-                multiaddr_to_metadata(send_back_addr)
-            }
-        }
-    }
 }
 
 fn default_stream_protocol() -> libp2p::StreamProtocol {
