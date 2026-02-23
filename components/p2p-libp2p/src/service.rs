@@ -33,6 +33,7 @@ const RESERVATION_REFRESH_INTERVAL: Duration = Duration::from_secs(20 * 60);
 const RESERVATION_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const RESERVATION_BASE_BACKOFF: Duration = Duration::from_secs(5);
 const RESERVATION_MAX_BACKOFF: Duration = Duration::from_secs(60);
+const INBOUND_LISTEN_RETRY_DELAY: Duration = Duration::from_millis(200);
 const HELPER_MAX_LINE: usize = 8 * 1024;
 const HELPER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -201,8 +202,17 @@ impl Libp2pService {
                     }
                     Err(err) => {
                         warn!("libp2p inbound listen error: {err}");
-                        let _ = tx.send(Err(io::Error::other(err.to_string()))).await;
-                        break;
+                        if let Some(shutdown) = shutdown.as_mut() {
+                            tokio::select! {
+                                _ = shutdown.clone() => {
+                                    debug!("libp2p inbound bridge shutting down after listen error");
+                                    break;
+                                }
+                                _ = sleep(INBOUND_LISTEN_RETRY_DELAY) => {}
+                            }
+                        } else {
+                            sleep(INBOUND_LISTEN_RETRY_DELAY).await;
+                        }
                     }
                 }
             }
