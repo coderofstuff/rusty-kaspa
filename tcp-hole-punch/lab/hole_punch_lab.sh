@@ -12,7 +12,7 @@ fi
 
 NODE_A=${NODE_A:-ubuntu@192.168.1.10}
 NODE_B=${NODE_B:-ubuntu@192.168.2.10}
-NODE_C=${NODE_C:-ubuntu@10.0.3.50}
+NODE_C=${NODE_C:-ubuntu@10.0.3.26}
 
 REPO_PATH=${REPO_PATH:-~/rusty-kaspa}
 BIN_PATH=${BIN_PATH:-${REPO_PATH}/target/release/kaspad}
@@ -32,7 +32,7 @@ APPDIR_A=${APPDIR_A:-~/kaspa/node-a}
 APPDIR_B=${APPDIR_B:-~/kaspa/node-b}
 APPDIR_C=${APPDIR_C:-~/kaspa/node-c}
 
-C_PUBLIC_IP=${C_PUBLIC_IP:-10.0.3.50}
+C_PUBLIC_IP=${C_PUBLIC_IP:-10.0.3.26}
 A_EXTERNAL_IP=${A_EXTERNAL_IP:-10.0.3.61}
 B_EXTERNAL_IP=${B_EXTERNAL_IP:-10.0.3.62}
 

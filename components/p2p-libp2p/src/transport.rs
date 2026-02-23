@@ -577,6 +577,43 @@ mod tests {
         assert!(matches!(rx2.await, Ok(Err(_))));
     }
 
+    #[tokio::test]
+    async fn direct_connection_with_existing_relay_marks_dcutr_upgraded() {
+        let (mut driver, _) = test_driver(4);
+        let peer = PeerId::random();
+        let relay_peer = PeerId::random();
+
+        let relay_conn_id = make_request_id();
+        let relay_endpoint = libp2p::core::ConnectedPoint::Dialer {
+            address: format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay_peer}/p2p-circuit/p2p/{peer}").parse().unwrap(),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        };
+        driver.record_connection(relay_conn_id, peer, &relay_endpoint, false);
+
+        let direct_conn_id = make_request_id();
+        let direct_endpoint = libp2p::core::ConnectedPoint::Dialer {
+            address: "/ip4/203.0.113.10/tcp/16112".parse().unwrap(),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        };
+
+        driver
+            .handle_event(SwarmEvent::ConnectionEstablished {
+                peer_id: peer,
+                connection_id: direct_conn_id,
+                endpoint: direct_endpoint,
+                num_established: std::num::NonZeroU32::new(1).unwrap(),
+                concurrent_dial_errors: None,
+                established_in: Duration::from_millis(0),
+            })
+            .await;
+
+        let direct = driver.connections.get(&direct_conn_id).expect("direct connection entry");
+        assert!(matches!(direct.path, PathKind::Direct));
+        assert!(direct.dcutr_upgraded, "direct connection should be marked as DCUtR-upgraded when relay path existed");
+    }
+
     #[test]
     fn dcutr_dialback_skips_when_autonat_private() {
         let (mut driver, peer) = dialback_ready_driver();
@@ -734,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn local_dcutr_candidates_prioritize_observed_over_config() {
+    fn local_dcutr_candidates_prioritize_config_over_observed() {
         let (mut driver, _) = test_driver(1);
         let config_addr: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
         let observed_addr: Multiaddr = "/ip4/9.9.9.9/tcp/16112".parse().unwrap();
@@ -745,7 +782,43 @@ mod tests {
         driver.record_local_candidate(observed_addr.clone(), LocalCandidateSource::Observed);
 
         let candidates = driver.local_dcutr_candidates();
-        assert_eq!(candidates.first(), Some(&observed_addr));
+        let expected_first: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
+        assert_eq!(candidates.first(), Some(&expected_first));
+    }
+
+    #[test]
+    fn observed_candidate_with_configured_ip_is_ignored() {
+        let (mut driver, _) = test_driver(1);
+        let config_addr: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
+        let observed_addr: Multiaddr = "/ip4/8.8.8.8/tcp/34190".parse().unwrap();
+
+        driver.swarm.add_external_address(config_addr.clone());
+        driver.record_local_candidate(config_addr.clone(), LocalCandidateSource::Config);
+        driver.swarm.add_external_address(observed_addr.clone());
+        driver.record_local_candidate(observed_addr.clone(), LocalCandidateSource::Observed);
+
+        let candidates = driver.local_dcutr_candidates();
+        assert!(candidates.contains(&config_addr));
+        assert!(!candidates.contains(&observed_addr));
+    }
+
+    #[tokio::test]
+    async fn dcutr_preflight_allows_config_candidates_without_fresh_observed() {
+        let (mut driver, peer) = dialback_ready_driver();
+        let observed = driver
+            .local_candidate_meta
+            .iter()
+            .find_map(|(addr, meta)| matches!(meta.source, LocalCandidateSource::Observed).then_some(addr.clone()))
+            .expect("observed candidate");
+        if let Some(meta) = driver.local_candidate_meta.get_mut(&observed) {
+            meta.updated_at = fallback_old_instant(Instant::now());
+        }
+        let config_addr: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
+        driver.swarm.add_external_address(config_addr.clone());
+        driver.record_local_candidate(config_addr, LocalCandidateSource::Config);
+
+        driver.maybe_request_dialback(peer);
+        assert!(driver.dialback_cooldowns.contains_key(&peer));
     }
 
     #[test]
@@ -1633,9 +1706,10 @@ impl SwarmDriver {
         self.dcutr_retries.clear();
 
         info!(
-            "libp2p dcutr candidate invalidation ({source}): peers_cleared={} local_removed={}",
+            "libp2p dcutr candidate invalidation ({source}): peers_cleared={} local_removed={} local_remaining={}",
             peers_with_candidates,
-            observed_addrs.len()
+            observed_addrs.len(),
+            self.local_dcutr_candidates().len()
         );
     }
 
@@ -2031,6 +2105,8 @@ impl SwarmDriver {
 
     fn handle_dcutr_event(&mut self, event: dcutr::Event) {
         let external_addrs: Vec<_> = self.swarm.external_addresses().collect();
+        let local_candidates = self.local_dcutr_candidates().len();
+        let remote_candidates = self.peer_states.get(&event.remote_peer_id).map_or(0, |state| state.remote_dcutr_candidates.len());
         let is_spurious_attempts = self
             .connections
             .values()
@@ -2039,10 +2115,7 @@ impl SwarmDriver {
             Err(e) if is_dcutr_retry_trigger_error(e) && !(is_attempts_exceeded(e) && is_spurious_attempts) => {
                 warn!(
                     "libp2p dcutr retry-trigger failure for {}: {:?} (local_candidates={} remote_candidates={})",
-                    event.remote_peer_id,
-                    e,
-                    self.local_dcutr_candidates().len(),
-                    self.peer_states.get(&event.remote_peer_id).map_or(0, |state| state.remote_dcutr_candidates.len())
+                    event.remote_peer_id, e, local_candidates, remote_candidates
                 );
                 self.refresh_dcutr_retry_path(event.remote_peer_id, e);
             }
@@ -2059,6 +2132,10 @@ impl SwarmDriver {
                 info!("libp2p dcutr event: {:?} (swarm has {} external addrs: {:?})", event, external_addrs.len(), external_addrs);
             }
         }
+        info!(
+            "libp2p dcutr summary: peer={} result={:?} local_candidates={} remote_candidates={} upgraded_direct={}",
+            event.remote_peer_id, event.result, local_candidates, remote_candidates, is_spurious_attempts
+        );
     }
 
     fn handle_autonat_event(&mut self, event: autonat::Event) {
@@ -2164,9 +2241,10 @@ impl SwarmDriver {
             // initiate a bidirectional dial-back via the active relay so we become a dialer too.
             self.maybe_request_dialback(peer_id);
         }
-        self.record_connection(connection_id, peer_id, &endpoint, had_pending_relay);
+        let direct_upgrade = !endpoint_uses_relay(&endpoint) && (had_pending_relay || self.has_relay_connection(peer_id));
+        self.record_connection(connection_id, peer_id, &endpoint, direct_upgrade);
         if !endpoint_uses_relay(&endpoint) {
-            self.note_direct_upgrade(peer_id, had_pending_relay);
+            self.note_direct_upgrade(peer_id, direct_upgrade);
         }
         if endpoint_uses_relay(&endpoint) {
             self.enforce_relay_cap(connection_id);
@@ -2562,6 +2640,21 @@ impl SwarmDriver {
         if matches!(source, LocalCandidateSource::Observed)
             && let Some(candidate_ip) = candidate_ip_addr(&addr)
         {
+            let has_config_same_ip = self.local_candidate_meta.iter().any(|(existing, meta)| {
+                meta.source == LocalCandidateSource::Config
+                    && candidate_ip_addr(existing).is_some_and(|existing_ip| existing_ip == candidate_ip)
+            });
+            if has_config_same_ip {
+                self.swarm.remove_external_address(&addr);
+                info!(
+                    "libp2p dcutr local candidate ignored: addr={} source={:?} reason=config_same_ip local_candidates={}",
+                    addr,
+                    source,
+                    self.local_dcutr_candidates().len()
+                );
+                return;
+            }
+
             // Keep one observed candidate per IP so frequent observed port updates
             // cannot grow the local candidate set without bound.
             let stale_same_ip: Vec<_> = self
@@ -2583,7 +2676,21 @@ impl SwarmDriver {
                 self.local_candidate_meta.remove(&stale);
             }
         }
-        self.local_candidate_meta.insert(addr, LocalCandidateMeta { source, updated_at: Instant::now() });
+        let replaced = self.local_candidate_meta.get(&addr).map(|meta| meta.source);
+        self.local_candidate_meta.insert(addr.clone(), LocalCandidateMeta { source, updated_at: Instant::now() });
+        info!(
+            "libp2p dcutr local candidate recorded: addr={} source={:?} replaced={:?} local_candidates={}",
+            addr,
+            source,
+            replaced,
+            self.local_dcutr_candidates().len()
+        );
+    }
+
+    fn has_config_local_candidate(&self) -> bool {
+        self.local_candidate_meta
+            .iter()
+            .any(|(addr, meta)| matches!(meta.source, LocalCandidateSource::Config) && self.is_usable_external_addr(addr))
     }
 
     fn has_fresh_local_observed_candidate(&self, now: Instant) -> bool {
@@ -2719,14 +2826,18 @@ impl SwarmDriver {
         }
 
         let local_has_fresh_observed = self.has_fresh_local_observed_candidate(now);
+        let local_has_config_candidate = self.has_config_local_candidate();
+        let local_candidate_ready = local_has_fresh_observed || local_has_config_candidate;
         let remote_is_fresh =
             remote_candidates_last_seen.is_some_and(|seen| now.saturating_duration_since(seen) <= DCUTR_REMOTE_CANDIDATE_FRESHNESS);
-        if !local_has_fresh_observed || remote_candidates_count == 0 || !remote_is_fresh {
+        if !local_candidate_ready || remote_candidates_count == 0 || !remote_is_fresh {
             info!(
-                "libp2p dcutr preflight defer for {}: reason={} local_fresh_observed={} local_candidates={} remote_candidates={} remote_fresh={}",
+                "libp2p dcutr preflight defer for {}: reason={} local_fresh_observed={} local_has_config={} local_ready={} local_candidates={} remote_candidates={} remote_fresh={}",
                 peer_id,
                 reason,
                 local_has_fresh_observed,
+                local_has_config_candidate,
+                local_candidate_ready,
                 self.local_dcutr_candidates().len(),
                 remote_candidates_count,
                 remote_is_fresh
@@ -2747,6 +2858,18 @@ impl SwarmDriver {
             return;
         }
 
+        info!(
+            "libp2p dcutr preflight pass for {}: reason={} force={} local_fresh_observed={} local_has_config={} local_candidates={} remote_candidates={} remote_fresh={}",
+            peer_id,
+            reason,
+            force,
+            local_has_fresh_observed,
+            local_has_config_candidate,
+            local_candidates.len(),
+            remote_candidates_count,
+            remote_is_fresh
+        );
+
         let Some(relay) = &self.active_relay else {
             debug!("libp2p dcutr: no active relay available for dial-back to {peer_id}");
             self.schedule_dcutr_retry(peer_id, "no_active_relay", false);
@@ -2763,9 +2886,12 @@ impl SwarmDriver {
         let chosen_dial_addrs = vec![circuit_addr.clone()];
 
         info!(
-            "libp2p dcutr dial-back attempt to {peer_id} reason={reason} local_candidates={} remote_candidates={} chosen_dial_addrs={:?}",
+            "libp2p dcutr dial-back attempt to {peer_id} reason={reason} relay_peer={} circuit_base={} local_candidates={} remote_candidates={} local_candidate_addrs={:?} chosen_dial_addrs={:?}",
+            relay_peer,
+            relay.circuit_base,
             local_candidates.len(),
             remote_candidates_count,
+            local_candidates,
             chosen_dial_addrs
         );
 
@@ -2942,8 +3068,8 @@ fn is_dcutr_retry_trigger_error_text(err: &str) -> bool {
 
 fn local_candidate_priority(source: LocalCandidateSource) -> u8 {
     match source {
-        LocalCandidateSource::Observed => 3,
-        LocalCandidateSource::Config => 2,
+        LocalCandidateSource::Config => 3,
+        LocalCandidateSource::Observed => 2,
         LocalCandidateSource::Dynamic => 1,
     }
 }

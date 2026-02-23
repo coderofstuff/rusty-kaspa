@@ -86,7 +86,7 @@ No config mutations were executed.
 
 | Component | Addressing | Notes |
 |---|---|---|
-| Relay | `10.0.3.50` | Older relay/public anchor used in prior reports |
+| Relay | `10.0.3.26` | Current relay/public anchor |
 | Router A WAN | `10.0.3.61` | Same as current |
 | Node A | `192.168.1.10` | Same as current |
 | Router B WAN | `10.0.3.62` | Same as current |
