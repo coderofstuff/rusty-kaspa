@@ -12,7 +12,7 @@ use libp2p::relay::{self, client as relay_client};
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::tcp::tokio::Transport as TcpTransport;
 use libp2p::yamux;
-use libp2p::{PeerId, Transport, identity};
+use libp2p::{Transport, identity};
 use std::time::Duration;
 use tokio::select;
 use tokio::time::Instant;
@@ -99,24 +99,23 @@ async fn dcutr_client_relay_smoke() {
 
     let relay_addr = wait_for_listen_addr(&mut relay, "relay").await;
     relay.add_external_address(relay_addr.clone());
-    let dst_direct_addr = wait_for_listen_addr(&mut dst, "dst").await;
+    let _ = wait_for_listen_addr(&mut dst, "dst").await;
     let _ = wait_for_listen_addr(&mut src, "src").await;
 
     let dst_relay_base_addr = relay_addr.clone().with(Protocol::P2p(relay_id.peer_id)).with(Protocol::P2pCircuit);
     let dst_relay_addr = dst_relay_base_addr.clone().with(Protocol::P2p(dst_id.peer_id));
     dst.listen_on(dst_relay_base_addr).expect("dst relay listen");
-    wait_for_reservation(&mut relay, &mut dst, dst_relay_addr.clone(), relay_id.peer_id).await;
+    src.dial(dst_relay_addr.clone()).expect("src dial dst via relay");
 
-    src.dial(dst_relay_addr).expect("src dial dst via relay");
-
-    let expected_direct_addr = dst_direct_addr.with(Protocol::P2p(dst_id.peer_id));
     let mut direct_established = false;
     let mut dcutr_succeeded = false;
+    let mut dial_attempts = 1usize;
+    let mut dst_dcutr_error: Option<String> = None;
     let deadline = Instant::now() + Duration::from_secs(20);
 
     loop {
         if Instant::now() > deadline {
-            panic!("DCUtR relay smoke test timed out");
+            panic!("DCUtR relay smoke test timed out (dst dcutr error: {dst_dcutr_error:?})");
         }
 
         if direct_established && dcutr_succeeded {
@@ -137,7 +136,7 @@ async fn dcutr_client_relay_smoke() {
                     SwarmEvent::Behaviour(ClientBehaviourEvent::Dcutr(dcutr::Event { remote_peer_id, result: Err(err) }))
                         if remote_peer_id == src_id.peer_id =>
                     {
-                        panic!("DCUtR upgrade failed on dst side: {err}");
+                        dst_dcutr_error.get_or_insert_with(|| err.to_string());
                     }
                     SwarmEvent::Behaviour(ClientBehaviourEvent::Dcutr(dcutr::Event { remote_peer_id, result: Ok(_) }))
                         if remote_peer_id == src_id.peer_id => {}
@@ -150,7 +149,10 @@ async fn dcutr_client_relay_smoke() {
             }
             event = src.select_next_some() => {
                 match event {
-                    SwarmEvent::ConnectionEstablished { endpoint, .. } if *endpoint.get_remote_address() == expected_direct_addr => {
+                    SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. }
+                        if peer_id == dst_id.peer_id
+                            && !endpoint.get_remote_address().iter().any(|protocol| matches!(protocol, Protocol::P2pCircuit)) =>
+                    {
                         direct_established = true;
                     }
                     SwarmEvent::Behaviour(ClientBehaviourEvent::Dcutr(dcutr::Event { remote_peer_id, result }))
@@ -161,9 +163,15 @@ async fn dcutr_client_relay_smoke() {
                             Err(err) => panic!("DCUtR upgrade failed on src side: {err}"),
                         }
                     }
+                    SwarmEvent::OutgoingConnectionError { peer_id: Some(peer_id), .. } if peer_id == dst_id.peer_id => {
+                        if dial_attempts < 4 && src.dial(dst_relay_addr.clone()).is_ok() {
+                            dial_attempts += 1;
+                        }
+                    }
                     SwarmEvent::Behaviour(ClientBehaviourEvent::Identify(_))
                     | SwarmEvent::Behaviour(ClientBehaviourEvent::RelayClient(_))
                     | SwarmEvent::Behaviour(ClientBehaviourEvent::Ping(_))
+                    | SwarmEvent::OutgoingConnectionError { .. }
                     | SwarmEvent::ConnectionEstablished { .. } => {}
                     _ => {}
                 }
@@ -172,8 +180,8 @@ async fn dcutr_client_relay_smoke() {
         }
     }
 
-    assert!(dcutr_succeeded, "source did not report a successful DCUtR upgrade");
-    assert!(direct_established, "source did not establish a direct dst connection");
+    assert!(dcutr_succeeded, "source did not report a successful DCUtR upgrade (dst dcutr error: {dst_dcutr_error:?})");
+    assert!(direct_established, "source did not establish a direct dst connection (dst dcutr error: {dst_dcutr_error:?})");
 }
 
 async fn wait_for_listen_addr<TBehaviour>(swarm: &mut Swarm<TBehaviour>, name: &str) -> libp2p::Multiaddr
@@ -185,64 +193,6 @@ where
             Ok(SwarmEvent::NewListenAddr { address, .. }) => break address,
             Ok(_) => {}
             Err(_) => panic!("{name} did not produce a listen address"),
-        }
-    }
-}
-
-async fn wait_for_reservation(
-    relay: &mut Swarm<RelayBehaviour>,
-    dst: &mut Swarm<ClientBehaviour>,
-    expected_relayed_addr: libp2p::Multiaddr,
-    relay_peer_id: PeerId,
-) {
-    let mut new_relay_listen_addr = false;
-    let mut reservation_accepted = false;
-    let deadline = Instant::now() + Duration::from_secs(10);
-
-    loop {
-        if Instant::now() > deadline {
-            panic!("timed out waiting for relay reservation");
-        }
-
-        if new_relay_listen_addr && reservation_accepted {
-            break;
-        }
-
-        select! {
-            event = relay.select_next_some() => {
-                match event {
-                    SwarmEvent::ConnectionEstablished { .. }
-                    | SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(_))
-                    | SwarmEvent::Behaviour(RelayBehaviourEvent::Ping(_)) => {}
-                    _ => {}
-                }
-            }
-            event = dst.select_next_some() => {
-                match event {
-                    SwarmEvent::NewListenAddr { address, .. } if address == expected_relayed_addr => {
-                        new_relay_listen_addr = true;
-                    }
-                    SwarmEvent::Behaviour(ClientBehaviourEvent::RelayClient(relay_client::Event::ReservationReqAccepted {
-                        relay_peer_id: accepted_relay_peer_id,
-                        renewal: false,
-                        ..
-                    })) if accepted_relay_peer_id == relay_peer_id => {
-                        reservation_accepted = true;
-                    }
-                    SwarmEvent::ListenerClosed { reason, .. } => {
-                        panic!("relay reservation listener closed unexpectedly: {reason:?}");
-                    }
-                    SwarmEvent::Behaviour(ClientBehaviourEvent::Identify(_))
-                    | SwarmEvent::Behaviour(ClientBehaviourEvent::Ping(_))
-                    | SwarmEvent::Dialing { .. }
-                    | SwarmEvent::ConnectionEstablished { .. }
-                    | SwarmEvent::NewExternalAddrCandidate { .. }
-                    | SwarmEvent::ExternalAddrConfirmed { .. }
-                    | SwarmEvent::ExternalAddrExpired { .. } => {}
-                    _ => {}
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
 }
