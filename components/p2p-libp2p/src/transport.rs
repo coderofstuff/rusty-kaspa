@@ -802,6 +802,21 @@ mod tests {
         assert!(!candidates.contains(&observed_addr));
     }
 
+    #[test]
+    fn observed_candidate_equal_to_config_does_not_drop_config() {
+        let (mut driver, _) = test_driver(1);
+        let config_addr: Multiaddr = "/ip4/8.8.8.8/tcp/16112".parse().unwrap();
+
+        driver.swarm.add_external_address(config_addr.clone());
+        driver.record_local_candidate(config_addr.clone(), LocalCandidateSource::Config);
+
+        // Relay observation can match the configured address exactly.
+        driver.record_local_candidate(config_addr.clone(), LocalCandidateSource::Observed);
+
+        let candidates = driver.local_dcutr_candidates();
+        assert_eq!(candidates, vec![config_addr]);
+    }
+
     #[tokio::test]
     async fn dcutr_preflight_allows_config_candidates_without_fresh_observed() {
         let (mut driver, peer) = dialback_ready_driver();
@@ -2645,11 +2660,19 @@ impl SwarmDriver {
                     && candidate_ip_addr(existing).is_some_and(|existing_ip| existing_ip == candidate_ip)
             });
             if has_config_same_ip {
-                self.swarm.remove_external_address(&addr);
+                // Only clear the observed address if it is not itself the configured
+                // candidate. Otherwise we can accidentally drop the configured NAT addr.
+                let removed_observed =
+                    !matches!(self.local_candidate_meta.get(&addr).map(|meta| meta.source), Some(LocalCandidateSource::Config));
+                if removed_observed {
+                    self.swarm.remove_external_address(&addr);
+                    self.local_candidate_meta.remove(&addr);
+                }
                 info!(
-                    "libp2p dcutr local candidate ignored: addr={} source={:?} reason=config_same_ip local_candidates={}",
+                    "libp2p dcutr local candidate ignored: addr={} source={:?} reason=config_same_ip removed_observed={} local_candidates={}",
                     addr,
                     source,
+                    removed_observed,
                     self.local_dcutr_candidates().len()
                 );
                 return;
