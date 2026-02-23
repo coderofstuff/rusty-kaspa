@@ -19,7 +19,6 @@ use libp2p::{PeerId, relay};
 use log::{debug, info, warn};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -43,6 +42,9 @@ mod test_support;
 mod tests;
 
 use self::auto_role::{AUTO_ROLE_REQUIRED_DIRECT, AUTO_ROLE_WINDOW, AutoRoleState};
+use self::driver::{ConnectionEntry, DcutrRetryState, DialVia, LocalCandidateMeta, PeerState, RelayInfo, ReservationTarget};
+#[cfg(test)]
+use self::driver::{LocalCandidateSource, fallback_old_instant, is_dcutr_retry_trigger_error_text, is_retryable_dcutr_error_text};
 pub use self::identity::Libp2pIdentity;
 use self::multiaddr::{
     addr_uses_relay, candidate_ip_addr, default_listen_addr, endpoint_uses_relay, extract_circuit_target_peer, extract_relay_peer,
@@ -372,19 +374,6 @@ pub struct PeerSnapshot {
     pub dcutr_upgraded: bool,
 }
 
-#[derive(Clone)]
-#[allow(dead_code)]
-struct ReservationTarget {
-    multiaddr: Multiaddr,
-    peer_id: PeerId,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DialVia {
-    Direct,
-    Relay { target_peer: PeerId },
-}
-
 struct SwarmDriver {
     swarm: libp2p::Swarm<Libp2pBehaviour>,
     command_rx: mpsc::Receiver<SwarmCommand>,
@@ -421,85 +410,4 @@ fn default_stream_protocol() -> libp2p::StreamProtocol {
 pub enum StreamDirection {
     Inbound,
     Outbound,
-}
-
-fn is_attempts_exceeded(err: &dcutr::Error) -> bool {
-    // Upstream error is opaque, relying on Display string for now
-    err.to_string().contains("AttemptsExceeded")
-}
-
-fn is_dcutr_retry_trigger_error(err: &dcutr::Error) -> bool {
-    is_dcutr_retry_trigger_error_text(&err.to_string())
-}
-
-fn is_retryable_dcutr_error_text(err: &str) -> bool {
-    err.contains("NoAddresses") || err.contains("UnexpectedEof")
-}
-
-fn is_dcutr_retry_trigger_error_text(err: &str) -> bool {
-    is_retryable_dcutr_error_text(err) || err.contains("AttemptsExceeded")
-}
-
-fn local_candidate_priority(source: LocalCandidateSource) -> u8 {
-    match source {
-        LocalCandidateSource::Observed => 3,
-        LocalCandidateSource::Config => 2,
-        LocalCandidateSource::Dynamic => 1,
-    }
-}
-
-fn fallback_old_instant(now: Instant) -> Instant {
-    now.checked_sub(Duration::from_secs(24 * 60 * 60)).unwrap_or(now)
-}
-
-fn dcutr_retry_jitter(peer_id: PeerId, failures: u8) -> Duration {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    peer_id.hash(&mut hasher);
-    failures.hash(&mut hasher);
-    Duration::from_millis(hasher.finish() % DCUTR_RETRY_JITTER_MS)
-}
-
-#[derive(Clone)]
-struct RelayInfo {
-    relay_peer: PeerId,
-    circuit_base: Multiaddr,
-}
-
-#[derive(Default)]
-struct PeerState {
-    supports_dcutr: bool,
-    outgoing: usize,
-    connected_via_relay: bool,
-    remote_dcutr_candidates: Vec<Multiaddr>,
-    remote_candidates_last_seen: Option<Instant>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LocalCandidateSource {
-    Config,
-    Observed,
-    Dynamic,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct LocalCandidateMeta {
-    source: LocalCandidateSource,
-    updated_at: Instant,
-}
-
-#[derive(Clone, Debug)]
-struct DcutrRetryState {
-    failures: u8,
-    next_retry_at: Instant,
-    last_reason: String,
-}
-
-#[derive(Clone, Debug)]
-struct ConnectionEntry {
-    peer_id: PeerId,
-    path: PathKind,
-    relay_id: Option<String>,
-    outbound: bool,
-    since: Instant,
-    dcutr_upgraded: bool,
 }
