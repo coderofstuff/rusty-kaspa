@@ -10,7 +10,12 @@
 - AutoNAT posture: client+server enabled in full/helper modes; server is public-only by default (`server_only_if_public=true`). Labs can opt into private IP reachability with `--libp2p-autonat-allow-private` / `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true`.
 
 ## Roles
-- `--libp2p-role=public|private|auto` (default `auto`; auto currently resolves to private unless a helper listen address is configured).
+- `--libp2p-role=public|private|auto` (default `auto`).
+- In `auto`, runtime starts from private posture and promotes to `public` only after:
+  - AutoNAT public confirmations (threshold from `--libp2p-autonat-confidence-threshold`, default 3),
+  - direct inbound evidence,
+  - and at least one usable external address.
+- Auto mode demotes back to `private` when those signals age out.
 - **public**: advertises the libp2p relay service bit/relay_port and keeps the existing libp2p inbound split alongside TCP inbound peers.
 - **private/auto**: does **not** advertise relay capability; libp2p inbound peers are capped (default 8) while TCP inbound limits stay unchanged.
 
@@ -69,7 +74,10 @@
 - For libp2p/DCUtR manual checks, build with `--features libp2p` and run the example harness:
   - `cargo run -p kaspa-p2p-libp2p --example dcutr_harness --features libp2p -- <ip:port>`
   - Or set `LIBP2P_TARGET_ADDR=<ip:port>` to attempt an outbound dial; otherwise it prints the local peer ID and waits for inbound streams.
-- A DCUtR-focused integration test exists under `components/p2p-libp2p/tests/dcutr.rs` but is `#[ignore]` in CI due to an upstream relay-client drop panic; run manually if you need a quick punch sanity check.
+- DCUtR integration smoke tests live under:
+  - `components/p2p-libp2p/tests/dcutr.rs`
+  - `components/p2p-libp2p/tests/dcutr_advertisement.rs`
+- These tests are no longer ignored in crate test runs.
 
 ## Helper API (Testing / Debugging)
 

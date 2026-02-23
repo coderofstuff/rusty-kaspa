@@ -1,28 +1,23 @@
-# Libp2p Swarm Provider Notes (placeholder)
+# Libp2p Swarm Provider Notes
 
-This repo currently uses a placeholder `Libp2pStreamProvider` that returns `NotImplemented`. The real provider should:
+`Libp2pStreamProvider` is now backed by a concrete implementation: `SwarmStreamProvider`.
 
-1) Build a libp2p swarm (TCP + Noise + Yamux) using the loaded `Libp2pIdentity`.
-2) Implement `dial(NetAddress)`:
-   - Convert the address to a multiaddr.
-   - Dial, open a dedicated substream for gRPC bytes.
-   - Return `(TransportMetadata { libp2p=true, libp2p_peer_id=peer }, BoxedLibp2pStream)`.
-3) Implement `listen()`:
-   - Accept incoming connections/substreams.
-   - Expose a closer guard and metadata (peer id, path/relay when known).
-4) Drive the swarm on a Tokio task; expose shutdown.
-5) Preserve default TCP behaviour when the `libp2p` feature/mode is off.
+## Current behavior
+- Builds a libp2p swarm (TCP + Noise + Yamux + behaviours) from `Libp2pIdentity`.
+- Runs `SwarmDriver` on a background Tokio task.
+- Implements:
+  - `dial(NetAddress)` and `dial_multiaddr(Multiaddr)`
+  - `listen()` (bridged via internal incoming channel)
+  - `reserve(Multiaddr)` with release handle
+  - `probe_relay(Multiaddr)`
+  - `shutdown()`, `peers_snapshot()`, role/relay-hint watch updates, metrics snapshot
+- Preserves TCP-only behavior when mode is `off`.
 
-Notes for current libp2p 0.52 API (matches our Cargo.toml):
-- `Swarm::new` expects a `libp2p::swarm::Config` (use `Config::with_tokio_executor()`).
-- The builder flow is `let transport = libp2p::tcp::tokio::Transport::new(...).upgrade(...).authenticate(noise).multiplex(yamux).boxed();`
-  then `let behaviour = BaseBehaviour::default();`
-  then `let cfg = libp2p::swarm::Config::with_tokio_executor();`
-  finally `let swarm = Swarm::new(transport, behaviour, peer_id, cfg);`
+## Runtime notes
+- `listen()` requests `EnsureListening` and then waits for bridged streams from the driver.
+- Inbound bridge retry policy is bounded: transient provider-unavailable errors are retried; terminal listen errors abort the bridge loop and are surfaced in logs.
+- Shutdown triggers the swarm task and awaits join to avoid leaking background work.
 
-Event loop guidance:
-- Avoid holding a std::sync::MutexGuard across `.await`; wrap swarm in `tokio::sync::Mutex` if you need to drive it.
-- The provider should own the swarm and run a background task to poll `swarm.select_next_some().await`.
-- Provide a shutdown trigger so we don’t leak the task on daemon exit.
-
-These notes are for the eventual implementation; current runtime remains unchanged.
+## libp2p API notes
+- `Swarm::new` uses `libp2p::swarm::Config::with_tokio_executor()`.
+- Relay/DCUtR path is wired through identify + relay client/server + DCUtR behaviour and stream protocol events.
