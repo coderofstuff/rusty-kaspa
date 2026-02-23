@@ -1,5 +1,6 @@
 mod tests {
     use futures::StreamExt;
+    use kaspa_p2p_libp2p::swarm::DcutrBootstrapBehaviour;
     use libp2p::{
         PeerId, Swarm, SwarmBuilder, Transport, dcutr, identify, identity, noise, relay,
         relay::client as relay_client,
@@ -12,12 +13,12 @@ mod tests {
     struct MyBehaviour {
         identify: identify::Behaviour,
         dcutr: dcutr::Behaviour,
+        dcutr_bootstrap: DcutrBootstrapBehaviour,
         relay: relay::Behaviour,
         relay_client: relay_client::Behaviour,
     }
 
     #[tokio::test]
-    #[ignore = "Identify protocols omit DCUtR until protocols negotiate; relies on runtime logs instead"]
     async fn test_dcutr_advertisement() {
         let id1 = identity::Keypair::generate_ed25519();
         let _peer1 = PeerId::from(id1.public());
@@ -45,7 +46,7 @@ mod tests {
                 event = swarm1.select_next_some() => {
                     if let SwarmEvent::Behaviour(MyBehaviourEvent::Identify(identify::Event::Received { info, .. })) = event {
                         println!("Swarm1 received Identify: {:?}", info.protocols);
-                        if info.protocols.iter().any(|p| p.to_string().contains("dcutr")) {
+                        if info.protocols.iter().any(|p| p.as_ref() == dcutr::PROTOCOL_NAME.as_ref()) {
                             dcutr_seen = true;
                         }
                     }
@@ -53,7 +54,7 @@ mod tests {
                 event = swarm2.select_next_some() => {
                     if let SwarmEvent::Behaviour(MyBehaviourEvent::Identify(identify::Event::Received { info, .. })) = event {
                         println!("Swarm2 received Identify: {:?}", info.protocols);
-                        if info.protocols.iter().any(|p| p.to_string().contains("dcutr")) {
+                        if info.protocols.iter().any(|p| p.as_ref() == dcutr::PROTOCOL_NAME.as_ref()) {
                             dcutr_seen = true;
                         }
                     }
@@ -85,6 +86,7 @@ mod tests {
         let behaviour = MyBehaviour {
             identify: identify::Behaviour::new(identify::Config::new("/test/1.0".into(), id.public())),
             dcutr: dcutr::Behaviour::new(peer_id),
+            dcutr_bootstrap: DcutrBootstrapBehaviour::default(),
             relay: relay::Behaviour::new(peer_id, relay::Config::default()),
             relay_client,
         };
