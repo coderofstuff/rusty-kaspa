@@ -1,3 +1,4 @@
+use super::test_support::{MockProvider, make_test_stream};
 use super::*;
 use async_trait::async_trait;
 use futures::executor::block_on;
