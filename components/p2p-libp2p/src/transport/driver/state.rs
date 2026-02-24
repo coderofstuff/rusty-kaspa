@@ -163,6 +163,9 @@ impl SwarmDriver {
     pub(super) fn has_relay_connection(&self, peer_id: PeerId) -> bool {
         self.connections.values().any(|conn| conn.peer_id == peer_id && matches!(conn.path, PathKind::Relay { .. }))
     }
+    pub(super) fn has_direct_connection(&self, peer_id: PeerId) -> bool {
+        self.connections.values().any(|conn| conn.peer_id == peer_id && matches!(conn.path, PathKind::Direct))
+    }
     pub(super) fn note_direct_upgrade(&mut self, peer_id: PeerId, had_pending_relay: bool) {
         self.clear_dcutr_retry(peer_id);
         if !had_pending_relay && !self.has_relay_connection(peer_id) {

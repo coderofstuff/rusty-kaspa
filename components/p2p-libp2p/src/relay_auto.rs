@@ -2,9 +2,11 @@ use crate::config::{Config, Role};
 use crate::relay_pool::{RelayCandidateSource, RelayPool, RelayPoolConfig};
 use crate::reservations::ReservationManager;
 use crate::transport::{Libp2pStreamProvider, ReservationHandle};
-use libp2p::{PeerId, multiaddr::Protocol};
+use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -54,6 +56,7 @@ pub async fn run_relay_auto_worker(
     let mut backoff = ReservationManager::new(AUTO_RELAY_BASE_BACKOFF, AUTO_RELAY_MAX_BACKOFF);
     let mut active: HashMap<String, ActiveReservation> = HashMap::new();
     let mut candidate_log_states: HashMap<String, CandidateLogState> = HashMap::new();
+    let relay_hint_updates = provider.relay_hint_updates();
     let metrics = provider.metrics();
 
     loop {
@@ -72,10 +75,13 @@ pub async fn run_relay_auto_worker(
         }
         let connected_peers: HashSet<String> =
             provider.peers_snapshot().await.into_iter().filter(|peer| peer.libp2p).map(|peer| peer.peer_id).collect();
+        let hinted_active_key =
+            relay_hint_updates.as_ref().and_then(|updates| updates.borrow().as_deref().and_then(relay_key_from_hint));
         let mut disconnected = Vec::new();
         for (key, reservation) in active.iter() {
             if let Some(peer_id) = reservation.relay_peer_id.as_deref()
                 && !connected_peers.contains(peer_id)
+                && hinted_active_key.as_deref() != Some(key.as_str())
             {
                 disconnected.push(key.clone());
             }
@@ -271,9 +277,28 @@ fn resolve_relay_peer_id(selection_peer_id: Option<PeerId>, reservation_target: 
         .map(|peer_id| peer_id.to_string())
 }
 
+fn relay_key_from_hint(hint: &str) -> Option<String> {
+    let multiaddr = Multiaddr::from_str(hint).ok()?;
+    relay_key_from_multiaddr(&multiaddr)
+}
+
+fn relay_key_from_multiaddr(address: &Multiaddr) -> Option<String> {
+    let mut ip: Option<IpAddr> = None;
+    let mut port: Option<u16> = None;
+    for protocol in address.iter() {
+        match protocol {
+            Protocol::Ip4(v4) => ip = Some(IpAddr::V4(v4)),
+            Protocol::Ip6(v6) => ip = Some(IpAddr::V6(v6)),
+            Protocol::Tcp(value) => port = Some(value),
+            _ => {}
+        }
+    }
+    Some(format!("{}:{}", ip?, port?))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_relay_peer_id;
+    use super::{relay_key_from_hint, resolve_relay_peer_id};
     use libp2p::{Multiaddr, PeerId};
     use std::str::FromStr;
 
@@ -294,5 +319,18 @@ mod tests {
 
         let resolved = resolve_relay_peer_id(None, &target);
         assert_eq!(resolved.as_deref(), Some(from_target.to_string().as_str()));
+    }
+
+    #[test]
+    fn relay_key_from_hint_extracts_ip_and_port() {
+        let relay_peer = PeerId::random();
+        let local_peer = PeerId::random();
+        let hint = format!("/ip4/10.0.3.26/tcp/16112/p2p/{relay_peer}/p2p-circuit/p2p/{local_peer}");
+        assert_eq!(relay_key_from_hint(&hint).as_deref(), Some("10.0.3.26:16112"));
+    }
+
+    #[test]
+    fn relay_key_from_hint_rejects_invalid_hint() {
+        assert_eq!(relay_key_from_hint("/p2p/invalid"), None);
     }
 }

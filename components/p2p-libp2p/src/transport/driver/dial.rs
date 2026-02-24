@@ -202,6 +202,12 @@ impl SwarmDriver {
         self.fail_probe(connection_id, "relay probe connection closed");
         self.connections.remove(&connection_id);
         self.track_closed(peer_id, &endpoint);
+        let active_relay_closed =
+            self.active_relay.as_ref().is_some_and(|relay| relay.relay_peer == peer_id) && !self.has_direct_connection(peer_id);
+        if active_relay_closed {
+            info!("libp2p active relay connection to {peer_id} closed");
+            self.clear_active_relay();
+        }
     }
     pub(super) fn handle_outgoing_connection_error_event(&mut self, connection_id: StreamRequestId, error: String) {
         self.fail_pending(connection_id, &error);
