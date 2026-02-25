@@ -27,6 +27,10 @@ Key concepts
 - Relay pool: ranked set of relay candidates used for auto selection.
 - AutoNAT: detects public reachability and flips role/advertising accordingly.
 
+Terminology (to avoid ambiguity)
+- "AutoNAT public escalation" means: auto role promotion to **public libp2p relay advertisement**.
+- It does not mean generic TCP publicness on the legacy Kaspa P2P port.
+
 How it works (high level)
 1) Public nodes advertise relay capability (service bit + relay port + capacity + ttl + role).
 2) Private nodes collect relay candidates (gossip + config list).
@@ -53,11 +57,15 @@ Relay pool behavior
 - Per-relay peer cap enforced during selection.
 - In-memory only; no persistence, no extra gossip, no new data collection.
 
-Auto role promotion (AutoNAT)
+Auto role promotion (AutoNAT public libp2p escalation)
 - AutoNAT client/server enabled by config.
-- Role flips based on reachability (public vs private).
+- Auto role starts private posture and promotes to public only when all signals are present:
+  - AutoNAT public confirmations meet threshold.
+  - At least one inbound **direct non-relay libp2p** connection observed.
+  - At least one usable external libp2p address exists.
+- Signals are evaluated on a sliding window (not first-10-minutes only).
 - Public role advertises relay capability + external multiaddrs.
-- Confidence threshold avoids flapping.
+- If signals age out, role demotes back to private.
 
 Inbound caps and safety
 - Per-relay inbound cap (relay_inbound_cap).
@@ -73,6 +81,8 @@ Observability
 Config + CLI knobs (high level)
 - Mode/role/identity path (persisted identity support).
 - Listen ports: libp2p listen + relay listen.
+- Port semantics: libp2p listen defaults to `p2p_port + 1`, but can be overridden with `--libp2p-listen-port` / `--libp2p-relay-listen-port` (or env).
+- AutoNAT reachability checks apply to the libp2p listener endpoint, not the legacy Kaspa TCP P2P listener.
 - Reservations list (static/manual) and relay candidates list (auto sources).
 - External multiaddrs + advertise addresses.
 - Relay advertise capacity + ttl.

@@ -6,18 +6,27 @@
 - **full/helper**: libp2p stack enabled (helper == full for now) and used for outbound; overlay-only mode for the NAT lab.
 - Full/helper remain overlay-only; bridge/role changes do **not** alter DCUtR behaviour in full mode.
 - Helper API binds only when `--libp2p-helper-listen <addr>` is set (e.g., `127.0.0.1:38080`).
-- Ports: TCP P2P port stays unchanged (`--listen`/default p2p port); libp2p uses a dedicated port (`--libp2p-listen-port` or `KASPAD_LIBP2P_LISTEN_PORT`, default `p2p_port+1`). Libp2p is intentionally **not** multiplexed on the P2P TCP port.
+- Ports: TCP P2P port stays unchanged (`--listen`/default p2p port); libp2p uses a dedicated port (`--libp2p-listen-port` or `KASPAD_LIBP2P_LISTEN_PORT`, default `p2p_port+1`). Relay listen port defaults to the same value unless explicitly overridden. Libp2p is intentionally **not** multiplexed on the P2P TCP port.
 - AutoNAT posture: client+server enabled in full/helper modes; server is public-only by default (`server_only_if_public=true`). Labs can opt into private IP reachability with `--libp2p-autonat-allow-private` / `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true`.
+
+## Terminology
+- "AutoNAT public escalation" in this branch means: role promotion to **public libp2p relay advertising**.
+- It is not generic TCP publicness on the legacy `--listen` port.
 
 ## Roles
 - `--libp2p-role=public|private|auto` (default `auto`).
 - In `auto`, runtime starts from private posture and promotes to `public` only after:
   - AutoNAT public confirmations (threshold from `--libp2p-autonat-confidence-threshold`, default 3),
-  - direct inbound evidence,
+  - one inbound direct **non-relay libp2p** connection,
   - and at least one usable external address.
 - Auto mode demotes back to `private` when those signals age out.
 - **public**: advertises the libp2p relay service bit/relay_port and keeps the existing libp2p inbound split alongside TCP inbound peers.
 - **private/auto**: does **not** advertise relay capability; libp2p inbound peers are capped (default 8) while TCP inbound limits stay unchanged.
+
+## What AutoNAT proves
+- AutoNAT evidence applies to the libp2p transport endpoint (the libp2p listener port), not to legacy Kaspa TCP P2P alone.
+- Default port mapping is `libp2p_port = p2p_port + 1`, but operators can override both explicitly.
+- If only legacy P2P TCP is reachable and libp2p port is not reachable, auto role should not promote to public relay advertising.
 
 ## Identity & privacy
 - Default identity is **ephemeral**. Persist only when `--libp2p-identity-path <path>` is provided (or `KASPAD_LIBP2P_IDENTITY_PATH`).
