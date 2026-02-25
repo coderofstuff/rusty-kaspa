@@ -32,7 +32,8 @@ How it works (high level)
 2) Private nodes collect relay candidates (gossip + config list).
 3) Relay pool scores, filters (multi-source), and selects relays.
 4) Auto worker reserves circuits and rotates on failures/age.
-5) Inbound peers dial reserved circuit; DCUtR can still upgrade to direct.
+5) Inbound peers dial reserved circuit; DCUtR can upgrade to direct.
+6) After direct is established for a peer, relay path for that peer is closed and not re-dialed while direct remains healthy; relay stays available as fallback if direct later fails.
 
 Relay capability metadata
 - Service bit: NET_ADDRESS_SERVICE_LIBP2P_RELAY indicates relay support.

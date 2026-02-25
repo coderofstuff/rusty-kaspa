@@ -10,7 +10,7 @@ Goal: follow Michael’s constraints precisely.
 ## Current state (in code today)
 Status tags: [present] [partial] [missing]
 - Libp2p mode bridge/full; role defaults to private. [present]
-- PathUpgradeEvent -> UpgradeCoordinator closes relay after direct path. [present]
+- PathUpgradeEvent -> UpgradeCoordinator closes relay after direct path; connection manager skips relay re-dial for that peer while direct stays healthy. [present]
 - Synthetic address suppression in address manager (prevents DCUtR pollution). [present]
 - Private inbound cap exists and enforced (default 8). [present]
 - Per‑relay inbound caps exist (config + enforcement). [present]
@@ -41,7 +41,7 @@ Status tags: [present] [partial] [missing]
 3) Rotation
    - Rotate relay on: failures, timeouts, stale ttl, or long-lived bias.
    - Backoff + quarantine relays with repeated failures.
-   - Guard against upgrade loops (relay→direct→relay churn) with cooldowns.
+- Guard against upgrade loops (relay→direct→relay churn) with cooldowns and direct-health gating.
 
 4) Private inbound cap
    - Enforce libp2p inbound cap for role=private.

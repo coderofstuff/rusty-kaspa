@@ -364,7 +364,7 @@ grep -E "peer id|reservation" /tmp/kaspa-c.log
 
 5. Dial Node A via relay from Node B and Node C helper APIs.
 
-**Expected outcome:** Node A enforces the relay cap at steady state. Transient duplicate relay/direct entries can appear during churn.
+**Expected outcome:** Node A enforces the relay cap at steady state. Transient duplicate relay/direct entries can appear during handoff, but should not persist for an upgraded direct peer.
 Check Node A helper peers output twice (30s apart) and confirm it does not keep more than one stable relay-path slot per capped relay.
 
 ## Step 9: New Feature Checks (Relay Hints + Auto)
@@ -548,7 +548,7 @@ If you want to keep a single relay, you can set `KASPAD_LIBP2P_RELAY_MIN_SOURCES
 grep -E "relay hint|relay auto|Connecting to relay target|reservation accepted" /tmp/kaspa-a.log | tail -n 50
 ```
 
-**Expected:** Node A establishes a relay‑path connection to Node B (then DCUtR upgrades to direct).
+**Expected:** Node A may establish a relay-path connection to Node B first, then DCUtR upgrades to direct. Once direct is healthy, Node A should not re-open relay path for that same peer unless direct later drops.
 
 ### 10.2 Hint staleness + rotation
 

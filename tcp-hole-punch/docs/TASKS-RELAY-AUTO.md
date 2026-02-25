@@ -67,8 +67,8 @@ Goal: fully automatic private<->private connectivity in public with DCUtR.
 
 ## E. Verification
 - [x] **Lab runbook:**
-  - Private A/B + public relay. Confirm: discovery -> relay dial -> DCUtR upgrade -> relay close.
-  - Capture logs for: relay selection, reservation, dcutr upgrade, relay close.
+  - Private A/B + public relay. Confirm: discovery -> relay dial -> DCUtR upgrade -> relay close for upgraded peer -> no opportunistic relay re-dial for that peer while direct remains healthy.
+  - Capture logs for: relay selection, reservation, dcutr upgrade, relay close, direct-path relay re-dial skip.
 - [ ] **Testnet smoke:**
   - Mixed public/private nodes with metrics snapshot.
   - Validate private inbound cap stays ~8 and per‑relay caps hold.
