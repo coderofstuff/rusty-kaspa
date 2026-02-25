@@ -218,6 +218,13 @@ impl ConnectionManager {
                 };
                 scan_budget = scan_budget.saturating_sub(1);
                 if let Some((dial_addr, relay_target)) = Self::relay_dial_plan(&net_addr) {
+                    if Self::has_direct_connection_to_peer(peer_by_address, &relay_target.target_peer_id) {
+                        debug!(
+                            "Connection manager: skipping relay rendezvous for {} because direct path is already healthy",
+                            relay_target.target_peer_id
+                        );
+                        continue;
+                    }
                     if let Some(relay_peer_id) = relay_target.relay_peer_id.as_ref() {
                         relay_peer_id_by_key.insert(relay_target.relay_key.clone(), relay_peer_id.clone());
                     }

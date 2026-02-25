@@ -145,6 +145,13 @@ impl ConnectionManager {
             .any(|peer| peer.is_outbound() && matches!(peer.metadata().path, PathKind::Relay { relay_id: Some(_) }))
     }
 
+    pub(super) fn has_direct_connection_to_peer(peer_by_address: &HashMap<SocketAddr, Peer>, target_peer_id: &str) -> bool {
+        peer_by_address.values().any(|peer| {
+            let md = peer.metadata();
+            md.libp2p_peer_id.as_deref() == Some(target_peer_id) && matches!(md.path, PathKind::Direct)
+        })
+    }
+
     pub(super) fn relay_circuit_addr(hint: &str, target_peer_id: &str) -> Option<String> {
         hint::relay_circuit_addr(hint, target_peer_id)
     }
@@ -277,7 +284,22 @@ pub(crate) mod tests {
     use tokio::sync::Mutex as AsyncMutex;
 
     fn make_peer_with_path_and_direction(path: PathKind, ip: Ipv4Addr, caps: Capabilities, is_outbound: bool) -> Peer {
-        let metadata = TransportMetadata { path, capabilities: caps, ..Default::default() };
+        make_peer_with_path_direction_and_libp2p_id(path, ip, caps, is_outbound, None)
+    }
+
+    fn make_peer_with_path_direction_and_libp2p_id(
+        path: PathKind,
+        ip: Ipv4Addr,
+        caps: Capabilities,
+        is_outbound: bool,
+        libp2p_peer_id: Option<&str>,
+    ) -> Peer {
+        let metadata = TransportMetadata {
+            path,
+            capabilities: caps,
+            libp2p_peer_id: libp2p_peer_id.map(ToString::to_string),
+            ..Default::default()
+        };
         Peer::new(
             PeerId::default(),
             SocketAddr::from((ip, 16000)),
@@ -505,6 +527,57 @@ pub(crate) mod tests {
 
         peers.insert(outbound_relay.net_address(), outbound_relay);
         assert!(ConnectionManager::has_outbound_relay_connection(&peers));
+    }
+
+    #[test]
+    fn direct_connection_detection_matches_target_peer_id_for_any_direction() {
+        let target_peer_id = "12D3KooTarget";
+        let outbound_other = make_peer_with_path_direction_and_libp2p_id(
+            PathKind::Direct,
+            Ipv4Addr::new(10, 12, 0, 1),
+            Capabilities { libp2p: true },
+            true,
+            Some("12D3KooOther"),
+        );
+        let inbound_target = make_peer_with_path_direction_and_libp2p_id(
+            PathKind::Direct,
+            Ipv4Addr::new(10, 12, 0, 2),
+            Capabilities { libp2p: true },
+            false,
+            Some(target_peer_id),
+        );
+
+        let mut peers = HashMap::new();
+        peers.insert(outbound_other.net_address(), outbound_other);
+        peers.insert(inbound_target.net_address(), inbound_target);
+
+        assert!(ConnectionManager::has_direct_connection_to_peer(&peers, target_peer_id));
+        assert!(!ConnectionManager::has_direct_connection_to_peer(&peers, "12D3KooMissing"));
+    }
+
+    #[test]
+    fn direct_connection_detection_ignores_relay_and_unknown_paths() {
+        let target_peer_id = "12D3KooTarget";
+        let relay_target = make_peer_with_path_direction_and_libp2p_id(
+            PathKind::Relay { relay_id: Some("relay-1".to_string()) },
+            Ipv4Addr::new(10, 13, 0, 1),
+            Capabilities { libp2p: true },
+            true,
+            Some(target_peer_id),
+        );
+        let unknown_target = make_peer_with_path_direction_and_libp2p_id(
+            PathKind::Unknown,
+            Ipv4Addr::new(10, 13, 0, 2),
+            Capabilities { libp2p: true },
+            true,
+            Some(target_peer_id),
+        );
+
+        let mut peers = HashMap::new();
+        peers.insert(relay_target.net_address(), relay_target);
+        peers.insert(unknown_target.net_address(), unknown_target);
+
+        assert!(!ConnectionManager::has_direct_connection_to_peer(&peers, target_peer_id));
     }
 
     #[test]
