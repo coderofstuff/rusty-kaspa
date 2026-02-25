@@ -41,7 +41,7 @@ Status tags: [present] [partial] [missing]
 3) Rotation
    - Rotate relay on: failures, timeouts, stale ttl, or long-lived bias.
    - Backoff + quarantine relays with repeated failures.
-- Guard against upgrade loops (relay→direct→relay churn) with cooldowns and direct-health gating.
+   - Guard against upgrade loops (relay→direct→relay churn) with cooldowns and direct-health gating.
 
 4) Private inbound cap
    - Enforce libp2p inbound cap for role=private.
