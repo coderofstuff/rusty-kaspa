@@ -51,8 +51,7 @@ impl SwarmDriver {
         shutdown: Listener,
         metrics: Option<Arc<Libp2pMetrics>>,
     ) -> Self {
-        let local_peer_id = *swarm.local_peer_id();
-        let active_relay = reservations.into_iter().find_map(|r| relay_info_from_multiaddr(&r.multiaddr, local_peer_id));
+        let _ = reservations;
         let auto_role = if matches!(config_role, crate::Role::Auto) {
             Some(AutoRoleState::new(role_tx, auto_role_window, auto_role_required_autonat, auto_role_required_direct))
         } else {
@@ -71,6 +70,7 @@ impl SwarmDriver {
             incoming_tx,
             pending_dials: HashMap::new(),
             pending_probes: HashMap::new(),
+            pending_reservations: HashMap::new(),
             dialback_cooldowns: HashMap::new(),
             direct_upgrade_cooldowns: HashMap::new(),
             listen_addrs,
@@ -80,7 +80,7 @@ impl SwarmDriver {
             peer_states: HashMap::new(),
             dcutr_retries: HashMap::new(),
             reservation_listeners: HashSet::new(),
-            active_relay,
+            active_relay: None,
             active_relay_listener: None,
             auto_role,
             max_peers_per_relay: max_peers_per_relay.max(1),

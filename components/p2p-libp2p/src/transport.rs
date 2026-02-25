@@ -42,7 +42,9 @@ mod test_support;
 mod tests;
 
 use self::auto_role::{AUTO_ROLE_REQUIRED_DIRECT, AUTO_ROLE_WINDOW, AutoRoleState};
-use self::driver::{ConnectionEntry, DcutrRetryState, DialVia, LocalCandidateMeta, PeerState, RelayInfo, ReservationTarget};
+use self::driver::{
+    ConnectionEntry, DcutrRetryState, DialVia, LocalCandidateMeta, PeerState, PendingReservation, RelayInfo, ReservationTarget,
+};
 #[cfg(test)]
 use self::driver::{LocalCandidateSource, fallback_old_instant, is_dcutr_retry_trigger_error_text, is_retryable_dcutr_error_text};
 pub use self::identity::Libp2pIdentity;
@@ -380,6 +382,7 @@ struct SwarmDriver {
     incoming_tx: mpsc::Sender<IncomingStream>,
     pending_dials: HashMap<StreamRequestId, DialRequest>,
     pending_probes: HashMap<StreamRequestId, PendingProbe>,
+    pending_reservations: HashMap<PeerId, Vec<PendingReservation>>,
     dialback_cooldowns: HashMap<PeerId, Instant>,
     direct_upgrade_cooldowns: HashMap<PeerId, Instant>,
     listen_addrs: Vec<Multiaddr>,

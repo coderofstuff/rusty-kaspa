@@ -94,3 +94,10 @@ pub(crate) struct ConnectionEntry {
     pub(crate) since: Instant,
     pub(crate) dcutr_upgraded: bool,
 }
+
+pub(crate) struct PendingReservation {
+    pub(crate) listener_id: ListenerId,
+    pub(crate) relay: RelayInfo,
+    pub(crate) respond_to: oneshot::Sender<Result<ListenerId, Libp2pError>>,
+    pub(crate) started_at: Instant,
+}

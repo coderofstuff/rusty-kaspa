@@ -1,4 +1,5 @@
 use super::*;
+use tokio::sync::oneshot::error::TryRecvError;
 
 #[tokio::test]
 async fn multiple_relay_dials_can_succeed() {
@@ -59,6 +60,52 @@ async fn multiple_relay_dials_timeout_cleanly() {
     assert!(driver.pending_dials.is_empty());
     assert!(rx1.await.unwrap().is_err());
     assert!(rx2.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn reservation_ack_waits_for_relay_acceptance() {
+    let (mut driver, _) = test_driver(4);
+    let relay_peer = PeerId::random();
+    let target: Multiaddr = format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay_peer}/p2p-circuit").parse().unwrap();
+    let (tx, mut rx) = oneshot::channel();
+
+    driver.handle_command(SwarmCommand::Reserve { target, respond_to: tx }).await;
+
+    assert!(driver.active_relay.is_none(), "reservation should not be considered active before relay confirms it");
+    assert!(driver.pending_reservations.contains_key(&relay_peer));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+    driver.handle_relay_client_event(relay::client::Event::ReservationReqAccepted {
+        relay_peer_id: relay_peer,
+        renewal: false,
+        limit: None,
+    });
+
+    let listener = rx.await.expect("reservation response channel").expect("reservation should be accepted");
+    assert_eq!(driver.active_relay_listener, Some(listener));
+    assert_eq!(driver.active_relay.as_ref().map(|relay| relay.relay_peer), Some(relay_peer));
+    assert!(!driver.pending_reservations.contains_key(&relay_peer));
+}
+
+#[tokio::test]
+async fn pending_reservation_times_out_and_cleans_listener() {
+    let (mut driver, _) = test_driver(4);
+    let relay_peer = PeerId::random();
+    let target: Multiaddr = format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay_peer}/p2p-circuit").parse().unwrap();
+    let (tx, rx) = oneshot::channel();
+
+    driver.handle_command(SwarmCommand::Reserve { target, respond_to: tx }).await;
+    let listener = driver.pending_reservations.get(&relay_peer).expect("pending reservation")[0].listener_id;
+    if let Some(pending) = driver.pending_reservations.get_mut(&relay_peer).and_then(|queue| queue.get_mut(0)) {
+        pending.started_at = Instant::now() - (PENDING_DIAL_TIMEOUT + Duration::from_secs(1));
+    }
+
+    driver.expire_pending_reservations("reservation timeout");
+
+    let result = rx.await.expect("reservation result");
+    assert!(matches!(result, Err(Libp2pError::ReservationFailed(_))));
+    assert!(!driver.reservation_listeners.contains(&listener));
+    assert!(!driver.pending_reservations.contains_key(&relay_peer));
 }
 
 #[tokio::test]

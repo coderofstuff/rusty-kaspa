@@ -186,24 +186,21 @@ impl ConnectionManager {
     async fn handle_outbound_connections(self: &Arc<Self>, peer_by_address: &HashMap<SocketAddr, Peer>) {
         let active_outbound: HashSet<kaspa_addressmanager::NetAddress> =
             peer_by_address.values().filter(|peer| peer.is_outbound()).map(|peer| peer.net_address().into()).collect();
-        if active_outbound.len() >= self.outbound_target {
+        let active_libp2p_peer_ids = Self::active_libp2p_peer_ids(peer_by_address);
+        let force_private_rendezvous =
+            active_outbound.len() >= self.outbound_target && !Self::has_outbound_relay_connection(peer_by_address);
+        if active_outbound.len() >= self.outbound_target && !force_private_rendezvous {
             return;
         }
-        let active_libp2p_peer_ids: HashSet<String> = peer_by_address
-            .values()
-            .filter_map(|peer| {
-                let md = peer.metadata();
-                if md.capabilities.libp2p { md.libp2p_peer_id.clone() } else { None }
-            })
-            .collect();
 
-        let mut missing_connections = self.outbound_target - active_outbound.len();
+        let mut missing_connections = if force_private_rendezvous { 1 } else { self.outbound_target - active_outbound.len() };
         let mut addr_iter = self.address_manager.lock().iterate_prioritized_random_addresses(active_outbound);
         let mut used_relays = Self::active_relay_usage(peer_by_address);
         let mut relay_peer_id_by_key = self.relay_peer_id_by_key.lock().await.clone();
         let mut assigned_relays_by_target: HashMap<String, String> = HashMap::new();
         let mut progressing = true;
         let mut connecting = true;
+        let mut scan_budget = if force_private_rendezvous { 64 } else { usize::MAX };
         while connecting && missing_connections > 0 {
             if self.shutdown_signal.trigger.is_triggered() {
                 return;
@@ -211,10 +208,15 @@ impl ConnectionManager {
             let mut addrs_to_connect = Vec::with_capacity(missing_connections);
             let mut jobs = Vec::with_capacity(missing_connections);
             for _ in 0..missing_connections {
+                if scan_budget == 0 {
+                    connecting = false;
+                    break;
+                }
                 let Some(net_addr) = addr_iter.next() else {
                     connecting = false;
                     break;
                 };
+                scan_budget = scan_budget.saturating_sub(1);
                 if let Some((dial_addr, relay_target)) = Self::relay_dial_plan(&net_addr) {
                     if let Some(relay_peer_id) = relay_target.relay_peer_id.as_ref() {
                         relay_peer_id_by_key.insert(relay_target.relay_key.clone(), relay_peer_id.clone());
@@ -241,6 +243,9 @@ impl ConnectionManager {
                         }
                     }
                 }
+                if force_private_rendezvous {
+                    continue;
+                }
                 if net_addr.is_synthetic_relay_hint() {
                     continue;
                 }
@@ -255,13 +260,19 @@ impl ConnectionManager {
 
             if progressing && !jobs.is_empty() {
                 // Log only if progress was made
-                info!(
-                    "Connection manager: has {}/{} outgoing P2P connections, trying to obtain {} additional connection(s)...",
-                    self.outbound_target - missing_connections,
-                    self.outbound_target,
-                    jobs.len(),
-                );
+                if force_private_rendezvous {
+                    info!("Connection manager: outbound target met; probing private relay rendezvous path");
+                } else {
+                    info!(
+                        "Connection manager: has {}/{} outgoing P2P connections, trying to obtain {} additional connection(s)...",
+                        self.outbound_target - missing_connections,
+                        self.outbound_target,
+                        jobs.len(),
+                    );
+                }
                 progressing = false;
+            } else if force_private_rendezvous {
+                debug!("Connection manager: private relay rendezvous scan, connecting: {}, iterator: {}", jobs.len(), addr_iter.len());
             } else {
                 debug!(
                     "Connection manager: outgoing: {}/{} , connecting: {}, iterator: {}",
@@ -275,15 +286,22 @@ impl ConnectionManager {
                 match res {
                     Ok(_) => {
                         self.address_manager.lock().mark_connection_success(plan.address);
-                        missing_connections -= 1;
+                        missing_connections = missing_connections.saturating_sub(1);
                         progressing = true;
                         if let Some(relay) = plan.relay.as_ref() {
                             self.record_relay_dial_success(relay).await;
+                        }
+                        if force_private_rendezvous {
+                            info!("Connection manager: established opportunistic private relay rendezvous");
+                            connecting = false;
                         }
                     }
                     Err(ConnectionError::ProtocolError(ProtocolError::PeerAlreadyExists(_))) => {
                         // We avoid marking the existing connection as connection failure
                         debug!("Failed connecting to {:?}, peer already exists", plan.address);
+                        if force_private_rendezvous {
+                            connecting = false;
+                        }
                     }
                     Err(err) => {
                         debug!("Failed connecting to {:?}, err: {}", plan.address, err);
@@ -291,12 +309,15 @@ impl ConnectionManager {
                         if let Some(relay) = plan.relay.as_ref() {
                             self.record_relay_dial_failure(relay, Instant::now()).await;
                         }
+                        if force_private_rendezvous {
+                            connecting = false;
+                        }
                     }
                 }
             }
         }
 
-        if missing_connections > 0 && !self.dns_seeders.is_empty() {
+        if !force_private_rendezvous && missing_connections > 0 && !self.dns_seeders.is_empty() {
             if missing_connections > self.outbound_target / 2 {
                 // If we are missing more than half of our target, query all in parallel.
                 // This will always be the case on new node start-up and is the most resilient strategy in such a case.
@@ -306,6 +327,16 @@ impl ConnectionManager {
                 self.dns_seed_with_address_target(2 * missing_connections).await;
             }
         }
+    }
+
+    fn active_libp2p_peer_ids(peer_by_address: &HashMap<SocketAddr, Peer>) -> HashSet<String> {
+        peer_by_address
+            .values()
+            .filter_map(|peer| {
+                let md = peer.metadata();
+                if md.capabilities.libp2p { md.libp2p_peer_id.clone() } else { None }
+            })
+            .collect()
     }
 
     async fn handle_inbound_connections(self: &Arc<Self>, peer_by_address: &HashMap<SocketAddr, Peer>) {

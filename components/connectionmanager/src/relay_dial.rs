@@ -139,6 +139,12 @@ impl ConnectionManager {
         usage
     }
 
+    pub(super) fn has_outbound_relay_connection(peer_by_address: &HashMap<SocketAddr, Peer>) -> bool {
+        peer_by_address
+            .values()
+            .any(|peer| peer.is_outbound() && matches!(peer.metadata().path, PathKind::Relay { relay_id: Some(_) }))
+    }
+
     pub(super) fn relay_circuit_addr(hint: &str, target_peer_id: &str) -> Option<String> {
         hint::relay_circuit_addr(hint, target_peer_id)
     }
@@ -473,6 +479,32 @@ pub(crate) mod tests {
         assert_eq!(usage.get("relay-1"), Some(&2));
         assert_eq!(usage.get("relay-2"), Some(&1));
         assert_eq!(usage.len(), 2);
+    }
+
+    #[test]
+    fn outbound_relay_connection_detection_requires_outbound_relay_path() {
+        let outbound_direct =
+            make_peer_with_path_and_direction(PathKind::Direct, Ipv4Addr::new(10, 11, 0, 1), Capabilities { libp2p: true }, true);
+        let outbound_relay = make_peer_with_path_and_direction(
+            PathKind::Relay { relay_id: Some("relay-1".to_string()) },
+            Ipv4Addr::new(10, 11, 0, 2),
+            Capabilities { libp2p: true },
+            true,
+        );
+        let inbound_relay = make_peer_with_path_and_direction(
+            PathKind::Relay { relay_id: Some("relay-2".to_string()) },
+            Ipv4Addr::new(10, 11, 0, 3),
+            Capabilities { libp2p: true },
+            false,
+        );
+
+        let mut peers = HashMap::new();
+        peers.insert(outbound_direct.net_address(), outbound_direct);
+        peers.insert(inbound_relay.net_address(), inbound_relay);
+        assert!(!ConnectionManager::has_outbound_relay_connection(&peers));
+
+        peers.insert(outbound_relay.net_address(), outbound_relay);
+        assert!(ConnectionManager::has_outbound_relay_connection(&peers));
     }
 
     #[test]

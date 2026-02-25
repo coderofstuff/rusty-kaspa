@@ -12,6 +12,7 @@ impl SwarmDriver {
                 _ = cleanup.tick() => {
                     self.expire_pending_dials("dial timed out");
                     self.expire_pending_probes("relay probe timed out");
+                    self.expire_pending_reservations("reservation timed out waiting for relay acceptance");
                     self.process_scheduled_dcutr_retries();
                 }
                 cmd = self.command_rx.recv() => {
@@ -34,6 +35,11 @@ impl SwarmDriver {
         }
         for (_, pending) in self.pending_probes.drain() {
             let _ = pending.respond_to.send(Err(Libp2pError::DialFailed("libp2p driver stopped".into())));
+        }
+        for mut entries in self.pending_reservations.drain().map(|(_, entries)| entries) {
+            for pending in entries.drain(..) {
+                let _ = pending.respond_to.send(Err(Libp2pError::ReservationFailed("libp2p driver stopped".into())));
+            }
         }
     }
     pub(super) async fn handle_event(&mut self, event: SwarmEvent<Libp2pEvent>) {

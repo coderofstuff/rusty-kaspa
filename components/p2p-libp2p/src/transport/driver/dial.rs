@@ -23,6 +23,20 @@ impl SwarmDriver {
             self.fail_probe(id, reason);
         }
     }
+    pub(super) fn expire_pending_reservations(&mut self, reason: &str) {
+        let now = Instant::now();
+        let mut expired_listeners = Vec::new();
+        for reservations in self.pending_reservations.values() {
+            for pending in reservations {
+                if now.saturating_duration_since(pending.started_at) >= PENDING_DIAL_TIMEOUT {
+                    expired_listeners.push(pending.listener_id);
+                }
+            }
+        }
+        for listener in expired_listeners {
+            self.fail_pending_reservation(listener, reason);
+        }
+    }
     pub(super) fn fail_pending(&mut self, request_id: StreamRequestId, err: impl ToString) {
         if let Some(pending) = self.pending_dials.remove(&request_id) {
             let _ = pending.respond_to.send(Err(Libp2pError::DialFailed(err.to_string())));
@@ -31,6 +45,38 @@ impl SwarmDriver {
     pub(super) fn fail_probe(&mut self, request_id: StreamRequestId, err: impl ToString) {
         if let Some(pending) = self.pending_probes.remove(&request_id) {
             let _ = pending.respond_to.send(Err(Libp2pError::DialFailed(err.to_string())));
+        }
+    }
+    pub(super) fn take_pending_reservation_for_relay(&mut self, relay_peer: PeerId) -> Option<PendingReservation> {
+        let queue = self.pending_reservations.get_mut(&relay_peer)?;
+        if queue.is_empty() {
+            self.pending_reservations.remove(&relay_peer);
+            return None;
+        }
+        let pending = queue.remove(0);
+        if queue.is_empty() {
+            self.pending_reservations.remove(&relay_peer);
+        }
+        Some(pending)
+    }
+    pub(super) fn take_pending_reservation_by_listener(&mut self, listener_id: ListenerId) -> Option<PendingReservation> {
+        let relay_peer = self
+            .pending_reservations
+            .iter()
+            .find_map(|(relay_peer, queue)| queue.iter().any(|pending| pending.listener_id == listener_id).then_some(*relay_peer))?;
+        let queue = self.pending_reservations.get_mut(&relay_peer)?;
+        let idx = queue.iter().position(|pending| pending.listener_id == listener_id)?;
+        let pending = queue.remove(idx);
+        if queue.is_empty() {
+            self.pending_reservations.remove(&relay_peer);
+        }
+        Some(pending)
+    }
+    pub(super) fn fail_pending_reservation(&mut self, listener_id: ListenerId, err: impl ToString) {
+        if let Some(pending) = self.take_pending_reservation_by_listener(listener_id) {
+            self.reservation_listeners.remove(&pending.listener_id);
+            let _ = self.swarm.remove_listener(pending.listener_id);
+            let _ = pending.respond_to.send(Err(Libp2pError::ReservationFailed(err.to_string())));
         }
     }
     pub(super) fn enqueue_incoming(&self, incoming: IncomingStream) {
@@ -99,10 +145,27 @@ impl SwarmDriver {
                 match self.swarm.listen_on(target) {
                     Ok(listener) => {
                         self.reservation_listeners.insert(listener);
-                        if let Some(info) = relay_info_from_multiaddr(&target_for_info, *self.swarm.local_peer_id()) {
-                            self.set_active_relay(info, Some(listener));
+                        match relay_info_from_multiaddr(&target_for_info, *self.swarm.local_peer_id()) {
+                            Some(relay) => {
+                                info!(
+                                    "libp2p reservation request started via relay {} listener={listener:?}; waiting for acceptance",
+                                    relay.relay_peer
+                                );
+                                self.pending_reservations.entry(relay.relay_peer).or_default().push(PendingReservation {
+                                    listener_id: listener,
+                                    relay,
+                                    respond_to,
+                                    started_at: Instant::now(),
+                                });
+                            }
+                            None => {
+                                self.reservation_listeners.remove(&listener);
+                                let _ = self.swarm.remove_listener(listener);
+                                let _ = respond_to.send(Err(Libp2pError::ReservationFailed(
+                                    "reservation target missing relay peer id".into(),
+                                )));
+                            }
                         }
-                        let _ = respond_to.send(Ok(listener));
                     }
                     Err(err) => {
                         let _ = respond_to.send(Err(Libp2pError::ReservationFailed(err.to_string())));
@@ -110,6 +173,7 @@ impl SwarmDriver {
                 }
             }
             SwarmCommand::ReleaseReservation { listener_id, respond_to } => {
+                self.fail_pending_reservation(listener_id, "reservation released before acceptance");
                 self.reservation_listeners.remove(&listener_id);
                 let _ = self.swarm.remove_listener(listener_id);
                 if self.active_relay_listener == Some(listener_id) {

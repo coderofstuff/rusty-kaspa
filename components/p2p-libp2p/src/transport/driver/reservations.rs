@@ -3,7 +3,12 @@ impl SwarmDriver {
         #[allow(unreachable_patterns)]
         match event {
             relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
-                info!("libp2p reservation accepted by {relay_peer_id}, renewal={renewal}");
+                let accepted_pending = self.take_pending_reservation_for_relay(relay_peer_id);
+                info!("libp2p reservation accepted by {relay_peer_id}, renewal={renewal}, pending={}", accepted_pending.is_some());
+                if let Some(pending) = accepted_pending {
+                    self.set_active_relay(pending.relay, Some(pending.listener_id));
+                    let _ = pending.respond_to.send(Ok(pending.listener_id));
+                }
             }
             relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
                 info!("libp2p outbound circuit established via {relay_peer_id}");
