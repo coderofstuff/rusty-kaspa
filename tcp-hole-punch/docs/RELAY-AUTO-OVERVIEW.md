@@ -80,8 +80,8 @@ Observability
 
 Config + CLI knobs (high level)
 - Mode/role/identity path (persisted identity support).
-- Listen ports: libp2p listen + relay listen.
-- Port semantics: libp2p listen defaults to `p2p_port + 1`, but can be overridden with `--libp2p-listen-port` / `--libp2p-relay-listen-port` (or env).
+- Listen port: single libp2p listen port used for libp2p + relay protocols.
+- Port semantics: libp2p listen defaults to `p2p_port + 1`, but can be overridden with `--libp2p-listen-port` (or env).
 - AutoNAT reachability checks apply to the libp2p listener endpoint, not the legacy Kaspa TCP P2P listener.
 - Reservations list (static/manual) and relay candidates list (auto sources).
 - External multiaddrs + advertise addresses.

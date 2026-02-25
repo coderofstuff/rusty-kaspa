@@ -350,7 +350,7 @@ nohup ~/rusty-kaspa/target/release/kaspad \
   --appdir=/tmp/kaspa-c \
   --listen=192.168.2.10:16121 \
   --rpclisten=192.168.2.10:16120 \
-  --libp2p-relay-listen-port=16122 \
+  --libp2p-listen-port=16122 \
   --libp2p-mode=bridge \
   --libp2p-role=auto \
   --libp2p-identity-path=/tmp/node-c.key \
@@ -522,7 +522,6 @@ nohup ~/rusty-kaspa/target/release/kaspad \
   --libp2p-identity-path=/tmp/relay2.key \
   --libp2p-helper-listen=127.0.0.1:38081 \
   --libp2p-listen-port=16212 \
-  --libp2p-relay-listen-port=16212 \
   --libp2p-external-multiaddrs=/ip4/10.0.3.26/tcp/16212 \
   --nodnsseed \
   --nologfiles > /tmp/kaspa-relay2.log 2>&1 &
@@ -678,7 +677,7 @@ nohup ~/rusty-kaspa/target/release/kaspad \
   --appdir=/tmp/kaspa-c \
   --listen=192.168.2.10:16121 \
   --rpclisten=192.168.2.10:16120 \
-  --libp2p-relay-listen-port=16122 \
+  --libp2p-listen-port=16122 \
   --libp2p-mode=bridge \
   --libp2p-role=auto \
   --libp2p-identity-path=/tmp/node-c.key \

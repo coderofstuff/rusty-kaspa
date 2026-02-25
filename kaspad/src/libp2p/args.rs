@@ -63,8 +63,6 @@ pub struct Libp2pArgs {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub libp2p_helper_listen: Option<SocketAddr>,
-    /// Optional dedicated libp2p relay listen port (defaults to the p2p port + 1).
-    pub libp2p_relay_listen_port: Option<u16>,
     /// Optional dedicated libp2p listen port (defaults to p2p port + 1).
     pub libp2p_listen_port: Option<u16>,
     /// Optional inbound caps for libp2p relay connections (per relay / unknown relay bucket).
@@ -105,7 +103,6 @@ impl Default for Libp2pArgs {
             libp2p_role_set_from_cli: false,
             libp2p_identity_path: None,
             libp2p_helper_listen: None,
-            libp2p_relay_listen_port: None,
             libp2p_listen_port: None,
             libp2p_relay_inbound_cap: None,
             libp2p_relay_inbound_unknown_cap: None,

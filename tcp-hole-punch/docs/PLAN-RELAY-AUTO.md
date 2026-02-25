@@ -92,7 +92,7 @@ Status tags: [present] [partial] [missing]
 ### Phase 3: Caps + controls
 - Enforce private inbound cap in libp2p inbound admission path.
 - Flags:
-  - `--libp2p-relay-listen-port`
+  - `--libp2p-listen-port`
   - `--libp2p-max-relays`
   - `--libp2p-max-peers-per-relay`
   - `--libp2p-inbound-cap-private`

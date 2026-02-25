@@ -494,15 +494,6 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .help("Enable the libp2p helper/control API on the specified socket address. Disabled unless set explicitly."),
         )
         .arg(
-            Arg::new("libp2p-relay-listen-port")
-                .long("libp2p-relay-listen-port")
-                .env("KASPAD_LIBP2P_RELAY_LISTEN_PORT")
-                .value_name("PORT")
-                .require_equals(true)
-                .value_parser(clap::value_parser!(u16))
-                .help("Dedicated libp2p relay listen port (defaults to the p2p port + 1)."),
-        )
-        .arg(
             Arg::new("libp2p-listen-port")
                 .long("libp2p-listen-port")
                 .env("KASPAD_LIBP2P_LISTEN_PORT")
@@ -733,10 +724,6 @@ impl Args {
                     .get_one::<SocketAddr>("libp2p-helper-listen")
                     .copied()
                     .or(defaults.libp2p.libp2p_helper_listen),
-                libp2p_relay_listen_port: m
-                    .get_one::<u16>("libp2p-relay-listen-port")
-                    .copied()
-                    .or(defaults.libp2p.libp2p_relay_listen_port),
                 libp2p_listen_port: m.get_one::<u16>("libp2p-listen-port").copied().or(defaults.libp2p.libp2p_listen_port),
                 libp2p_relay_inbound_cap: m
                     .get_one::<usize>("libp2p-relay-inbound-cap")

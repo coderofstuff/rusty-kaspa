@@ -20,7 +20,6 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
     let env_role = env::var("KASPAD_LIBP2P_ROLE").ok().and_then(|s| parse_libp2p_role(&s));
     let env_identity_path = env::var("KASPAD_LIBP2P_IDENTITY_PATH").ok().map(PathBuf::from);
     let env_helper_listen = env::var("KASPAD_LIBP2P_HELPER_LISTEN").ok().and_then(|s| s.parse::<SocketAddr>().ok());
-    let env_relay_listen_port = env::var("KASPAD_LIBP2P_RELAY_LISTEN_PORT").ok().and_then(|s| s.parse::<u16>().ok());
     let env_listen_port = env::var("KASPAD_LIBP2P_LISTEN_PORT").ok().and_then(|s| s.parse::<u16>().ok());
     let env_max_relays = env::var("KASPAD_LIBP2P_MAX_RELAYS").ok().and_then(|s| s.parse::<usize>().ok());
     let env_max_peers_per_relay = env::var("KASPAD_LIBP2P_MAX_PEERS_PER_RELAY").ok().and_then(|s| s.parse::<usize>().ok());
@@ -38,12 +37,7 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
 
     let identity_path = args.libp2p_identity_path.clone().or(env_identity_path);
     let helper_listen = args.libp2p_helper_listen.or(env_helper_listen);
-    let listen_port = args
-        .libp2p_relay_listen_port
-        .or(env_relay_listen_port)
-        .or(args.libp2p_listen_port)
-        .or(env_listen_port)
-        .unwrap_or_else(|| p2p_listen.port().saturating_add(1));
+    let listen_port = args.libp2p_listen_port.or(env_listen_port).unwrap_or_else(|| p2p_listen.port().saturating_add(1));
     let listen_addr = SocketAddr::new(p2p_listen.ip(), listen_port);
     let relay_inbound_cap =
         args.libp2p_relay_inbound_cap.or(env::var("KASPAD_LIBP2P_RELAY_INBOUND_CAP").ok().and_then(|s| s.parse().ok()));
