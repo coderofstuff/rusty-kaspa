@@ -1,0 +1,45 @@
+[package]
+name = "kaspa-p2p-libp2p"
+description = "Kaspa libp2p transport adapter (feature-gated)"
+rust-version.workspace = true
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+include.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kaspa-utils.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_with = { workspace = true }
+serde_json = { workspace = true }
+kaspa-p2p-lib.workspace = true
+futures-util = { workspace = true, default-features = false, features = ["alloc"] }
+thiserror.workspace = true
+log.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+rand.workspace = true
+libp2p = { version = "0.56.0", default-features = false, features = ["tokio", "tcp", "dns", "noise", "yamux", "macros", "ping", "identify", "relay", "dcutr", "autonat"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tempfile = "3.12.0"
+triggered.workspace = true
+
+[features]
+default = []
+libp2p = []
+
+[dev-dependencies]
+futures = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+async-trait.workspace = true
+kaspa-utils-tower.workspace = true
+
+[lints]
+workspace = true
+
+[[example]]
+name = "dcutr_harness"
+required-features = ["libp2p"]

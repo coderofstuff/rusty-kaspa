@@ -83,6 +83,7 @@ pub enum KaspadPayloadOps {
     GetSystemInfo,
     GetServerInfo,
     GetSyncStatus,
+    GetLibp2pStatus,
     GetDaaScoreTimestampEstimate,
     GetFeeEstimate,
     GetFeeEstimateExperimental,

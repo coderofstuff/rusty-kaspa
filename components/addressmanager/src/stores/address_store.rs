@@ -12,7 +12,7 @@ use std::{error::Error, fmt::Display, sync::Arc};
 use super::AddressKey;
 use crate::NetAddress;
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub connection_failed_count: u64,
     pub address: NetAddress,

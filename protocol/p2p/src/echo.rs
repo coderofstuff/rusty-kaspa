@@ -7,6 +7,7 @@ use crate::{
 };
 use kaspa_core::{debug, time::unix_now, trace, warn};
 use std::sync::Arc;
+use std::time::Duration;
 use tonic::async_trait;
 use uuid::Uuid;
 
@@ -118,7 +119,7 @@ impl ConnectionInitializer for EchoFlowInitializer {
         //
 
         // Build the handshake object and subscribe to handshake messages
-        let mut handshake = KaspadHandshake::new(&router);
+        let mut handshake = KaspadHandshake::new(&router, Duration::from_secs(4), Duration::from_secs(8));
 
         // We start the router receive loop only after we registered to handshake routes
         router.start();
@@ -148,7 +149,7 @@ mod tests {
     use std::{str::FromStr, time::Duration};
 
     use super::*;
-    use crate::{Adaptor, Hub};
+    use crate::{Adaptor, DirectMetadataFactory, Hub};
     use kaspa_core::debug;
     use kaspa_utils::networking::NetAddress;
 
@@ -157,10 +158,26 @@ mod tests {
         kaspa_core::log::try_init_logger("debug");
 
         let address1 = NetAddress::from_str("[::1]:50053").unwrap();
-        let adaptor1 = Adaptor::bidirectional(address1, Hub::new(), Arc::new(EchoFlowInitializer::new()), Default::default()).unwrap();
+        let adaptor1 = Adaptor::bidirectional(
+            address1,
+            Hub::new(),
+            Arc::new(EchoFlowInitializer::new()),
+            Default::default(),
+            Arc::new(DirectMetadataFactory),
+            Arc::new(kaspa_p2p_lib::TcpConnector),
+        )
+        .unwrap();
 
         let address2 = NetAddress::from_str("[::1]:50054").unwrap();
-        let adaptor2 = Adaptor::bidirectional(address2, Hub::new(), Arc::new(EchoFlowInitializer::new()), Default::default()).unwrap();
+        let adaptor2 = Adaptor::bidirectional(
+            address2,
+            Hub::new(),
+            Arc::new(EchoFlowInitializer::new()),
+            Default::default(),
+            Arc::new(DirectMetadataFactory),
+            Arc::new(kaspa_p2p_lib::TcpConnector),
+        )
+        .unwrap();
 
         // Initiate the connection from `adaptor1` (outbound) to `adaptor2` (inbound)
         let peer2_id = adaptor1

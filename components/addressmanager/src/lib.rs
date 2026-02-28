@@ -113,11 +113,11 @@ impl AddressManager {
     }
 
     fn local_addresses(&self) -> impl Iterator<Item = NetAddress> + '_ {
-        match self.config.externalip {
+        match &self.config.externalip {
             // An external IP was passed, we will try to bind that if it's valid
             Some(local_net_address) if local_net_address.ip.is_publicly_routable() => {
                 info!("External address is publicly routable {}", local_net_address);
-                return Left(iter::once(local_net_address));
+                return Left(iter::once(local_net_address.clone()));
             }
             Some(local_net_address) => {
                 info!("External address is not publicly routable {}", local_net_address);
@@ -164,14 +164,14 @@ impl AddressManager {
         info!("[UPnP] Got external ip from gateway using upnp: {ip}");
 
         let normalized_p2p_listen_address = self.config.p2p_listen_address.normalize(self.config.default_p2p_port());
+        let desired_external_port = normalized_p2p_listen_address.port;
         let local_addr = if normalized_p2p_listen_address.ip.is_unspecified() {
             SocketAddr::new(local_ip_address::local_ip().unwrap(), normalized_p2p_listen_address.port)
         } else {
-            normalized_p2p_listen_address.into()
+            normalized_p2p_listen_address.clone().into()
         };
 
         // If an operator runs a node and specifies a non-standard local port, it implies that they also wish to use a non-standard public address. The variable 'desired_external_port' is set to the port number from the normalized peer-to-peer listening address.
-        let desired_external_port = normalized_p2p_listen_address.port;
         // This loop checks for existing port mappings in the UPnP-enabled gateway.
         //
         // The goal of this loop is to identify if the desired external port (`desired_external_port`) is
@@ -217,7 +217,20 @@ impl AddressManager {
             let port =
                 gateway.add_any_port(igd::PortMappingProtocol::TCP, local_addr, UPNP_DEADLINE_SEC as u32, UPNP_REGISTRATION_NAME)?;
             info!("[UPnP] Added port mapping to random external port: {ip}:{port}");
-            return Ok(Some((NetAddress { ip, port }, ExtendHelper { gateway, local_addr, external_port: port })));
+            return Ok(Some((
+                NetAddress {
+                    ip,
+                    port,
+                    services: 0,
+                    relay_port: None,
+                    relay_capacity: None,
+                    relay_ttl_ms: None,
+                    relay_role: None,
+                    libp2p_peer_id: None,
+                    relay_circuit_hint: None,
+                },
+                ExtendHelper { gateway, local_addr, external_port: port },
+            )));
         }
 
         match gateway.add_port(
@@ -230,7 +243,17 @@ impl AddressManager {
             Ok(_) => {
                 info!("[UPnP] Added port mapping to default external port: {ip}:{desired_external_port}");
                 Ok(Some((
-                    NetAddress { ip, port: desired_external_port },
+                    NetAddress {
+                        ip,
+                        port: desired_external_port,
+                        services: 0,
+                        relay_port: None,
+                        relay_capacity: None,
+                        relay_ttl_ms: None,
+                        relay_role: None,
+                        libp2p_peer_id: None,
+                        relay_circuit_hint: None,
+                    },
                     ExtendHelper { gateway, local_addr, external_port: desired_external_port },
                 )))
             }
@@ -242,7 +265,20 @@ impl AddressManager {
                     UPNP_REGISTRATION_NAME,
                 )?;
                 info!("[UPnP] Added port mapping to random external port: {ip}:{port}");
-                Ok(Some((NetAddress { ip, port }, ExtendHelper { gateway, local_addr, external_port: port })))
+                Ok(Some((
+                    NetAddress {
+                        ip,
+                        port,
+                        services: 0,
+                        relay_port: None,
+                        relay_capacity: None,
+                        relay_ttl_ms: None,
+                        relay_role: None,
+                        libp2p_peer_id: None,
+                        relay_circuit_hint: None,
+                    },
+                    ExtendHelper { gateway, local_addr, external_port: port },
+                )))
             }
             Err(err) => Err(err.into()),
         }
@@ -254,7 +290,7 @@ impl AddressManager {
         } else {
             // TODO: Add logic for finding the best as a function of a peer remote address.
             // for now, returning the first one
-            Some(self.local_net_addresses[0])
+            Some(self.local_net_addresses[0].clone())
         }
     }
 
@@ -264,7 +300,8 @@ impl AddressManager {
             return;
         }
 
-        if self.address_store.has(address) {
+        if self.address_store.has(&address) {
+            self.address_store.merge_metadata(&address);
             return;
         }
 
@@ -273,20 +310,20 @@ impl AddressManager {
     }
 
     pub fn mark_connection_failure(&mut self, address: NetAddress) {
-        if !self.address_store.has(address) {
+        if !self.address_store.has(&address) {
             return;
         }
 
-        let new_count = self.address_store.get(address).connection_failed_count + 1;
+        let new_count = self.address_store.get(&address).connection_failed_count + 1;
         if new_count > MAX_CONNECTION_FAILED_COUNT {
-            self.address_store.remove(address);
+            self.address_store.remove(&address);
         } else {
             self.address_store.set(address, new_count);
         }
     }
 
     pub fn mark_connection_success(&mut self, address: NetAddress) {
-        if !self.address_store.has(address) {
+        if !self.address_store.has(&address) {
             return;
         }
 
@@ -379,18 +416,33 @@ mod address_store_with_cache {
             Self { db_store, addresses }
         }
 
-        pub fn has(&mut self, address: NetAddress) -> bool {
-            self.addresses.contains_key(&address.into())
+        pub fn has(&self, address: &NetAddress) -> bool {
+            let key = AddressKey::from(address);
+            self.addresses.contains_key(&key)
         }
 
         pub fn set(&mut self, address: NetAddress, connection_failed_count: u64) {
-            let entry = match self.addresses.get(&address.into()) {
-                Some(entry) => Entry { connection_failed_count, address: entry.address },
+            let key = AddressKey::from(&address);
+            let entry = match self.addresses.get(&key) {
+                Some(entry) => {
+                    let mut merged_address = entry.address.clone();
+                    merged_address.merge_metadata(&address);
+                    Entry { connection_failed_count, address: merged_address }
+                }
                 None => Entry { connection_failed_count, address },
             };
-            self.db_store.set(address.into(), entry).unwrap();
-            self.addresses.insert(address.into(), entry);
+            self.db_store.set(key, entry.clone()).unwrap();
+            self.addresses.insert(key, entry);
             self.keep_limit();
+        }
+
+        pub fn merge_metadata(&mut self, address: &NetAddress) {
+            let key = AddressKey::from(address);
+            if let Some(mut entry) = self.addresses.get(&key).cloned() {
+                entry.address.merge_metadata(address);
+                self.db_store.set(key, entry.clone()).unwrap();
+                self.addresses.insert(key, entry);
+            }
         }
 
         fn keep_limit(&mut self) {
@@ -401,12 +453,13 @@ mod address_store_with_cache {
             }
         }
 
-        pub fn get(&self, address: NetAddress) -> Entry {
-            *self.addresses.get(&address.into()).unwrap()
+        pub fn get(&self, address: &NetAddress) -> Entry {
+            let key = AddressKey::from(address);
+            self.addresses.get(&key).cloned().unwrap()
         }
 
-        pub fn remove(&mut self, address: NetAddress) {
-            self.remove_by_key(address.into())
+        pub fn remove(&mut self, address: &NetAddress) {
+            self.remove_by_key(AddressKey::from(address))
         }
 
         fn remove_by_key(&mut self, key: AddressKey) {
@@ -415,7 +468,7 @@ mod address_store_with_cache {
         }
 
         pub fn iterate_addresses(&self) -> impl Iterator<Item = NetAddress> + '_ {
-            self.addresses.values().map(|entry| entry.address)
+            self.addresses.values().map(|entry| entry.address.clone())
         }
 
         /// This iterator functions as the node's ip routing selection algo.
@@ -448,7 +501,7 @@ mod address_store_with_cache {
                 .map(|(_, e)| {
                     let count = prefix_counter.entry(e.address.prefix_bucket()).or_insert(0);
                     *count += 1;
-                    (64f64.powf((MAX_CONNECTION_FAILED_COUNT + 1 - e.connection_failed_count) as f64), e.address)
+                    (64f64.powf((MAX_CONNECTION_FAILED_COUNT + 1 - e.connection_failed_count) as f64), e.address.clone())
                 })
                 .unzip();
 
@@ -506,7 +559,7 @@ mod address_store_with_cache {
                 if self.remaining == 0 {
                     self.weighted_index = None;
                 }
-                Some(self.addresses[i])
+                Some(self.addresses[i].clone())
             } else {
                 None
             }
@@ -534,9 +587,27 @@ mod address_store_with_cache {
         use std::net::{IpAddr, Ipv6Addr};
 
         #[test]
+        fn merges_metadata_for_existing_address() {
+            let db = create_temp_db!(ConnBuilder::default().with_files_limit(1));
+            let config = Config::new(SIMNET_PARAMS);
+            let (am, _) = AddressManager::new(Arc::new(config), db.1, Arc::new(TickService::default()));
+            let mut am_guard = am.lock();
+
+            let base = NetAddress::new(IpAddress::from_str("1.2.3.4").unwrap(), 1111).with_services(0b01);
+            let updated = NetAddress::new(base.ip, base.port).with_services(0b10).with_relay_port(Some(1818));
+
+            am_guard.add_address(base);
+            am_guard.add_address(updated);
+
+            let stored = am_guard.iterate_addresses().next().unwrap();
+            assert_eq!(stored.services, 0b11);
+            assert_eq!(stored.relay_port, Some(1818));
+        }
+
+        #[test]
         fn test_weighted_iterator() {
             let address = NetAddress::new(IpAddr::V6(Ipv6Addr::LOCALHOST).into(), 1);
-            let iter = RandomWeightedIterator::new(vec![0.2, 0.3, 0.0], vec![address, address, address]);
+            let iter = RandomWeightedIterator::new(vec![0.2, 0.3, 0.0], vec![address.clone(), address.clone(), address]);
             assert_eq!(iter.len(), 2);
             assert_eq!(iter.count(), 2);
 

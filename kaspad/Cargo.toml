@@ -23,6 +23,7 @@ kaspa-consensus-core.workspace = true
 kaspa-consensus-notify.workspace = true
 kaspa-consensus.workspace = true
 kaspa-consensusmanager.workspace = true
+kaspa-connectionmanager.workspace = true
 kaspa-core.workspace = true
 kaspa-database.workspace = true
 kaspa-grpc-server.workspace = true
@@ -33,6 +34,7 @@ kaspa-notify.workspace = true
 kaspa-p2p-flows.workspace = true
 kaspa-p2p-lib.workspace = true
 kaspa-p2p-mining.workspace = true
+kaspa-p2p-libp2p = { workspace = true, optional = true }
 kaspa-perf-monitor.workspace = true
 kaspa-rpc-core.workspace = true
 kaspa-rpc-service.workspace = true
@@ -54,6 +56,7 @@ num_cpus.workspace = true
 rand.workspace = true
 rayon.workspace = true
 rocksdb.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
@@ -68,6 +71,7 @@ serde_with = "3.7.0"
 heap = ["dhat", "kaspa-alloc/heap"]
 devnet-prealloc = ["kaspa-consensus/devnet-prealloc"]
 semaphore-trace = ["kaspa-utils/semaphore-trace"]
+libp2p = ["kaspa-p2p-libp2p"]
 
 [lints]
 workspace = true

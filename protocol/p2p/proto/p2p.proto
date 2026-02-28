@@ -14,8 +14,21 @@ message AddressesMessage{
 
 message NetAddress{
   int64 timestamp = 1;
+  uint64 services = 2;
   bytes ip = 3;
   uint32 port = 4;
+  uint32 relayPort = 5;
+  uint32 relayCapacity = 6;
+  uint64 relayTtlMs = 7;
+  RelayRole relayRole = 8;
+  string libp2pPeerId = 9;
+  string relayCircuitHint = 10;
+}
+
+enum RelayRole{
+  RELAY_ROLE_UNSPECIFIED = 0;
+  RELAY_ROLE_PUBLIC = 1;
+  RELAY_ROLE_PRIVATE = 2;
 }
 
 message SubnetworkId{

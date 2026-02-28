@@ -66,6 +66,7 @@ impl Router {
                 GetSinkBlueScore,
                 GetSubnetwork,
                 GetSyncStatus,
+                GetLibp2pStatus,
                 GetSystemInfo,
                 GetUtxosByAddresses,
                 GetVirtualChainFromBlock,

@@ -250,6 +250,14 @@ async fn sanity_test() {
                 })
             }
 
+            KaspadPayloadOps::GetLibp2pStatus => {
+                let rpc_client = client.clone();
+                tst!(op, {
+                    // Ensure the call path is wired; ignore result since libp2p may be disabled in this build.
+                    let _ = rpc_client.get_libp_2_p_status_call(None, GetLibp2pStatusRequest {}).await;
+                })
+            }
+
             KaspadPayloadOps::Shutdown => {
                 // This test is purposely left blank since shutdown can only be tested after all other
                 // tests completed

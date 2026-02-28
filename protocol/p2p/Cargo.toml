@@ -38,6 +38,10 @@ log.workspace = true
 parking_lot.workspace = true
 prost.workspace = true
 rand.workspace = true
+hyper = { version = "1.4.1", features = ["client", "http2"] }
+http = "1.1.0"
+hyper-util = { version = "0.1.9", features = ["client", "http2", "tokio"] }
+tower.workspace = true
 seqlock.workspace = true
 serde.workspace = true
 thiserror.workspace = true

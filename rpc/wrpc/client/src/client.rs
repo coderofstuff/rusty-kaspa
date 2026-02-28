@@ -652,6 +652,7 @@ impl RpcApi for KaspaRpcClient {
             GetSinkBlueScore,
             GetSubnetwork,
             GetSyncStatus,
+            GetLibp2pStatus,
             GetSystemInfo,
             GetUtxoReturnAddress,
             GetUtxosByAddresses,

@@ -533,6 +533,26 @@ from!(item: RpcResult<&kaspa_rpc_core::GetVirtualChainFromBlockV2Response>, prot
     }
 });
 
+from!(&kaspa_rpc_core::GetLibp2pStatusRequest, protowire::GetLibp2pStatusRequestMessage);
+from!(item: RpcResult<&kaspa_rpc_core::GetLibp2pStatusResponse>, protowire::GetLibp2pStatusResponseMessage, {
+    let (identity_kind, identity_path) = match &item.identity {
+        kaspa_rpc_core::RpcLibp2pIdentity::Ephemeral => ("ephemeral".to_string(), String::new()),
+        kaspa_rpc_core::RpcLibp2pIdentity::Persisted { path } => ("persisted".to_string(), path.clone()),
+    };
+
+    Self {
+        mode: match item.mode {
+            kaspa_rpc_core::RpcLibp2pMode::Off => "off".to_string(),
+            kaspa_rpc_core::RpcLibp2pMode::Full => "full".to_string(),
+            kaspa_rpc_core::RpcLibp2pMode::Helper => "helper".to_string(),
+        },
+        peer_id: item.peer_id.clone().unwrap_or_default(),
+        identity_kind,
+        identity_path,
+        error: None,
+    }
+});
+
 from!(item: &kaspa_rpc_core::NotifyUtxosChangedRequest, protowire::NotifyUtxosChangedRequestMessage, {
     Self { addresses: item.addresses.iter().map(|x| x.into()).collect(), command: item.command.into() }
 });
@@ -1035,6 +1055,24 @@ try_from!(item: &protowire::GetSyncStatusResponseMessage, RpcResult<kaspa_rpc_co
     Self {
         is_synced: item.is_synced,
     }
+});
+
+try_from!(&protowire::GetLibp2pStatusRequestMessage, kaspa_rpc_core::GetLibp2pStatusRequest);
+try_from!(item: &protowire::GetLibp2pStatusResponseMessage, RpcResult<kaspa_rpc_core::GetLibp2pStatusResponse>, {
+    let mode = match item.mode.as_str() {
+        "full" => kaspa_rpc_core::RpcLibp2pMode::Full,
+        "helper" => kaspa_rpc_core::RpcLibp2pMode::Helper,
+        _ => kaspa_rpc_core::RpcLibp2pMode::Off,
+    };
+
+    let peer_id = if item.peer_id.is_empty() { None } else { Some(item.peer_id.clone()) };
+
+    let identity = match item.identity_kind.as_str() {
+        "persisted" => kaspa_rpc_core::RpcLibp2pIdentity::Persisted { path: item.identity_path.clone() },
+        _ => kaspa_rpc_core::RpcLibp2pIdentity::Ephemeral,
+    };
+
+    Self { mode, peer_id, identity }
 });
 
 try_from!(item: &protowire::NotifyUtxosChangedRequestMessage, kaspa_rpc_core::NotifyUtxosChangedRequest, {

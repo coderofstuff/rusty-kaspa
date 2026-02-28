@@ -127,6 +127,8 @@ impl ConnectionHandler {
         let (signal_sender, signal_receiver) = oneshot_channel::<()>();
         let connection_handler = self.clone();
         info!("GRPC Server starting on: {}", serve_address);
+        let serve_address_log = serve_address.clone();
+        let serve_address_shutdown = serve_address.clone();
 
         let bytes_tx = self.counters.bytes_tx.clone();
         let bytes_rx = self.counters.bytes_rx.clone();
@@ -156,8 +158,8 @@ impl ConnectionHandler {
                 .await;
 
             match serve_result {
-                Ok(_) => info!("GRPC Server stopped on: {}", serve_address),
-                Err(err) => panic!("GRPC Server {serve_address} stopped with error: {err:?}"),
+                Ok(_) => info!("GRPC Server stopped on: {}", serve_address_log),
+                Err(err) => panic!("GRPC Server {serve_address_log} stopped with error: {err:?}"),
             }
         });
 
@@ -166,7 +168,7 @@ impl ConnectionHandler {
             let _ = termination_receiver.await;
             signal_sender.send(()).expect("send signal");
             if (timeout(Duration::from_secs(1), server_handle).await).is_err() {
-                warn!("GRPC Server stopped forcefully on: {}", serve_address);
+                warn!("GRPC Server stopped forcefully on: {}", serve_address_shutdown);
             }
         });
         termination_sender

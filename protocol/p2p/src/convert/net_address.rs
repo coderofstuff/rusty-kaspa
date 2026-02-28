@@ -4,7 +4,7 @@ use super::error::ConversionError;
 use crate::pb as protowire;
 
 use itertools::Itertools;
-use kaspa_utils::networking::{IpAddress, NetAddress};
+use kaspa_utils::networking::{IpAddress, NetAddress, RelayRole};
 
 // ----------------------------------------------------------------------------
 // consensus_core to protowire
@@ -14,19 +14,40 @@ impl From<(IpAddress, u16)> for protowire::NetAddress {
     fn from((ip, port): (IpAddress, u16)) -> Self {
         Self {
             timestamp: 0, // This field is not used anymore
+            services: 0,
             ip: match ip.0 {
                 // We follow the IP encoding of golang's net.IP type
                 IpAddr::V4(ip) => ip.octets().to_vec(),
                 IpAddr::V6(ip) => ip.octets().to_vec(),
             },
             port: port as u32,
+            relay_port: 0,
+            relay_capacity: 0,
+            relay_ttl_ms: 0,
+            relay_role: protowire::RelayRole::Unspecified as i32,
+            libp2p_peer_id: String::new(),
+            relay_circuit_hint: String::new(),
         }
     }
 }
 
 impl From<NetAddress> for protowire::NetAddress {
     fn from(item: NetAddress) -> Self {
-        (item.ip, item.port).into()
+        let relay_role = match item.relay_role {
+            Some(RelayRole::Public) => protowire::RelayRole::Public as i32,
+            Some(RelayRole::Private) => protowire::RelayRole::Private as i32,
+            None => protowire::RelayRole::Unspecified as i32,
+        };
+        Self {
+            services: item.services,
+            relay_port: item.relay_port.unwrap_or_default() as u32,
+            relay_capacity: item.relay_capacity.unwrap_or_default(),
+            relay_ttl_ms: item.relay_ttl_ms.unwrap_or_default(),
+            relay_role,
+            libp2p_peer_id: item.libp2p_peer_id.clone().unwrap_or_default(),
+            relay_circuit_hint: item.relay_circuit_hint.clone().unwrap_or_default(),
+            ..(item.ip, item.port).into()
+        }
     }
 }
 
@@ -60,14 +81,32 @@ impl TryFrom<protowire::NetAddress> for NetAddress {
     type Error = ConversionError;
 
     fn try_from(item: protowire::NetAddress) -> Result<Self, Self::Error> {
+        let services = item.services;
+        let relay_port = item.relay_port;
+        let relay_capacity = item.relay_capacity;
+        let relay_ttl_ms = item.relay_ttl_ms;
+        let relay_role = match protowire::RelayRole::try_from(item.relay_role).ok() {
+            Some(protowire::RelayRole::Public) => Some(RelayRole::Public),
+            Some(protowire::RelayRole::Private) => Some(RelayRole::Private),
+            _ => None,
+        };
+        let libp2p_peer_id = (!item.libp2p_peer_id.is_empty()).then(|| item.libp2p_peer_id.clone());
+        let relay_circuit_hint = (!item.relay_circuit_hint.is_empty()).then(|| item.relay_circuit_hint.clone());
         let (ip, port) = item.try_into()?;
-        Ok(NetAddress::new(ip, port))
+        Ok(NetAddress::new(ip, port)
+            .with_services(services)
+            .with_relay_port((relay_port != 0).then_some(relay_port as u16))
+            .with_relay_capacity((relay_capacity != 0).then_some(relay_capacity))
+            .with_relay_ttl_ms((relay_ttl_ms != 0).then_some(relay_ttl_ms))
+            .with_relay_role(relay_role)
+            .with_libp2p_peer_id(libp2p_peer_id)
+            .with_relay_circuit_hint(relay_circuit_hint))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use kaspa_utils::networking::IpAddress;
+    use kaspa_utils::networking::{IpAddress, NetAddress, RelayRole};
 
     use crate::pb;
     use std::{
@@ -77,14 +116,58 @@ mod tests {
 
     #[test]
     fn test_netaddress() {
-        let net_addr_ipv4 = pb::NetAddress { timestamp: 0, ip: hex::decode("6a0a8af0").unwrap(), port: 123 };
+        let net_addr_ipv4 = pb::NetAddress {
+            timestamp: 0,
+            services: 0,
+            ip: hex::decode("6a0a8af0").unwrap(),
+            port: 123,
+            relay_port: 0,
+            relay_capacity: 0,
+            relay_ttl_ms: 0,
+            relay_role: pb::RelayRole::Unspecified as i32,
+            libp2p_peer_id: String::new(),
+            relay_circuit_hint: String::new(),
+        };
         let ipv4 = Ipv4Addr::from_str("106.10.138.240").unwrap().into();
         assert_eq!(<(IpAddress, u16)>::try_from(net_addr_ipv4.clone()).unwrap(), (ipv4, 123u16));
         assert_eq!(pb::NetAddress::from((ipv4, 123u16)), net_addr_ipv4);
 
-        let net_addr_ipv6 = pb::NetAddress { timestamp: 0, ip: hex::decode("20010db885a3000000008a2e03707334").unwrap(), port: 456 };
+        let net_addr_ipv6 = pb::NetAddress {
+            timestamp: 0,
+            services: 0,
+            ip: hex::decode("20010db885a3000000008a2e03707334").unwrap(),
+            port: 456,
+            relay_port: 0,
+            relay_capacity: 0,
+            relay_ttl_ms: 0,
+            relay_role: pb::RelayRole::Unspecified as i32,
+            libp2p_peer_id: String::new(),
+            relay_circuit_hint: String::new(),
+        };
         let ipv6 = Ipv6Addr::from_str("2001:0db8:85a3:0000:0000:8a2e:0370:7334").unwrap().into();
         assert_eq!(<(IpAddress, u16)>::try_from(net_addr_ipv6.clone()).unwrap(), (ipv6, 456u16));
         assert_eq!(pb::NetAddress::from((ipv6, 456u16)), net_addr_ipv6);
+    }
+
+    #[test]
+    fn test_netaddress_relay_metadata_roundtrip() {
+        let addr = NetAddress::new(IpAddress::from_str("203.0.113.9").unwrap(), 16112)
+            .with_services(0b1)
+            .with_relay_port(Some(16112))
+            .with_relay_capacity(Some(42))
+            .with_relay_ttl_ms(Some(30_000))
+            .with_relay_role(Some(RelayRole::Public))
+            .with_libp2p_peer_id(Some("12D3KooRelayPeer".to_string()))
+            .with_relay_circuit_hint(Some("/ip4/203.0.113.9/tcp/16112/p2p/12D3KooRelayPeer".to_string()));
+
+        let wire: pb::NetAddress = addr.into();
+        let parsed = NetAddress::try_from(wire).unwrap();
+        assert_eq!(parsed.services, 0b1);
+        assert_eq!(parsed.relay_port, Some(16112));
+        assert_eq!(parsed.relay_capacity, Some(42));
+        assert_eq!(parsed.relay_ttl_ms, Some(30_000));
+        assert_eq!(parsed.relay_role, Some(RelayRole::Public));
+        assert_eq!(parsed.libp2p_peer_id.as_deref(), Some("12D3KooRelayPeer"));
+        assert_eq!(parsed.relay_circuit_hint.as_deref(), Some("/ip4/203.0.113.9/tcp/16112/p2p/12D3KooRelayPeer"));
     }
 }

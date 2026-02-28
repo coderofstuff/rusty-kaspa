@@ -1253,6 +1253,42 @@ mod mockery {
 
     test!(GetSyncStatusResponse);
 
+    impl Mock for RpcLibp2pMode {
+        fn mock() -> Self {
+            RpcLibp2pMode::Full
+        }
+    }
+
+    test!(RpcLibp2pMode);
+
+    impl Mock for RpcLibp2pIdentity {
+        fn mock() -> Self {
+            RpcLibp2pIdentity::Persisted { path: "path".to_string() }
+        }
+    }
+
+    test!(RpcLibp2pIdentity);
+
+    impl Mock for GetLibp2pStatusRequest {
+        fn mock() -> Self {
+            GetLibp2pStatusRequest {}
+        }
+    }
+
+    test!(GetLibp2pStatusRequest);
+
+    impl Mock for GetLibp2pStatusResponse {
+        fn mock() -> Self {
+            GetLibp2pStatusResponse {
+                mode: RpcLibp2pMode::Full,
+                peer_id: Some(Uuid::new_v4().to_string()),
+                identity: RpcLibp2pIdentity::mock(),
+            }
+        }
+    }
+
+    test!(GetLibp2pStatusResponse);
+
     impl Mock for GetDaaScoreTimestampEstimateRequest {
         fn mock() -> Self {
             GetDaaScoreTimestampEstimateRequest { daa_scores: mock() }

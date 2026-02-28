@@ -238,6 +238,7 @@ impl RpcApi for GrpcClient {
 
     route!(ping_call, Ping);
     route!(get_sync_status_call, GetSyncStatus);
+    route!(get_libp_2_p_status_call, GetLibp2pStatus);
     route!(get_server_info_call, GetServerInfo);
     route!(get_metrics_call, GetMetrics);
     route!(get_connections_call, GetConnections);
