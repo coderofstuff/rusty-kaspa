@@ -384,6 +384,7 @@ mod address_store_with_cache {
     };
 
     use itertools::Itertools;
+    use kaspa_core::warn;
     use kaspa_database::prelude::{CachePolicy, DB};
     use kaspa_utils::networking::PrefixBucket;
     use rand::{
@@ -407,10 +408,36 @@ mod address_store_with_cache {
     impl Store {
         fn new(db: Arc<DB>) -> Self {
             // We manage the cache ourselves on this level, so we disable the inner builtin cache
-            let db_store = DbAddressesStore::new(db, CachePolicy::Empty);
+            let mut db_store = DbAddressesStore::new(db, CachePolicy::Empty);
             let mut addresses = HashMap::new();
-            for (key, entry) in db_store.iterator().map(|res| res.unwrap()) {
-                addresses.insert(key, entry);
+            let mut entries_to_migrate = Vec::new();
+            let loaded_entries = db_store.iterator_with_legacy_migration().collect_vec();
+            for loaded in loaded_entries {
+                match loaded {
+                    Ok(loaded_entry) => {
+                        if loaded_entry.migrated_legacy_format {
+                            entries_to_migrate.push((loaded_entry.key, loaded_entry.entry.clone()));
+                        }
+                        addresses.insert(loaded_entry.key, loaded_entry.entry);
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Address store load failed: {err}. Clearing address store; peers will be rediscovered. \
+                             Use --reset-db --yes if this persists."
+                        );
+                        if let Err(clear_err) = db_store.clear() {
+                            warn!("Failed to clear address store after load error: {clear_err}");
+                        }
+                        addresses.clear();
+                        entries_to_migrate.clear();
+                        break;
+                    }
+                }
+            }
+            for (key, entry) in entries_to_migrate {
+                if let Err(err) = db_store.set(key, entry) {
+                    warn!("Failed to migrate legacy address entry: {err}");
+                }
             }
 
             Self { db_store, addresses }

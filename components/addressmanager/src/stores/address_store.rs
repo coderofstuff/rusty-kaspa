@@ -1,10 +1,12 @@
 use kaspa_database::{
     prelude::DB,
     prelude::{CachePolicy, StoreError, StoreResult},
-    prelude::{CachedDbAccess, DirectDbWriter},
+    prelude::{CachedDbAccess, DbKey, DirectDbWriter},
     registry::DatabaseStorePrefixes,
 };
 use kaspa_utils::mem_size::MemSizeEstimator;
+use kaspa_utils::networking::IpAddress;
+use rocksdb::{Direction, IteratorMode, ReadOptions};
 use serde::{Deserialize, Serialize};
 use std::net::Ipv6Addr;
 use std::{error::Error, fmt::Display, sync::Arc};
@@ -19,6 +21,30 @@ pub struct Entry {
 }
 
 impl MemSizeEstimator for Entry {}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct LegacyNetAddress {
+    ip: IpAddress,
+    port: u16,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct LegacyEntry {
+    connection_failed_count: u64,
+    address: LegacyNetAddress,
+}
+
+impl From<LegacyEntry> for Entry {
+    fn from(value: LegacyEntry) -> Self {
+        Self { connection_failed_count: value.connection_failed_count, address: NetAddress::new(value.address.ip, value.address.port) }
+    }
+}
+
+pub struct LoadedEntry {
+    pub key: AddressKey,
+    pub entry: Entry,
+    pub migrated_legacy_format: bool,
+}
 
 pub trait AddressesStoreReader {
     #[allow(dead_code)]
@@ -83,18 +109,35 @@ impl DbAddressesStore {
         Self { db: Arc::clone(&db), access: CachedDbAccess::new(db, cache_policy, DatabaseStorePrefixes::Addresses.into()) }
     }
 
-    pub fn iterator(&self) -> impl Iterator<Item = Result<(AddressKey, Entry), Box<dyn Error>>> + '_ {
-        self.access.iterator().map(|iter_result| match iter_result {
-            Ok((key_bytes, connection_failed_count)) => match <[u8; ADDRESS_KEY_SIZE]>::try_from(&key_bytes[..]) {
-                Ok(address_key_slice) => {
-                    let addr_key = DbAddressKey(address_key_slice);
-                    let address: AddressKey = addr_key.into();
-                    Ok((address, connection_failed_count))
+    pub fn iterator_with_legacy_migration(&self) -> impl Iterator<Item = Result<LoadedEntry, Box<dyn Error>>> + '_ {
+        let prefix: Vec<u8> = DatabaseStorePrefixes::Addresses.into();
+        let prefix_key = DbKey::prefix_only(&prefix);
+        let mut read_opts = ReadOptions::default();
+        read_opts.set_iterate_range(rocksdb::PrefixRange(prefix_key.as_ref()));
+        self.db.iterator_opt(IteratorMode::From(prefix_key.as_ref(), Direction::Forward), read_opts).map(
+            move |iter_result| -> Result<LoadedEntry, Box<dyn Error>> {
+                let (key, data_bytes) = match iter_result {
+                    Ok(data) => data,
+                    Err(err) => return Err(err.into()),
+                };
+                let key_slice = &key[prefix_key.prefix_len()..];
+                let address_key_slice: [u8; ADDRESS_KEY_SIZE] =
+                    key_slice.try_into().map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+                let addr_key = DbAddressKey(address_key_slice);
+                let key: AddressKey = addr_key.into();
+                match bincode::deserialize::<Entry>(&data_bytes) {
+                    Ok(entry) => Ok(LoadedEntry { key, entry, migrated_legacy_format: false }),
+                    Err(primary_err) => match bincode::deserialize::<LegacyEntry>(&data_bytes) {
+                        Ok(legacy_entry) => Ok(LoadedEntry { key, entry: legacy_entry.into(), migrated_legacy_format: true }),
+                        Err(_) => Err(primary_err.into()),
+                    },
                 }
-                Err(e) => Err(e.into()),
             },
-            Err(e) => Err(e),
-        })
+        )
+    }
+
+    pub fn clear(&mut self) -> StoreResult<()> {
+        self.access.delete_all(DirectDbWriter::new(&self.db))
     }
 }
 
@@ -116,5 +159,39 @@ impl AddressesStore for DbAddressesStore {
     fn set_failed_count(&mut self, key: AddressKey, connection_failed_count: u64) -> StoreResult<()> {
         let entry = self.get(key)?;
         self.set(key, Entry { connection_failed_count, address: entry.address })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use kaspa_database::{create_temp_db, prelude::ConnBuilder};
+    use kaspa_utils::networking::IpAddress;
+
+    use super::*;
+
+    #[test]
+    fn iterator_migrates_legacy_entries() {
+        let (db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(16));
+        let address = NetAddress::new(IpAddress::from_str("1.2.3.4").unwrap(), 16111);
+        let key = AddressKey::from(&address);
+        let db_key = DbKey::new(&Vec::<u8>::from(DatabaseStorePrefixes::Addresses), DbAddressKey::from(key));
+        let legacy_entry =
+            LegacyEntry { connection_failed_count: 7, address: LegacyNetAddress { ip: address.ip, port: address.port } };
+        let legacy_bytes = bincode::serialize(&legacy_entry).unwrap();
+        db.put(db_key, legacy_bytes).unwrap();
+
+        let store = DbAddressesStore::new(db.clone(), CachePolicy::Empty);
+        let loaded = store.iterator_with_legacy_migration().next().unwrap().unwrap();
+
+        assert!(loaded.migrated_legacy_format);
+        assert!(loaded.key == key);
+        assert_eq!(loaded.entry.connection_failed_count, 7);
+        assert_eq!(loaded.entry.address.ip, address.ip);
+        assert_eq!(loaded.entry.address.port, address.port);
+        drop(store);
+        drop(db);
+        drop(db_lifetime);
     }
 }
