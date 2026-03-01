@@ -44,22 +44,22 @@ Direct path proof must include:
 
 ## 4. Mandatory Build Requirement (Most Common Failure)
 
-You must build `kaspad` with libp2p feature on **all three hosts**.
+You must build latest `kaspad` on **all three hosts**.
 
 Run on Relay, Node A, Node B:
 
 ```bash
 cd ~/rusty-kaspa
-cargo build --release --bin kaspad --features libp2p
+cargo build --release --bin kaspad
 ~/rusty-kaspa/target/release/kaspad --help | grep -E -- "--libp2p-mode|--libp2p-role|--libp2p-helper-listen"
 ```
 
 Expected: grep prints those flags.
 
-If you see `unexpected argument '--libp2p-mode'`, rebuild with:
+If you see `unexpected argument '--libp2p-mode'`, rebuild from this branch with:
 
 ```bash
-cargo build --release --bin kaspad --features libp2p
+cargo build --release --bin kaspad
 ```
 
 If you run `cargo clean`, repeat the same build command before testing.
@@ -76,10 +76,10 @@ Use your actual values if they differ.
 
 ## 6. Minimal Repro Flow (Copy/Paste)
 
-All commands below require:
+All node startup commands below should include:
 
 ```bash
-KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true
+--libp2p-autonat-allow-private
 ```
 
 ### 6.1 Start Relay
@@ -88,10 +88,10 @@ KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true
 pkill -9 kaspad
 rm -rf /tmp/kaspa-relay /tmp/relay.key
 
-KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
 nohup ~/rusty-kaspa/target/release/kaspad \
   --appdir=/tmp/kaspa-relay \
   --libp2p-mode=bridge \
+  --libp2p-autonat-allow-private \
   --libp2p-identity-path=/tmp/relay.key \
   --libp2p-helper-listen=127.0.0.1:38080 \
   --nologfiles > /tmp/kaspa-relay.log 2>&1 &
@@ -108,10 +108,10 @@ Save relay peer id as `RELAY_PEER_ID`.
 pkill -9 kaspad
 rm -rf /tmp/kaspa-a /tmp/node-a.key
 
-KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
 nohup ~/rusty-kaspa/target/release/kaspad \
   --appdir=/tmp/kaspa-a \
   --libp2p-mode=bridge \
+  --libp2p-autonat-allow-private \
   --libp2p-identity-path=/tmp/node-a.key \
   --libp2p-helper-listen=127.0.0.1:38080 \
   --libp2p-reservations=/ip4/10.0.3.26/tcp/16112/p2p/RELAY_PEER_ID \
@@ -130,10 +130,10 @@ Save node A peer id as `NODE_A_PEER_ID`.
 pkill -9 kaspad
 rm -rf /tmp/kaspa-b /tmp/node-b.key
 
-KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true \
 nohup ~/rusty-kaspa/target/release/kaspad \
   --appdir=/tmp/kaspa-b \
   --libp2p-mode=bridge \
+  --libp2p-autonat-allow-private \
   --libp2p-identity-path=/tmp/node-b.key \
   --libp2p-helper-listen=127.0.0.1:38080 \
   --libp2p-reservations=/ip4/10.0.3.26/tcp/16112/p2p/RELAY_PEER_ID \
@@ -192,7 +192,7 @@ Treat the test as incomplete if Step 12 is skipped.
 
 ## 8. Common Mistakes
 
-- Built without `--features libp2p` (most common).
+- Built old/wrong `kaspad` binary (most common).
 - Used private LAN IP in `--libp2p-external-multiaddrs` instead of NAT IP.
-- Forgot `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true`.
+- Forgot `--libp2p-autonat-allow-private`.
 - Wrong relay peer id in reservation multiaddr.

@@ -60,7 +60,7 @@ Goal: fully automatic private<->private connectivity in public with DCUtR.
 
 ## D. Defaults + ops
 - [x] **Bridge default wiring:**
-  - Ensure Bridge is default when libp2p feature is enabled in public builds.
+  - Ensure Bridge is default in public builds.
 - [x] **Relay advertise gating:**
   - Start server early but advertise relay capability only after public reachability confirmed.
   - Ensure AutoNAT promotion triggers advertisement update.

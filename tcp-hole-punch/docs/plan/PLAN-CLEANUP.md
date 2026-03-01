@@ -140,10 +140,10 @@ t as alias to `full` until a real need. Helper control port requires explicit fl
 
 6. **Config Surface**
 
-   - [x] Central libp2p config builder: ports, helper addr, reservations, external addrs, advertised IPs, role. CLI/env parsing here; daemon consumes.
-   - [x] Restore env-var support for key flags (ports, identity path, helper, mode, reservations, inbound caps).
+   - [x] Central libp2p config builder: ports, helper addr, reservations, external addrs, advertised IPs, role. CLI/config parsing here; daemon consumes.
+   - [x] Remove libp2p env-var runtime overrides and keep runtime control in flags/config only.
    - [x] Decide `override-params`: restore or explicit deprecation with clear error message.
-   - [x] Layered approach: CLI/env → plain struct → libp2p config; consistent env naming (e.g., `KASPAD_LIBP2P_*`); document precedence (CLI > env > file > default).
+   - [x] Layered approach: CLI/config file → plain struct → libp2p config; document precedence (CLI > file > default).
 
 7. **Testing (add during each step)**
 

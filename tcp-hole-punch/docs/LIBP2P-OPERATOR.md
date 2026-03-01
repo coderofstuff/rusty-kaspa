@@ -1,13 +1,14 @@
-# Libp2p / DCUtR Operator Notes (feature-gated)
+# Libp2p / DCUtR Operator Notes
 
 ## Modes and defaults
-- **off** (default): libp2p disabled; transport is plain TCP. No libp2p deps pulled in unless compiled with `--features libp2p`.
+- **bridge** (default): hybrid; libp2p runtime runs by default.
+- **off**: disable libp2p at runtime with `--no-libp2p` (or `--libp2p-mode=off`).
 - **bridge**: hybrid; libp2p runtime runs (helper/reservations/DCUtR) but outbound Kaspa dials use TCP, with a libp2p attempt/cooldown path available in the connector for future hybrid work. Safe for mainnet nodes that need TCP peers.
 - **full/helper**: libp2p stack enabled (helper == full for now) and used for outbound; overlay-only mode for the NAT lab.
 - Full/helper remain overlay-only; bridge/role changes do **not** alter DCUtR behaviour in full mode.
 - Helper API binds only when `--libp2p-helper-listen <addr>` is set (e.g., `127.0.0.1:38080`).
-- Ports: TCP P2P port stays unchanged (`--listen`/default p2p port); libp2p uses a dedicated port (`--libp2p-listen-port` or `KASPAD_LIBP2P_LISTEN_PORT`, default `p2p_port+1`). Libp2p is intentionally **not** multiplexed on the P2P TCP port.
-- AutoNAT posture: client+server enabled in full/helper modes; server is public-only by default (`server_only_if_public=true`). Labs can opt into private IP reachability with `--libp2p-autonat-allow-private` / `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true`.
+- Ports: TCP P2P port stays unchanged (`--listen`/default p2p port); libp2p uses a dedicated port (`--libp2p-listen-port`, default `p2p_port+1`). Libp2p is intentionally **not** multiplexed on the P2P TCP port.
+- AutoNAT posture: client+server enabled in full/helper modes; server is public-only by default (`server_only_if_public=true`). Labs can opt into private IP reachability with `--libp2p-autonat-allow-private`.
 
 ## Terminology
 - "AutoNAT public escalation" in this branch means: role promotion to **public libp2p relay advertising**.
@@ -29,27 +30,25 @@
 - If only legacy P2P TCP is reachable and libp2p port is not reachable, auto role should not promote to public relay advertising.
 
 ## Identity & privacy
-- Default identity is **ephemeral**. Persist only when `--libp2p-identity-path <path>` is provided (or `KASPAD_LIBP2P_IDENTITY_PATH`).
+- Default identity is **ephemeral**. Persist only when `--libp2p-identity-path <path>` is provided.
 - Status call exposes current PeerId and whether it is persisted; operators should assume persisted IDs reveal linkage across sessions.
 
 ## Inbound limits
 - Global inbound limit unchanged from TCP settings.
 - Libp2p inbound soft caps: per-relay bucket and an “unknown relay” bucket (defaults 4 / 8). Override via CLI/env:
   - `--libp2p-relay-inbound-cap`, `--libp2p-relay-inbound-unknown-cap`
-  - `KASPAD_LIBP2P_RELAY_INBOUND_CAP`, `KASPAD_LIBP2P_RELAY_INBOUND_UNKNOWN_CAP`
 - Private role adds a libp2p-specific inbound cap (default 8) applied **only** to libp2p peers; TCP inbound is unaffected.
 - Reservation refresh uses exponential backoff to avoid relay spam; failed attempts delay retries, successful reservations refresh on a timer.
 
-## Config surface (env/CLI highlights)
+## Config surface (CLI/config-file highlights)
 - `--libp2p-mode`, `--libp2p-role`, `--libp2p-identity-path`, `--libp2p-helper-listen`, `--libp2p-listen-port`
 - `--libp2p-autonat-allow-private`: Allow AutoNAT to discover and verify private IPs (e.g. for labs). Default: off (global only).
-- Reservations: `--libp2p-reservations` (comma-separated) or `KASPAD_LIBP2P_RESERVATIONS`
+- Reservations: `--libp2p-reservations` (comma-separated)
 - External announce: `--libp2p-external-multiaddrs`, `--libp2p-advertise-addresses`
 - Inbound caps: `--libp2p-relay-inbound-cap`, `--libp2p-relay-inbound-unknown-cap`
-- Relay selection seed (deterministic lab/debug runs): `--libp2p-relay-rng-seed`, `KASPAD_LIBP2P_RELAY_RNG_SEED`
+- Relay selection seed (deterministic lab/debug runs): `--libp2p-relay-rng-seed`
 - Relay advertise metadata: `--libp2p-relay-advertise-capacity`, `--libp2p-relay-advertise-ttl-ms`
-- Relay advertise env vars: `KASPAD_LIBP2P_RELAY_ADVERTISE_CAPACITY`, `KASPAD_LIBP2P_RELAY_ADVERTISE_TTL_MS`
-- Env overrides all have `KASPAD_LIBP2P_*` prefix; **CLI > env > defaults** for precedence.
+- Precedence: **CLI > config-file > defaults**.
 
 ## Address metadata
 - NetAddress carries a `services` bitflag and optional `relay_port` to mark peers that can act as libp2p relays and which port to use. Defaults are zero/None so unaware peers ignore them.
@@ -77,11 +76,10 @@
 - **Lab / Private Relay:** Use `--libp2p-autonat-allow-private` if your relay or peers are on private IPs (e.g. 10.x.x.x, 192.168.x.x). Do NOT use this on public mainnet relays.
 
 ## Disable libp2p
-- Build: omit `--features libp2p` (or use `--no-default-features` when libp2p is not a default member).
-- Run: `--libp2p-mode off` (default) and do not set helper listen.
+- Run: `--no-libp2p` (or `--libp2p-mode=off`).
 
 ## Harness
-- For libp2p/DCUtR manual checks, build with `--features libp2p` and run the example harness:
+- For libp2p/DCUtR manual checks on the `kaspa-p2p-libp2p` crate (not `kaspad`), run the example harness with that crate feature:
   - `cargo run -p kaspa-p2p-libp2p --example dcutr_harness --features libp2p -- <ip:port>`
   - Or set `LIBP2P_TARGET_ADDR=<ip:port>` to attempt an outbound dial; otherwise it prints the local peer ID and waits for inbound streams.
 - DCUtR integration smoke tests live under:

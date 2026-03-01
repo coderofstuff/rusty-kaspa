@@ -176,9 +176,9 @@ Optional: copy snapshot off-router for long-term storage alongside report artifa
 1. Build three VMs/hosts: relay on shared transit network, Node A behind Router A (`192.168.1.0/24`), Node B behind Router B (`192.168.2.0/24`).
 2. Put router WAN interfaces on shared transit network (`10.0.3.0/24`).
 3. Ensure both routers provide full-cone NAT behavior.
-4. Build libp2p-enabled `kaspad` on all nodes.
+4. Build `kaspad` on all nodes.
 5. Follow `tcp-hole-punch/docs/DCUTR-LAB-RUNBOOK.md` exactly.
-6. Set `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true` on all lab nodes.
+6. Set `--libp2p-autonat-allow-private` on all lab nodes.
 7. Set `--libp2p-external-multiaddrs` to NAT WAN IPs (`10.0.3.61`/`10.0.3.62`), never `192.168.x.x`.
 8. Trigger relay-circuit dial and validate direct upgrade signals.
 
@@ -194,7 +194,7 @@ Optional: copy snapshot off-router for long-term storage alongside report artifa
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `AttemptsExceeded(3)` | AutoNAT private-IP handling missing | Set `KASPAD_LIBP2P_AUTONAT_ALLOW_PRIVATE=true` on all nodes |
+| `AttemptsExceeded(3)` | AutoNAT private-IP handling missing | Set `--libp2p-autonat-allow-private` on all nodes |
 | `AttemptsExceeded(3)` | NAT not behaving full-cone | Verify router full-cone config/modules (`nft_fullcone`) |
 | `No path: Direct` | Wrong external multiaddr | Use router WAN NAT IPs |
 | `reservation rejected` | Relay peer ID mismatch | Re-check relay peer ID and reservation multiaddr |
