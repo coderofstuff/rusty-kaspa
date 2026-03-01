@@ -7,11 +7,11 @@ use std::{net::SocketAddr, path::PathBuf};
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Libp2pMode {
-    #[default]
     Off,
     Full,
     /// Alias for full until a narrower helper-only mode is introduced.
     Helper,
+    #[default]
     Bridge,
 }
 

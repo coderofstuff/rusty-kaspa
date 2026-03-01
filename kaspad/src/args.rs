@@ -810,6 +810,7 @@ fn arg_match_many_unwrap_or<T: Clone + Send + Sync + 'static>(m: &clap::ArgMatch
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn parse_defaults_libp2p_mode_to_bridge() {
@@ -842,6 +843,16 @@ mod tests {
     fn parse_no_libp2p_conflicts_with_explicit_libp2p_mode() {
         let err = Args::parse(["kaspad", "--no-libp2p", "--libp2p-mode=bridge"]).expect_err("parse should fail");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parse_configfile_without_libp2p_mode_defaults_to_bridge() {
+        let mut config = tempfile::NamedTempFile::new().expect("tempfile should be created");
+        writeln!(config, "devnet = true").expect("config write should succeed");
+        let config_path = config.path().to_str().expect("tempfile path should be valid UTF-8");
+
+        let args = Args::parse(["kaspad", "--configfile", config_path]).expect("parse should succeed");
+        assert_eq!(args.libp2p.libp2p_mode, Libp2pMode::Bridge);
     }
 }
 
