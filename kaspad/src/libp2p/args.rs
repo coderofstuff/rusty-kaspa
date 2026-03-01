@@ -72,6 +72,8 @@ pub struct Libp2pArgs {
     pub libp2p_max_relays: Option<usize>,
     /// Max peers per relay (eclipse guard).
     pub libp2p_max_peers_per_relay: Option<usize>,
+    /// Minimum number of distinct sources required before using relay candidates.
+    pub libp2p_relay_min_sources: Option<usize>,
     /// Optional RNG seed for relay selection (deterministic tests).
     pub libp2p_relay_rng_seed: Option<u64>,
     /// Private-role inbound cap for libp2p connections.
@@ -97,7 +99,7 @@ pub struct Libp2pArgs {
 impl Default for Libp2pArgs {
     fn default() -> Self {
         Self {
-            libp2p_mode: Libp2pMode::Off,
+            libp2p_mode: Libp2pMode::Bridge,
             libp2p_role: Libp2pRole::Auto,
             libp2p_mode_set_from_cli: false,
             libp2p_role_set_from_cli: false,
@@ -108,6 +110,7 @@ impl Default for Libp2pArgs {
             libp2p_relay_inbound_unknown_cap: None,
             libp2p_max_relays: None,
             libp2p_max_peers_per_relay: None,
+            libp2p_relay_min_sources: None,
             libp2p_relay_rng_seed: None,
             libp2p_inbound_cap_private: None,
             libp2p_reservations: Vec::new(),

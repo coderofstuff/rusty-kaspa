@@ -47,11 +47,6 @@ pub fn libp2p_runtime_from_config(config: &AdapterConfig) -> Libp2pRuntime {
     }
 }
 
-#[cfg(not(feature = "libp2p"))]
-pub fn libp2p_runtime_from_config(_config: &AdapterConfig) -> Libp2pRuntime {
-    Libp2pRuntime { outbound: Arc::new(TcpConnector), peer_id: None, identity: None, init_service: None, provider_cell: None }
-}
-
 pub(crate) struct Libp2pInitService {
     config: AdapterConfig,
     identity: kaspa_p2p_libp2p::Libp2pIdentity,
