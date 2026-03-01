@@ -415,7 +415,7 @@ mod address_store_with_cache {
             for loaded in loaded_entries {
                 match loaded {
                     Ok(loaded_entry) => {
-                        if loaded_entry.migrated_legacy_format {
+                        if loaded_entry.needs_rewrite {
                             entries_to_migrate.push((loaded_entry.key, loaded_entry.entry.clone()));
                         }
                         addresses.insert(loaded_entry.key, loaded_entry.entry);
