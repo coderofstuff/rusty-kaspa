@@ -161,10 +161,6 @@ impl Libp2pOutboundConnector {
         None
     }
 
-    fn is_non_public_net_addr(address: &NetAddress) -> bool {
-        !address.ip.is_publicly_routable()
-    }
-
     fn is_non_public_multiaddr(address: &Multiaddr) -> bool {
         candidate_ip_addr(address).is_some_and(|ip| !IpAddress::new(ip).is_publicly_routable())
     }
@@ -301,7 +297,6 @@ impl Libp2pOutboundConnector {
             }
 
             if let (Ok(net_addr), Some(provider)) = (parsed_address, provider.clone()) {
-                let is_non_public_net_addr = Self::is_non_public_net_addr(&net_addr);
                 match Self::dial_via_provider(provider, net_addr, handler.clone()).await {
                     Ok(router) => {
                         cooldowns.lock().await.remove(&address);
@@ -309,13 +304,8 @@ impl Libp2pOutboundConnector {
                         return Ok(router);
                     }
                     Err(err) => {
-                        if is_non_public_net_addr {
-                            debug!("bridge mode libp2p dial failed for non-public address {address}: {err}; suppressing retries");
-                            non_retryable.lock().await.insert(address.clone());
-                        } else {
-                            debug!("bridge mode libp2p dial failed for {address}: {err}; falling back to TCP");
-                            cooldowns.lock().await.insert(address.clone(), now + BRIDGE_LIBP2P_RETRY_COOLDOWN);
-                        }
+                        debug!("bridge mode libp2p dial failed for {address}: {err}; falling back to TCP");
+                        cooldowns.lock().await.insert(address.clone(), now + BRIDGE_LIBP2P_RETRY_COOLDOWN);
                     }
                 }
             } else {

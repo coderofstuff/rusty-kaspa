@@ -170,6 +170,32 @@ async fn bridge_mode_falls_back_and_cooldowns() {
 }
 
 #[tokio::test]
+async fn bridge_mode_private_socket_failure_recovers_after_cooldown_expiry() {
+    let cfg = Config { mode: crate::Mode::Bridge, ..Config::default() };
+    let drops = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(MockProvider::with_responses(
+        VecDeque::from([Err(Libp2pError::DialFailed("fail".into())), Err(Libp2pError::DialFailed("fail".into()))]),
+        drops,
+    ));
+    let fallback = Arc::new(CountingFallback::default());
+    let connector = Libp2pOutboundConnector::with_provider(cfg, fallback.clone(), provider.clone());
+    let handler = test_handler();
+    let address = "192.168.3.141:16611".to_string();
+
+    let res1 = connector.connect(address.clone(), CoreTransportMetadata::default(), &handler).await;
+    assert!(res1.is_err());
+    assert_eq!(provider.attempts(), 1);
+    assert_eq!(fallback.calls(), 1);
+
+    connector.bridge_cooldowns.lock().await.remove(&address);
+
+    let res2 = connector.connect(address, CoreTransportMetadata::default(), &handler).await;
+    assert!(res2.is_err());
+    assert_eq!(provider.attempts(), 2, "private socket address should be retryable after cooldown expiry");
+    assert_eq!(fallback.calls(), 2);
+}
+
+#[tokio::test]
 async fn bridge_mode_multiaddr_failure_does_not_fallback_to_tcp() {
     let cfg = Config { mode: crate::Mode::Bridge, ..Config::default() };
     let drops = Arc::new(AtomicUsize::new(0));
