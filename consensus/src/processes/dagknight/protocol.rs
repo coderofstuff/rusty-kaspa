@@ -203,7 +203,7 @@ impl<
             }
 
             // Pick a "winner" among these subgroups
-            let (winning_conflict_genesis, winning_subgroup) = {
+            let (winning_conflict_genesis, winning_subgroup): (Hash, &[Hash]) = {
                 let mut best_groups: Vec<GroupMetadata> = vec![];
                 let mut blue_work_map = BlockHashMap::new();
 
@@ -262,56 +262,64 @@ impl<
                     }
                 });
 
-                // sort the resulting iterator by blue score (descending) then hash ascending
-                let filtered_group_iter = filtered_group_iter.sorted_by(|a, b| {
-                    // Prioritize groups by higher blue score (descending), then by hash (ascending)
-                    let a_score = self.headers_store.get_header(a.1[0]).unwrap().blue_score;
-                    let b_score = self.headers_store.get_header(b.1[0]).unwrap().blue_score;
-                    // higher blue score first
-                    b_score.cmp(&a_score).then_with(|| a.0.cmp(b.0))
-                });
-
-                for (curr_conflict_genesis, subgroup) in filtered_group_iter {
-                    debug!("Subgroup under conflict genesis {:#?} has members: {:#?}", curr_conflict_genesis, subgroup);
-                    let best_k = best_groups.get(0).map(|g| g.rank_value.k);
-                    let rank_value = self.rank(conflict_genesis, subgroup, &curr_subgroup, best_k);
-                    let curr_k = rank_value.k;
-                    let group_metadata = GroupMetadata { rank_value, conflict_genesis: *curr_conflict_genesis, subgroup };
-
-                    if let Some(inner_best_rank) = best_k {
-                        match curr_k.cmp(&inner_best_rank) {
-                            Ordering::Less => {
-                                // Tie breaking by hash
-                                best_groups = vec![group_metadata];
-                            }
-                            Ordering::Equal => {
-                                best_groups.push(group_metadata);
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        best_groups = vec![group_metadata];
-                    }
-                }
-
-                let final_winner: (Hash, &[Hash]) = if best_groups.len() > 1 {
-                    self.tie_breaking(&best_groups)
+                // if there is only one entry remaining in the filtered group, win immediately
+                if filtered_group_iter.clone().count() == 1 {
+                    let (conflict_genesis, subgroup) = filtered_group_iter.clone().next().unwrap();
+                    debug!(
+                        "Only one subgroup under conflict genesis {:#?} passed the blue work filter, selecting it as the winner",
+                        conflict_genesis
+                    );
+                    (*conflict_genesis, subgroup)
                 } else {
-                    let single_winner = best_groups.first().expect("best_groups is non-empty");
-                    (single_winner.conflict_genesis, single_winner.subgroup)
-                };
+                    // either none passed the filter or multiple groups remain; fall back to ranking
+                    if filtered_group_iter.clone().count() == 0 {
+                        debug!("No subgroups passed the blue work filter, considering all groups for ranking");
+                    } else {
+                        debug!("Multiple subgroups passed the blue work filter, ranking them to find the winner");
+                    }
 
-                // Log results for groups that were predicted to lose
-                // for &g in likely_to_lose.iter() {
-                //     if g == final_winner.0 {
-                //         error!("Group under conflict genesis {:#?} was predicted to lose but actually won", g);
-                //     } else {
-                //         warn!("Group under conflict genesis {:#?} was predicted to lose and did lose", g);
-                //     }
-                // }
+                    // sort the resulting iterator by blue score (descending) then hash ascending
+                    let filtered_group_iter = filtered_group_iter.sorted_by(|a, b| {
+                        // Prioritize groups by higher blue score (descending), then by hash (ascending)
+                        let a_score = self.headers_store.get_header(a.1[0]).unwrap().blue_score;
+                        let b_score = self.headers_store.get_header(b.1[0]).unwrap().blue_score;
+                        // higher blue score first
+                        b_score.cmp(&a_score).then_with(|| a.0.cmp(b.0))
+                    });
 
-                // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
-                final_winner
+                    for (curr_conflict_genesis, subgroup) in filtered_group_iter {
+                        debug!("Subgroup under conflict genesis {:#?} has members: {:#?}", curr_conflict_genesis, subgroup);
+                        let best_k = best_groups.get(0).map(|g| g.rank_value.k);
+                        let rank_value = self.rank(conflict_genesis, subgroup, &curr_subgroup, best_k);
+                        let curr_k = rank_value.k;
+                        let group_metadata = GroupMetadata { rank_value, conflict_genesis: *curr_conflict_genesis, subgroup };
+
+                        if let Some(inner_best_rank) = best_k {
+                            match curr_k.cmp(&inner_best_rank) {
+                                Ordering::Less => {
+                                    // Tie breaking by hash
+                                    best_groups = vec![group_metadata];
+                                }
+                                Ordering::Equal => {
+                                    best_groups.push(group_metadata);
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            best_groups = vec![group_metadata];
+                        }
+                    }
+
+                    let final_winner: (Hash, &[Hash]) = if best_groups.len() > 1 {
+                        self.tie_breaking(&best_groups)
+                    } else {
+                        let single_winner = best_groups.first().expect("best_groups is non-empty");
+                        (single_winner.conflict_genesis, single_winner.subgroup)
+                    };
+
+                    // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
+                    final_winner
+                }
             };
 
             // Add the non-winners to the ordered parents
