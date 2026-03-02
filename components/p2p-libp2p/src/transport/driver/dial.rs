@@ -101,7 +101,7 @@ impl SwarmDriver {
     pub(super) async fn handle_command(&mut self, command: SwarmCommand) {
         match command {
             SwarmCommand::Dial { address, respond_to } => {
-                info!("libp2p dial request to {address}");
+                debug!("libp2p dial request to {address}");
 
                 // For relay addresses, track by target peer so DCUtR success can resolve the dial
                 let is_relay = addr_uses_relay(&address);
@@ -121,7 +121,7 @@ impl SwarmDriver {
                 }
             }
             SwarmCommand::ProbeRelay { address, respond_to } => {
-                info!("libp2p relay probe request to {address}");
+                debug!("libp2p relay probe request to {address}");
                 let dial_opts = DialOpts::unknown_peer_id().address(address).build();
                 let request_id = dial_opts.connection_id();
                 let started_at = Instant::now();

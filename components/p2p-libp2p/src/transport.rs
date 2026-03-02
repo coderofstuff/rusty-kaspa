@@ -6,7 +6,7 @@ use futures_util::future::BoxFuture;
 use kaspa_p2p_lib::TransportMetadata as CoreTransportMetadata;
 use kaspa_p2p_lib::common::ProtocolError;
 use kaspa_p2p_lib::{ConnectionError, OutboundConnector, PathKind, PeerKey, Router, TransportConnector};
-use kaspa_utils::networking::NetAddress;
+use kaspa_utils::networking::{IpAddress, NetAddress};
 use libp2p::autonat;
 use libp2p::core::transport::ListenerId;
 use libp2p::dcutr;
@@ -110,15 +110,30 @@ pub struct Libp2pOutboundConnector {
     provider: Option<Arc<dyn Libp2pStreamProvider>>,
     provider_cell: Option<Arc<OnceCell<Arc<dyn Libp2pStreamProvider>>>>,
     bridge_cooldowns: Mutex<HashMap<String, Instant>>,
+    bridge_non_retryable: Mutex<HashSet<String>>,
 }
 
 impl Libp2pOutboundConnector {
     pub fn new(config: Config, fallback: Arc<dyn OutboundConnector>) -> Self {
-        Self { config, fallback, provider: None, provider_cell: None, bridge_cooldowns: Mutex::new(HashMap::new()) }
+        Self {
+            config,
+            fallback,
+            provider: None,
+            provider_cell: None,
+            bridge_cooldowns: Mutex::new(HashMap::new()),
+            bridge_non_retryable: Mutex::new(HashSet::new()),
+        }
     }
 
     pub fn with_provider(config: Config, fallback: Arc<dyn OutboundConnector>, provider: Arc<dyn Libp2pStreamProvider>) -> Self {
-        Self { config, fallback, provider: Some(provider), provider_cell: None, bridge_cooldowns: Mutex::new(HashMap::new()) }
+        Self {
+            config,
+            fallback,
+            provider: Some(provider),
+            provider_cell: None,
+            bridge_cooldowns: Mutex::new(HashMap::new()),
+            bridge_non_retryable: Mutex::new(HashSet::new()),
+        }
     }
 
     pub fn with_provider_cell(
@@ -126,7 +141,14 @@ impl Libp2pOutboundConnector {
         fallback: Arc<dyn OutboundConnector>,
         provider_cell: Arc<OnceCell<Arc<dyn Libp2pStreamProvider>>>,
     ) -> Self {
-        Self { config, fallback, provider: None, provider_cell: Some(provider_cell), bridge_cooldowns: Mutex::new(HashMap::new()) }
+        Self {
+            config,
+            fallback,
+            provider: None,
+            provider_cell: Some(provider_cell),
+            bridge_cooldowns: Mutex::new(HashMap::new()),
+            bridge_non_retryable: Mutex::new(HashSet::new()),
+        }
     }
 
     fn resolve_provider(&self) -> Option<Arc<dyn Libp2pStreamProvider>> {
@@ -137,6 +159,14 @@ impl Libp2pOutboundConnector {
             return cell.get().cloned();
         }
         None
+    }
+
+    fn is_non_public_net_addr(address: &NetAddress) -> bool {
+        !address.ip.is_publicly_routable()
+    }
+
+    fn is_non_public_multiaddr(address: &Multiaddr) -> bool {
+        candidate_ip_addr(address).is_some_and(|ip| !IpAddress::new(ip).is_publicly_routable())
     }
 
     async fn dial_via_provider(
@@ -224,7 +254,19 @@ impl Libp2pOutboundConnector {
         let provider = self.resolve_provider();
         let fallback = self.fallback.clone();
         let cooldowns = &self.bridge_cooldowns;
+        let non_retryable = &self.bridge_non_retryable;
         Box::pin(async move {
+            if non_retryable.lock().await.contains(&address) {
+                debug!("bridge mode skipping libp2p retry for non-public address {address} after prior failure");
+                if address.starts_with('/') {
+                    return Err(ConnectionError::ProtocolError(ProtocolError::Other(
+                        "libp2p dial skipped for non-public multiaddr after prior failure",
+                    )));
+                }
+                metadata.capabilities.libp2p = false;
+                return fallback.connect(address, metadata, handler).await;
+            }
+
             if address.starts_with('/') {
                 let provider = provider.ok_or_else(|| {
                     ConnectionError::ProtocolError(ProtocolError::Other(
@@ -233,7 +275,19 @@ impl Libp2pOutboundConnector {
                 })?;
                 let multiaddr = Multiaddr::from_str(&address)
                     .map_err(|_| ConnectionError::ProtocolError(ProtocolError::Other("invalid libp2p multiaddr provided")))?;
-                return Self::dial_multiaddr_via_provider(provider, multiaddr, handler.clone()).await;
+                match Self::dial_multiaddr_via_provider(provider, multiaddr.clone(), handler.clone()).await {
+                    Ok(router) => {
+                        non_retryable.lock().await.remove(&address);
+                        return Ok(router);
+                    }
+                    Err(err) => {
+                        if Self::is_non_public_multiaddr(&multiaddr) {
+                            debug!("bridge mode libp2p dial failed for non-public multiaddr {address}: {err}; suppressing retries");
+                            non_retryable.lock().await.insert(address.clone());
+                        }
+                        return Err(err);
+                    }
+                }
             }
 
             let parsed_address = NetAddress::from_str(&address);
@@ -247,14 +301,21 @@ impl Libp2pOutboundConnector {
             }
 
             if let (Ok(net_addr), Some(provider)) = (parsed_address, provider.clone()) {
+                let is_non_public_net_addr = Self::is_non_public_net_addr(&net_addr);
                 match Self::dial_via_provider(provider, net_addr, handler.clone()).await {
                     Ok(router) => {
                         cooldowns.lock().await.remove(&address);
+                        non_retryable.lock().await.remove(&address);
                         return Ok(router);
                     }
                     Err(err) => {
-                        debug!("bridge mode libp2p dial failed for {address}: {err}; falling back to TCP");
-                        cooldowns.lock().await.insert(address.clone(), now + BRIDGE_LIBP2P_RETRY_COOLDOWN);
+                        if is_non_public_net_addr {
+                            debug!("bridge mode libp2p dial failed for non-public address {address}: {err}; suppressing retries");
+                            non_retryable.lock().await.insert(address.clone());
+                        } else {
+                            debug!("bridge mode libp2p dial failed for {address}: {err}; falling back to TCP");
+                            cooldowns.lock().await.insert(address.clone(), now + BRIDGE_LIBP2P_RETRY_COOLDOWN);
+                        }
                     }
                 }
             } else {

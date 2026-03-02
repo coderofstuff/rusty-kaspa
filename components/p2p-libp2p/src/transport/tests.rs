@@ -188,6 +188,50 @@ async fn bridge_mode_multiaddr_failure_does_not_fallback_to_tcp() {
 }
 
 #[tokio::test]
+async fn bridge_mode_private_multiaddr_failure_is_not_retried() {
+    let cfg = Config { mode: crate::Mode::Bridge, ..Config::default() };
+    let drops = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(MockProvider::with_responses(
+        VecDeque::from([Err(Libp2pError::DialFailed("fail".into())), Err(Libp2pError::DialFailed("fail".into()))]),
+        drops,
+    ));
+    let fallback = Arc::new(CountingFallback::default());
+    let connector = Libp2pOutboundConnector::with_provider(cfg, fallback.clone(), provider.clone());
+    let handler = test_handler();
+
+    let local_multiaddr = "/ip4/192.168.3.141/tcp/16611".to_string();
+    let res1 = connector.connect(local_multiaddr.clone(), CoreTransportMetadata::default(), &handler).await;
+    assert!(res1.is_err());
+    let res2 = connector.connect(local_multiaddr, CoreTransportMetadata::default(), &handler).await;
+    assert!(res2.is_err());
+
+    assert_eq!(provider.attempts(), 1, "private multiaddr should stop retrying after first libp2p failure");
+    assert_eq!(fallback.calls(), 0, "multiaddr dials should not fallback to TCP");
+}
+
+#[tokio::test]
+async fn bridge_mode_public_multiaddr_failure_remains_retryable() {
+    let cfg = Config { mode: crate::Mode::Bridge, ..Config::default() };
+    let drops = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(MockProvider::with_responses(
+        VecDeque::from([Err(Libp2pError::DialFailed("fail".into())), Err(Libp2pError::DialFailed("fail".into()))]),
+        drops,
+    ));
+    let fallback = Arc::new(CountingFallback::default());
+    let connector = Libp2pOutboundConnector::with_provider(cfg, fallback.clone(), provider.clone());
+    let handler = test_handler();
+
+    let public_multiaddr = "/ip4/8.8.8.8/tcp/16611".to_string();
+    let res1 = connector.connect(public_multiaddr.clone(), CoreTransportMetadata::default(), &handler).await;
+    assert!(res1.is_err());
+    let res2 = connector.connect(public_multiaddr, CoreTransportMetadata::default(), &handler).await;
+    assert!(res2.is_err());
+
+    assert_eq!(provider.attempts(), 2, "public multiaddr should remain retryable");
+    assert_eq!(fallback.calls(), 0, "multiaddr dials should not fallback to TCP");
+}
+
+#[tokio::test]
 async fn resolve_relay_multiaddr_probes_missing_relay_peer_v4() {
     let relay_peer = PeerId::random();
     let target_peer = PeerId::random();
