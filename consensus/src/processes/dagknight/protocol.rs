@@ -1,11 +1,12 @@
 use std::{
     cmp::Ordering,
+    collections::HashSet,
     sync::{Arc, OnceLock},
 };
 
 use dashmap::DashMap;
 use itertools::Itertools;
-use kaspa_consensus_core::{BlockHashMap, BlockHashSet, KType};
+use kaspa_consensus_core::{BlockHashMap, BlockHashSet, HashMapCustomHasher, KType};
 use kaspa_core::{debug, trace};
 use kaspa_hashes::Hash;
 use kaspa_math::Uint192;
@@ -126,7 +127,8 @@ pub fn cleanup_conflict_locks() {
 
 struct GroupMetadata<'a> {
     conflict_genesis: Hash,
-    subgroup: &'a Vec<Hash>,
+    // store as a slice for flexibility (Vec or &[Hash] will coerce)
+    subgroup: &'a [Hash],
     rank_value: RankValue,
 }
 
@@ -203,10 +205,65 @@ impl<
             // Pick a "winner" among these subgroups
             let (winning_conflict_genesis, winning_subgroup) = {
                 let mut best_groups: Vec<GroupMetadata> = vec![];
+                let mut blue_work_map = BlockHashMap::new();
+
+                let max_blue_work = group_map.iter().max_by_key(|(_, subgroup)| {
+                    // Max by the max blue work in the subgroup, to prioritize groups with higher blue work in their members
+                    subgroup
+                        .iter()
+                        .map(|&b| {
+                            let bw = self.headers_store.get_header(b).unwrap().blue_work;
+                            blue_work_map.insert(b, bw);
+                            bw
+                        })
+                        .max()
+                        .unwrap()
+                });
+
+                let curr_genesis_blue_work = self.headers_store.get_header(conflict_genesis).unwrap().blue_work;
+
+                // Compute which groups would be filtered out based on the threshold. We always
+                // collect them for logging.
+                let mut likely_to_lose: HashSet<Hash> = HashSet::new();
+                if let Some((_, subgroup)) = max_blue_work {
+                    let max_blue_work_after_genesis =
+                        subgroup.iter().map(|&b| blue_work_map.get(&b).copied().unwrap()).max().unwrap() - curr_genesis_blue_work;
+                    for (&g_conflict_genesis, subgroup) in group_map.iter() {
+                        let subgroup_max_blue_work_after_genesis =
+                            subgroup.iter().map(|&b| blue_work_map.get(&b).copied().unwrap()).max().unwrap() - curr_genesis_blue_work;
+                        // a group is only worth considering if its blue work is more than 5% of
+                        // the max blue work among the groups
+                        if subgroup_max_blue_work_after_genesis * 20 < max_blue_work_after_genesis {
+                            //warn!("Subgroup under conflict genesis {:#?} is likely to lose (low blue work after genesis)", g_conflict_genesis);
+                            likely_to_lose.insert(g_conflict_genesis);
+                        }
+                    }
+                }
 
                 // TODO[DK]: Process groups from highest blue score first to improve chances of getting the best group
                 // on the first try
-                let filtered_group_iter = group_map.iter().sorted_by(|a, b| {
+                // Always apply the blue-work filter now. Compute the maximum blue work after
+                // genesis once and then use a single closure to decide which groups remain.
+                let max_blue_work_after_genesis_opt = if let Some((_, subgroup)) = max_blue_work {
+                    Some(subgroup.iter().map(|&b| blue_work_map.get(&b).copied().unwrap()).max().unwrap() - curr_genesis_blue_work)
+                } else {
+                    None
+                };
+
+                let filtered_group_iter = group_map.iter().filter(|(_, subgroup)| {
+                    if let Some(max_blue_work_after_genesis) = max_blue_work_after_genesis_opt {
+                        let subgroup_max_blue_work_after_genesis =
+                            subgroup.iter().map(|&b| blue_work_map.get(&b).copied().unwrap()).max().unwrap() - curr_genesis_blue_work;
+                        // a group is only worth considering if its blue work is more than 5%
+                        // of the max blue work among the groups
+                        subgroup_max_blue_work_after_genesis * 20 >= max_blue_work_after_genesis
+                    } else {
+                        true
+                    }
+                });
+
+                // sort the resulting iterator by blue score (descending) then hash ascending
+                let filtered_group_iter = filtered_group_iter.sorted_by(|a, b| {
                     // Prioritize groups by higher blue score (descending), then by hash (ascending)
                     let a_score = self.headers_store.get_header(a.1[0]).unwrap().blue_score;
                     let b_score = self.headers_store.get_header(b.1[0]).unwrap().blue_score;
@@ -237,12 +294,21 @@ impl<
                     }
                 }
 
-                let final_winner = if best_groups.len() > 1 {
+                let final_winner: (Hash, &[Hash]) = if best_groups.len() > 1 {
                     self.tie_breaking(&best_groups)
                 } else {
                     let single_winner = best_groups.first().expect("best_groups is non-empty");
                     (single_winner.conflict_genesis, single_winner.subgroup)
                 };
+
+                // Log results for groups that were predicted to lose
+                // for &g in likely_to_lose.iter() {
+                //     if g == final_winner.0 {
+                //         error!("Group under conflict genesis {:#?} was predicted to lose but actually won", g);
+                //     } else {
+                //         warn!("Group under conflict genesis {:#?} was predicted to lose and did lose", g);
+                //     }
+                // }
 
                 // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
                 final_winner
@@ -354,7 +420,7 @@ impl<
     /// Tie-breaking rule in case of multiple winning subgroups with the same rank value.
     /// TODO[DK]: This tie breaking rule only compares RankValue right now. Implement a proper one
     /// according to the paper
-    fn tie_breaking<'a>(&self, subgroups: &[GroupMetadata<'a>]) -> (Hash, &'a Vec<Hash>) {
+    fn tie_breaking<'a>(&self, subgroups: &[GroupMetadata<'a>]) -> (Hash, &'a [Hash]) {
         let winning_subgroup = subgroups.iter().min_by_key(|g| &g.rank_value).expect("subgroups is non-empty");
         (winning_subgroup.conflict_genesis, winning_subgroup.subgroup)
     }
