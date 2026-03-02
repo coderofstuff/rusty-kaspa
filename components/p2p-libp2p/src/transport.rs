@@ -445,6 +445,7 @@ struct SwarmDriver {
     reservation_listeners: HashSet<ListenerId>,
     active_relay: Option<RelayInfo>,
     active_relay_listener: Option<ListenerId>,
+    effective_role: crate::Role,
     auto_role: Option<AutoRoleState>,
     max_peers_per_relay: usize,
     autonat_private_until: Option<Instant>,

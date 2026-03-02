@@ -1,6 +1,24 @@
 use super::*;
 use tokio::sync::oneshot::error::TryRecvError;
 
+#[test]
+fn private_role_starts_with_relay_server_disabled() {
+    let (driver, _) = test_driver_with_role(1, false, crate::Role::Private);
+    assert!(!driver.swarm.behaviour().relay_server.is_enabled());
+}
+
+#[test]
+fn relay_server_toggles_with_effective_role() {
+    let (mut driver, _) = test_driver_with_role(1, false, crate::Role::Auto);
+    assert!(!driver.swarm.behaviour().relay_server.is_enabled());
+
+    driver.apply_effective_role(crate::Role::Public, "test promote");
+    assert!(driver.swarm.behaviour().relay_server.is_enabled());
+
+    driver.apply_effective_role(crate::Role::Private, "test demote");
+    assert!(!driver.swarm.behaviour().relay_server.is_enabled());
+}
+
 #[tokio::test]
 async fn multiple_relay_dials_can_succeed() {
     let (mut driver, _) = test_driver(4);

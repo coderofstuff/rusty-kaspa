@@ -11,6 +11,7 @@ use libp2p::ping;
 use libp2p::relay::{self, client as relay_client};
 use libp2p::swarm::NewExternalAddrCandidate;
 use libp2p::swarm::THandlerInEvent;
+use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::behaviour::{FromSwarm, ToSwarm};
 use libp2p::swarm::handler::{
     ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,
@@ -64,7 +65,7 @@ pub(crate) struct Libp2pBehaviour {
     pub ping: ping::Behaviour,
     pub identify: identify::Behaviour,
     pub relay_client: relay_client::Behaviour,
-    pub relay_server: relay::Behaviour,
+    pub relay_server: Toggle<relay::Behaviour>,
     pub dcutr: dcutr::Behaviour,
     /// No-op behaviour that only advertises `/libp2p/dcutr` via Identify and seeds DCUtR candidates.
     pub dcutr_bootstrap: DcutrBootstrapBehaviour,
@@ -220,7 +221,9 @@ pub(crate) fn build_streaming_swarm(
         ping: ping::Behaviour::default(),
         identify,
         relay_client: relay_client_behaviour,
-        relay_server: relay::Behaviour::new(peer_id, relay::Config::default()),
+        relay_server: Toggle::from(
+            matches!(config.role, crate::Role::Public).then(|| relay::Behaviour::new(peer_id, relay::Config::default())),
+        ),
         dcutr,
         dcutr_bootstrap: DcutrBootstrapBehaviour::new(external_addrs),
         autonat,

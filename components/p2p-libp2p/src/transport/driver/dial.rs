@@ -204,8 +204,14 @@ impl SwarmDriver {
         }
         if let Some(auto_role) = self.auto_role.as_mut() {
             match auto_role.update_role(Instant::now(), has_external_addr) {
-                Some(crate::Role::Public) => info!("libp2p auto role: promoted to public after direct inbound"),
-                Some(crate::Role::Private) => info!("libp2p auto role: demoted to private"),
+                Some(crate::Role::Public) => {
+                    info!("libp2p auto role: promoted to public after direct inbound");
+                    self.apply_effective_role(crate::Role::Public, "direct inbound promotion");
+                }
+                Some(crate::Role::Private) => {
+                    info!("libp2p auto role: demoted to private");
+                    self.apply_effective_role(crate::Role::Private, "direct inbound demotion");
+                }
                 _ => {}
             }
         }

@@ -380,15 +380,25 @@ fn test_driver_with_allow_private(
     incoming_capacity: usize,
     allow_private_addrs: bool,
 ) -> (SwarmDriver, mpsc::Receiver<IncomingStream>) {
+    test_driver_with_role(incoming_capacity, allow_private_addrs, crate::Role::Private)
+}
+
+fn test_driver_with_role(
+    incoming_capacity: usize,
+    allow_private_addrs: bool,
+    role: crate::Role,
+) -> (SwarmDriver, mpsc::Receiver<IncomingStream>) {
     let mut cfg = Config::default();
     cfg.autonat.server_only_if_public = !allow_private_addrs;
+    cfg.role = role;
     let identity = Libp2pIdentity::from_config(&cfg).expect("identity");
     let protocol = default_stream_protocol();
     let swarm = build_streaming_swarm(&identity, &cfg, protocol).expect("swarm");
     let (_cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_BOUND);
     let (incoming_tx, incoming_rx) = mpsc::channel(incoming_capacity);
     let (_shutdown_tx, shutdown) = triggered::trigger();
-    let (role_tx, _role_rx) = watch::channel(crate::Role::Private);
+    let effective_role = if matches!(role, crate::Role::Auto) { crate::Role::Private } else { role };
+    let (role_tx, _role_rx) = watch::channel(effective_role);
     let (relay_hint_tx, _relay_hint_rx) = watch::channel(None);
     let driver = SwarmDriver::new(
         swarm,
@@ -400,7 +410,7 @@ fn test_driver_with_allow_private(
         vec![],
         role_tx,
         relay_hint_tx,
-        crate::Role::Private,
+        role,
         1,
         AUTO_ROLE_WINDOW,
         1,

@@ -181,8 +181,14 @@ impl SwarmDriver {
                 auto_role.record_autonat_public(Instant::now());
             }
             match auto_role.update_role(Instant::now(), has_external_addr) {
-                Some(crate::Role::Public) => info!("libp2p autonat: role auto-promoted to public"),
-                Some(crate::Role::Private) => info!("libp2p autonat: role auto-demoted to private"),
+                Some(crate::Role::Public) => {
+                    info!("libp2p autonat: role auto-promoted to public");
+                    self.apply_effective_role(crate::Role::Public, "autonat promotion");
+                }
+                Some(crate::Role::Private) => {
+                    info!("libp2p autonat: role auto-demoted to private");
+                    self.apply_effective_role(crate::Role::Private, "autonat demotion");
+                }
                 _ => {}
             }
         }

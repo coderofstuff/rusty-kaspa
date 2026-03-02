@@ -52,6 +52,7 @@ impl SwarmDriver {
         metrics: Option<Arc<Libp2pMetrics>>,
     ) -> Self {
         let _ = reservations;
+        let effective_role = if matches!(config_role, crate::Role::Auto) { crate::Role::Private } else { config_role };
         let auto_role = if matches!(config_role, crate::Role::Auto) {
             Some(AutoRoleState::new(role_tx, auto_role_window, auto_role_required_autonat, auto_role_required_direct))
         } else {
@@ -64,7 +65,7 @@ impl SwarmDriver {
             .map(|addr| (addr, LocalCandidateMeta { source: LocalCandidateSource::Config, updated_at: now }))
             .collect();
 
-        Self {
+        let mut driver = Self {
             swarm,
             command_rx,
             incoming_tx,
@@ -82,6 +83,7 @@ impl SwarmDriver {
             reservation_listeners: HashSet::new(),
             active_relay: None,
             active_relay_listener: None,
+            effective_role,
             auto_role,
             max_peers_per_relay: max_peers_per_relay.max(1),
             autonat_private_until: None,
@@ -90,7 +92,30 @@ impl SwarmDriver {
             shutdown,
             connections: HashMap::new(),
             relay_hint_tx,
+        };
+        driver.set_relay_server_enabled(matches!(effective_role, crate::Role::Public), "initial role");
+        driver
+    }
+    pub(super) fn set_relay_server_enabled(&mut self, enabled: bool, reason: &str) {
+        let currently_enabled = self.swarm.behaviour().relay_server.is_enabled();
+        if currently_enabled == enabled {
+            return;
         }
+        let relay_server = if enabled {
+            Some(relay::Behaviour::new(*self.swarm.local_peer_id(), relay::Config::default()))
+        } else {
+            None
+        };
+        self.swarm.behaviour_mut().relay_server = relay_server.into();
+        if enabled {
+            info!("libp2p relay server enabled ({reason})");
+        } else {
+            info!("libp2p relay server disabled ({reason})");
+        }
+    }
+    pub(super) fn apply_effective_role(&mut self, role: crate::Role, reason: &str) {
+        self.effective_role = role;
+        self.set_relay_server_enabled(matches!(role, crate::Role::Public), reason);
     }
     pub(super) fn start_listening(&mut self) -> Result<(), Libp2pError> {
         if self.listening {
