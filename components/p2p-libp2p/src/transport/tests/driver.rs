@@ -426,6 +426,22 @@ fn observed_candidates_dedupe_by_ip() {
 }
 
 #[test]
+fn dcutr_invalidation_keeps_local_candidates_on_relay_churn() {
+    let (mut driver, peer) = dialback_ready_driver_with_allow_private(true);
+    let before = driver.local_dcutr_candidates();
+    assert!(!before.is_empty(), "fixture should start with at least one local candidate");
+    assert!(!driver.peer_states.get(&peer).expect("peer state").remote_dcutr_candidates.is_empty());
+
+    driver.invalidate_dcutr_cached_candidates("relay_changed");
+
+    let after = driver.local_dcutr_candidates();
+    assert_eq!(after, before, "relay churn should not wipe local DCUtR candidates");
+    let state = driver.peer_states.get(&peer).expect("peer state");
+    assert!(state.remote_dcutr_candidates.is_empty());
+    assert!(state.remote_candidates_last_seen.is_none());
+}
+
+#[test]
 fn retryable_dcutr_error_detection_matches_known_failures() {
     assert!(is_retryable_dcutr_error_text("NoAddresses"));
     assert!(is_retryable_dcutr_error_text("io error: UnexpectedEof"));

@@ -6,26 +6,17 @@ impl SwarmDriver {
             state.remote_candidates_last_seen = None;
         }
 
-        let observed_addrs: Vec<_> = self
-            .local_candidate_meta
-            .iter()
-            .filter(|(_, meta)| matches!(meta.source, LocalCandidateSource::Observed | LocalCandidateSource::Dynamic))
-            .map(|(addr, _)| addr.clone())
-            .collect();
-        for addr in &observed_addrs {
-            self.swarm.remove_external_address(addr);
-            self.local_candidate_meta.remove(addr);
-        }
-
         self.dialback_cooldowns.clear();
         self.direct_upgrade_cooldowns.clear();
         self.dcutr_retries.clear();
 
+        // Relay churn invalidates peer-side DCUtR state, not our local observed candidates.
+        let local_remaining = self.local_dcutr_candidates().len();
         info!(
             "libp2p dcutr candidate invalidation ({source}): peers_cleared={} local_removed={} local_remaining={}",
             peers_with_candidates,
-            observed_addrs.len(),
-            self.local_dcutr_candidates().len()
+            0,
+            local_remaining
         );
     }
     pub(super) fn process_scheduled_dcutr_retries(&mut self) {
@@ -99,6 +90,13 @@ impl SwarmDriver {
             debug!("libp2p dcutr relay refresh skipped for {}: no active relay (reason={})", peer_id, reason);
             return;
         };
+        if self.connections.values().any(|conn| conn.peer_id == relay.relay_peer) {
+            debug!(
+                "libp2p dcutr relay refresh skipped for {} via {} (reason={}): relay already connected",
+                peer_id, relay.relay_peer, reason
+            );
+            return;
+        }
 
         let relay_addr = relay_probe_base(&relay.circuit_base);
         let opts = DialOpts::peer_id(relay.relay_peer)
@@ -110,6 +108,12 @@ impl SwarmDriver {
             Ok(()) => {
                 info!(
                     "libp2p dcutr relay refresh dial started for {} via {} using {} (reason={})",
+                    peer_id, relay.relay_peer, relay_addr, reason
+                );
+            }
+            Err(libp2p::swarm::DialError::DialPeerConditionFalse(_)) => {
+                debug!(
+                    "libp2p dcutr relay refresh skipped for {} via {} using {} (reason={}): dial condition false",
                     peer_id, relay.relay_peer, relay_addr, reason
                 );
             }
@@ -356,6 +360,12 @@ impl SwarmDriver {
         }
         if !has_relay_connection {
             debug!("libp2p dcutr: skipping dial-back to {peer_id}: no active relay circuit connection");
+            info!(
+                "libp2p dcutr outcome: peer={} result=blocked_missing_relay_circuit local_candidates={} remote_candidates={}",
+                peer_id,
+                self.local_dcutr_candidates().len(),
+                remote_candidates_count
+            );
             self.force_identify_refresh(peer_id, "missing_relay_circuit");
             self.refresh_relay_connection(peer_id, "missing_relay_circuit");
             self.schedule_dcutr_retry(peer_id, "missing_relay_circuit", false);
