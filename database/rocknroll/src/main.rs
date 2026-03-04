@@ -65,8 +65,8 @@ fn main() {
     // let meta_db_dir = db_dir.join(META_DB);
 
     let config = Arc::new(ConfigBuilder::new(network.into()).adjust_perf_params_to_consensus_params().build());
-    let db =
-        kaspa_database::prelude::ConnBuilder::default().with_db_path(consensus_db_dir).with_files_limit(128).build_readonly().unwrap();
+    let db_builder = kaspa_database::prelude::ConnBuilder::default().with_db_path(consensus_db_dir).with_files_limit(128);
+    let db = if args.compact { db_builder.build().unwrap() } else { db_builder.build_readonly().unwrap() };
 
     let storage = ConsensusStorage::new(db.clone(), config.clone());
 
