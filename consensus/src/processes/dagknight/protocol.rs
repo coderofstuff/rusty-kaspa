@@ -179,7 +179,9 @@ impl<
                 5. Cascade voting -- requires most thought for making incremental
         */
 
-        let current_parents = parents.to_vec();
+        let mut current_parents = parents.to_vec();
+        // TODO[DK]: Remove this later
+        current_parents.sort();
 
         // g = find LCCA
         let mut conflict_genesis = self.common_chain_ancestor(parents);
