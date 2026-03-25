@@ -27,7 +27,6 @@ struct ActiveReservation {
 enum CandidateLogState {
     Selected,
     Backoff,
-    InsufficientSources,
     EligibleNotSelected,
 }
 
@@ -49,9 +48,7 @@ pub async fn run_relay_auto_worker(
     pool_config.rotation_interval = AUTO_RELAY_ROTATE_INTERVAL;
     pool_config.backoff_base = AUTO_RELAY_BASE_BACKOFF;
     pool_config.backoff_max = AUTO_RELAY_MAX_BACKOFF;
-    pool_config.min_sources = config.relay_min_sources.max(1);
     pool_config.rng_seed = config.relay_rng_seed;
-    let min_sources = pool_config.min_sources;
     let mut pool = RelayPool::new(pool_config);
     let mut backoff = ReservationManager::new(AUTO_RELAY_BASE_BACKOFF, AUTO_RELAY_MAX_BACKOFF);
     let mut active: HashMap<String, ActiveReservation> = HashMap::new();
@@ -62,7 +59,6 @@ pub async fn run_relay_auto_worker(
     loop {
         let now = Instant::now();
         let candidates = source.fetch_candidates().await;
-        let has_candidates = !candidates.is_empty();
         if candidates.is_empty() {
             debug!("libp2p relay auto: no relay candidates available");
         }
@@ -70,7 +66,7 @@ pub async fn run_relay_auto_worker(
         pool.prune_expired(now);
         if let Some(metrics) = metrics.as_ref() {
             let stats = pool.candidate_stats(now);
-            metrics.relay_auto().set_candidate_counts(stats.total, stats.eligible, stats.high_confidence);
+            metrics.relay_auto().set_candidate_counts(stats.total, stats.eligible);
             metrics.relay_auto().set_active_reservations(active.len());
         }
         let connected_peers: HashSet<String> =
@@ -106,8 +102,6 @@ pub async fn run_relay_auto_worker(
         }
         if !desired_keys.is_empty() {
             debug!("libp2p relay auto: selected relays {:?}", desired_keys);
-        } else if has_candidates && min_sources > 1 {
-            debug!("libp2p relay auto: insufficient multi-source relay candidates (min_sources={})", min_sources);
         }
         let mut observed_candidate_keys: HashSet<String> = HashSet::new();
         for candidate in pool.candidate_observability(now) {
@@ -116,8 +110,6 @@ pub async fn run_relay_auto_worker(
                 CandidateLogState::Selected
             } else if candidate.in_backoff {
                 CandidateLogState::Backoff
-            } else if candidate.source_count < min_sources {
-                CandidateLogState::InsufficientSources
             } else {
                 CandidateLogState::EligibleNotSelected
             };
@@ -129,20 +121,16 @@ pub async fn run_relay_auto_worker(
 
             match state {
                 CandidateLogState::Selected => info!(
-                    "libp2p relay auto: candidate {} state=selected sources={}/{} has_peer_id={} score={:.2}",
-                    candidate.key, candidate.source_count, min_sources, candidate.has_peer_id, candidate.score
+                    "libp2p relay auto: candidate {} state=selected has_peer_id={} score={:.2}",
+                    candidate.key, candidate.has_peer_id, candidate.score
                 ),
                 CandidateLogState::Backoff => info!(
-                    "libp2p relay auto: candidate {} state=backoff sources={}/{} has_peer_id={} score={:.2}",
-                    candidate.key, candidate.source_count, min_sources, candidate.has_peer_id, candidate.score
-                ),
-                CandidateLogState::InsufficientSources => info!(
-                    "libp2p relay auto: candidate {} state=insufficient_sources sources={}/{} has_peer_id={} score={:.2}",
-                    candidate.key, candidate.source_count, min_sources, candidate.has_peer_id, candidate.score
+                    "libp2p relay auto: candidate {} state=backoff has_peer_id={} score={:.2}",
+                    candidate.key, candidate.has_peer_id, candidate.score
                 ),
                 CandidateLogState::EligibleNotSelected => info!(
-                    "libp2p relay auto: candidate {} state=eligible_not_selected sources={}/{} has_peer_id={} score={:.2}",
-                    candidate.key, candidate.source_count, min_sources, candidate.has_peer_id, candidate.score
+                    "libp2p relay auto: candidate {} state=eligible_not_selected has_peer_id={} score={:.2}",
+                    candidate.key, candidate.has_peer_id, candidate.score
                 ),
             }
         }

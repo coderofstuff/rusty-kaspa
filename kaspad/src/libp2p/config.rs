@@ -35,7 +35,6 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
     let relay_advertise_ttl_ms = args.libp2p_relay_advertise_ttl_ms.or(Some(DEFAULT_RELAY_CANDIDATE_TTL.as_millis() as u64));
     let autonat_allow_private = args.libp2p_autonat_allow_private;
     let autonat_confidence_threshold = args.libp2p_autonat_confidence_threshold.filter(|value| *value > 0);
-    let relay_min_sources = args.libp2p_relay_min_sources.unwrap_or(2);
     let relay_rng_seed = args.libp2p_relay_rng_seed;
     let resolved_role = resolve_role(role, &reservations, helper_listen);
 
@@ -61,7 +60,6 @@ pub fn libp2p_config_from_args(args: &Libp2pArgs, app_dir: &Path, p2p_listen: So
         .libp2p_inbound_cap_private(inbound_cap_private)
         .max_relays(max_relays)
         .max_peers_per_relay(max_peers_per_relay)
-        .relay_min_sources(relay_min_sources)
         .relay_rng_seed(relay_rng_seed)
         .reservations(reservations)
         .relay_candidates(relay_candidates)

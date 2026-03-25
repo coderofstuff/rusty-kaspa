@@ -13,7 +13,6 @@ fn libp2p_args_override_defaults() {
         libp2p_relay_inbound_unknown_cap: Some(7),
         libp2p_autonat_allow_private: true,
         libp2p_autonat_confidence_threshold: Some(2),
-        libp2p_relay_min_sources: Some(3),
         libp2p_relay_rng_seed: Some(42),
         ..Libp2pArgs::default()
     };
@@ -28,7 +27,6 @@ fn libp2p_args_override_defaults() {
     assert_eq!(cfg.autonat.confidence_threshold, 2);
     assert_eq!(cfg.role, AdapterRole::Auto);
     assert_eq!(cfg.libp2p_inbound_cap_private, DEFAULT_LIBP2P_INBOUND_CAP_PRIVATE);
-    assert_eq!(cfg.relay_min_sources, 3);
     assert_eq!(cfg.relay_rng_seed, Some(42));
 }
 
@@ -36,7 +34,6 @@ fn libp2p_args_override_defaults() {
 fn libp2p_default_mode_is_bridge() {
     let cfg = libp2p_config_from_args(&Libp2pArgs::default(), Path::new("/tmp/app"), "0.0.0.0:16111".parse().unwrap());
     assert_eq!(cfg.mode, AdapterMode::Bridge);
-    assert_eq!(cfg.relay_min_sources, 2);
 }
 
 #[test]
@@ -92,9 +89,9 @@ mod relay_source_tests {
 
     #[tokio::test]
     async fn relay_source_filters_by_service_and_port() {
-        let db = create_temp_db!(ConnBuilder::default().with_files_limit(1));
+        let (db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(1));
         let config = ConsensusConfig::new(SIMNET_PARAMS);
-        let (am, _) = AddressManager::new(Arc::new(config), db.1, Arc::new(TickService::default()));
+        let (am, _) = AddressManager::new(Arc::new(config), db.clone(), Arc::new(TickService::default()));
 
         {
             let mut guard = am.lock();
@@ -114,5 +111,33 @@ mod relay_source_tests {
         let updates = source.fetch_candidates().await;
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].key, "10.0.0.1:16112");
+        drop(source);
+        drop(db);
+        drop(db_lifetime);
+    }
+
+    #[tokio::test]
+    async fn relay_source_drops_persisted_relay_gossip_after_restart() {
+        let (db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(1));
+        let config = Arc::new(ConsensusConfig::new(SIMNET_PARAMS));
+
+        {
+            let (am, _) = AddressManager::new(config.clone(), db.clone(), Arc::new(TickService::default()));
+            let mut guard = am.lock();
+            let relay = NetAddress::new(IpAddress::from_str("10.0.0.4").unwrap(), 16111)
+                .with_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY)
+                .with_relay_port(Some(16112))
+                .with_relay_capacity(Some(32))
+                .with_relay_ttl_ms(Some(30_000));
+            guard.add_address(relay);
+        }
+
+        let (am, _) = AddressManager::new(config, db.clone(), Arc::new(TickService::default()));
+        let source = AddressManagerRelaySource::new(am);
+        let updates = source.fetch_candidates().await;
+        assert!(updates.is_empty());
+        drop(source);
+        drop(db);
+        drop(db_lifetime);
     }
 }

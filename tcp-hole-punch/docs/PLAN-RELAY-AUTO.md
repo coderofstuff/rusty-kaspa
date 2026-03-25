@@ -36,7 +36,7 @@ Status tags: [present] [partial] [missing]
      - For private peers, pick **distinct relay** per peer.
      - Enforce max peers per relay = 1 (default).
    - Diversity constraints: avoid same /16 (v4) or /48 (v6) where alternatives exist.
-   - Multi-source discovery: never rely on a single channel or the target peer for relay candidates (min_sources enforced).
+   - Relay discovery accepts gossiped candidates; trust is earned through scoring, backoff, and rotation.
 
 3) Rotation
    - Rotate relay on: failures, timeouts, stale ttl, or long-lived bias.
@@ -73,7 +73,6 @@ Status tags: [present] [partial] [missing]
 - Relay listen port: existing libp2p relay port (lab uses 16112), override via flag if needed.
 - Private inbound cap: 8 (already default).
 - Max peers per relay: 1.
-- Relay min sources: 2.
 - Relay RNG seed: optional override for deterministic selection (test/lab).
 
 ## Work plan

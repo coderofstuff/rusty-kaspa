@@ -1,4 +1,4 @@
-use super::{RelayCandidateUpdate, RelaySource};
+use super::RelayCandidateUpdate;
 use kaspa_utils::networking::NetAddress;
 use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
 use std::net::IpAddr;
@@ -13,7 +13,6 @@ pub fn relay_update_from_netaddr(
     net_address: NetAddress,
     relay_port: u16,
     ttl: Duration,
-    source: RelaySource,
     capacity: Option<usize>,
 ) -> Result<RelayCandidateUpdate, libp2p::multiaddr::Error> {
     let key = relay_key_from_parts(net_address.ip.0, relay_port);
@@ -28,16 +27,10 @@ pub fn relay_update_from_netaddr(
         relay_peer_id: None,
         capacity,
         ttl: Some(ttl),
-        source,
     })
 }
 
-pub fn relay_update_from_multiaddr(
-    address: Multiaddr,
-    ttl: Duration,
-    source: RelaySource,
-    capacity: Option<usize>,
-) -> Option<RelayCandidateUpdate> {
+pub fn relay_update_from_multiaddr(address: Multiaddr, ttl: Duration, capacity: Option<usize>) -> Option<RelayCandidateUpdate> {
     let mut ip: Option<IpAddr> = None;
     let mut port: Option<u16> = None;
     for protocol in address.iter() {
@@ -53,17 +46,12 @@ pub fn relay_update_from_multiaddr(
     let port = port?;
     let key = relay_key_from_parts(ip, port);
     let net_address = NetAddress::new(ip.into(), port);
-    Some(RelayCandidateUpdate { key, address, net_address: Some(net_address), relay_peer_id, capacity, ttl: Some(ttl), source })
+    Some(RelayCandidateUpdate { key, address, net_address: Some(net_address), relay_peer_id, capacity, ttl: Some(ttl) })
 }
 
-pub fn relay_update_from_multiaddr_str(
-    address: &str,
-    ttl: Duration,
-    source: RelaySource,
-    capacity: Option<usize>,
-) -> Option<RelayCandidateUpdate> {
+pub fn relay_update_from_multiaddr_str(address: &str, ttl: Duration, capacity: Option<usize>) -> Option<RelayCandidateUpdate> {
     let addr = Multiaddr::from_str(address).ok()?;
-    relay_update_from_multiaddr(addr, ttl, source, capacity)
+    relay_update_from_multiaddr(addr, ttl, capacity)
 }
 
 fn relay_peer_from_multiaddr(address: &Multiaddr) -> Option<PeerId> {

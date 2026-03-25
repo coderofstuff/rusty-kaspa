@@ -3,9 +3,7 @@ use std::sync::Arc;
 use kaspa_connectionmanager::{Libp2pRoleConfig, set_libp2p_role_config};
 use kaspa_core::task::service::{AsyncService, AsyncServiceError, AsyncServiceFuture};
 use kaspa_p2p_flows::flow_context::FlowContext;
-use kaspa_p2p_libp2p::relay_pool::{
-    CompositeRelaySource, RelayCandidateSource, RelaySource, StaticRelaySource, relay_update_from_multiaddr_str,
-};
+use kaspa_p2p_libp2p::relay_pool::{CompositeRelaySource, RelayCandidateSource, StaticRelaySource, relay_update_from_multiaddr_str};
 use kaspa_p2p_libp2p::{Config as AdapterConfig, Role as AdapterRole};
 use kaspa_utils::networking::{NET_ADDRESS_SERVICE_LIBP2P_RELAY, RelayRole};
 use kaspa_utils::triggers::SingleTrigger;
@@ -203,9 +201,7 @@ impl AsyncService for Libp2pNodeService {
                 if !self.config.relay_candidates.is_empty() {
                     let mut updates = Vec::new();
                     for candidate in &self.config.relay_candidates {
-                        if let Some(update) =
-                            relay_update_from_multiaddr_str(candidate, DEFAULT_RELAY_CANDIDATE_TTL, RelaySource::Config, None)
-                        {
+                        if let Some(update) = relay_update_from_multiaddr_str(candidate, DEFAULT_RELAY_CANDIDATE_TTL, None) {
                             updates.push(update);
                         } else {
                             log::warn!("libp2p relay source: invalid relay candidate {}", candidate);

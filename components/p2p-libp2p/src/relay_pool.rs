@@ -7,23 +7,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RelaySource {
-    AddressGossip,
-    Config,
-    Manual,
-}
-
-impl RelaySource {
-    fn bit(self) -> u8 {
-        match self {
-            RelaySource::AddressGossip => 1 << 0,
-            RelaySource::Config => 1 << 1,
-            RelaySource::Manual => 1 << 2,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct RelayCandidateUpdate {
     pub key: String,
@@ -32,7 +15,6 @@ pub struct RelayCandidateUpdate {
     pub relay_peer_id: Option<PeerId>,
     pub capacity: Option<usize>,
     pub ttl: Option<Duration>,
-    pub source: RelaySource,
 }
 
 pub trait RelayCandidateSource: Send + Sync {
@@ -84,7 +66,6 @@ pub struct RelayPoolConfig {
     pub rotation_interval: Duration,
     pub backoff_base: Duration,
     pub backoff_max: Duration,
-    pub min_sources: usize,
     pub max_candidates: usize,
     pub score_half_life: Duration,
     pub rng_seed: Option<u64>,
@@ -99,7 +80,6 @@ impl RelayPoolConfig {
             rotation_interval: Duration::from_secs(45 * 60),
             backoff_base: Duration::from_secs(10),
             backoff_max: Duration::from_secs(10 * 60),
-            min_sources: 2,
             max_candidates: 512,
             score_half_life: Duration::from_secs(30 * 60),
             rng_seed: None,
@@ -127,13 +107,11 @@ pub struct RelaySelection {
 pub struct RelayCandidateStats {
     pub total: usize,
     pub eligible: usize,
-    pub high_confidence: usize,
 }
 
 #[derive(Clone, Debug)]
 pub struct RelayCandidateObservability {
     pub key: String,
-    pub source_count: usize,
     pub in_backoff: bool,
     pub has_peer_id: bool,
     pub score: f64,
@@ -147,7 +125,6 @@ struct RelayEntry {
     relay_peer_id: Option<PeerId>,
     capacity: usize,
     expires_at: Instant,
-    sources: u8,
     successes: u32,
     failures: u32,
     success_score: f64,
@@ -169,8 +146,6 @@ impl RelayEntry {
         if let Some(latency) = self.last_latency_ms {
             score -= latency as f64 / 100.0;
         }
-        let sources = self.sources.count_ones() as f64;
-        score += sources * 2.0;
         let uptime_minutes = now.saturating_duration_since(self.first_seen).as_secs_f64() / 60.0;
         score += uptime_minutes;
         score
@@ -242,7 +217,6 @@ impl RelayPool {
                 relay_peer_id,
                 capacity,
                 expires_at: now + ttl,
-                sources: update.source.bit(),
                 successes: 0,
                 failures: 0,
                 success_score: 0.0,
@@ -264,7 +238,6 @@ impl RelayPool {
             }
             entry.capacity = capacity;
             entry.expires_at = now + ttl;
-            entry.sources |= update.source.bit();
         }
 
         self.trim_candidates(now);
@@ -316,9 +289,7 @@ impl RelayPool {
             .filter(|entry| entry.expires_at > now)
             .filter(|entry| entry.backoff_until.map(|until| until <= now).unwrap_or(true))
             .collect();
-        let min_sources = self.config.min_sources.max(1);
-        let high_confidence = eligible.iter().filter(|entry| entry.sources.count_ones() as usize >= min_sources).count();
-        RelayCandidateStats { total, eligible: eligible.len(), high_confidence }
+        RelayCandidateStats { total, eligible: eligible.len() }
     }
 
     pub fn candidate_observability(&self, now: Instant) -> Vec<RelayCandidateObservability> {
@@ -328,7 +299,6 @@ impl RelayPool {
             .filter(|entry| entry.expires_at > now)
             .map(|entry| RelayCandidateObservability {
                 key: entry.key.clone(),
-                source_count: entry.sources.count_ones() as usize,
                 in_backoff: entry.backoff_until.map(|until| until > now).unwrap_or(false),
                 has_peer_id: entry.relay_peer_id.is_some(),
                 score: entry.score(now, &self.config),
@@ -349,18 +319,6 @@ impl RelayPool {
 
         if eligible.is_empty() {
             return Vec::new();
-        }
-
-        let min_sources = self.config.min_sources.max(1);
-        let high_confidence: Vec<&RelayEntry> =
-            eligible.iter().copied().filter(|entry| entry.sources.count_ones() as usize >= min_sources).collect();
-
-        if min_sources > 1 && high_confidence.is_empty() {
-            return Vec::new();
-        }
-
-        if !high_confidence.is_empty() {
-            eligible = high_confidence;
         }
 
         eligible.sort_by(|a, b| {

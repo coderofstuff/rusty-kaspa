@@ -529,14 +529,6 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .help("Maximum peers per relay (eclipse guard)."),
         )
         .arg(
-            Arg::new("libp2p-relay-min-sources")
-                .long("libp2p-relay-min-sources")
-                .value_name("N")
-                .require_equals(true)
-                .value_parser(clap::value_parser!(usize))
-                .help("Minimum number of distinct relay sources required before selecting a relay candidate."),
-        )
-        .arg(
             Arg::new("libp2p-relay-rng-seed")
                 .long("libp2p-relay-rng-seed")
                 .value_name("SEED")
@@ -730,10 +722,6 @@ impl Args {
                     .get_one::<usize>("libp2p-max-peers-per-relay")
                     .copied()
                     .or(defaults.libp2p.libp2p_max_peers_per_relay),
-                libp2p_relay_min_sources: m
-                    .get_one::<usize>("libp2p-relay-min-sources")
-                    .copied()
-                    .or(defaults.libp2p.libp2p_relay_min_sources),
                 libp2p_relay_rng_seed: m.get_one::<u64>("libp2p-relay-rng-seed").copied().or(defaults.libp2p.libp2p_relay_rng_seed),
                 libp2p_inbound_cap_private: m
                     .get_one::<usize>("libp2p-inbound-cap-private")
@@ -824,12 +812,6 @@ mod tests {
         let args = Args::parse(["kaspad", "--libp2p-mode=bridge"]).expect("parse should succeed");
         assert_eq!(args.libp2p.libp2p_mode, Libp2pMode::Bridge);
         assert!(args.libp2p.libp2p_mode_set_from_cli);
-    }
-
-    #[test]
-    fn parse_libp2p_relay_min_sources_from_cli() {
-        let args = Args::parse(["kaspad", "--libp2p-relay-min-sources=1"]).expect("parse should succeed");
-        assert_eq!(args.libp2p.libp2p_relay_min_sources, Some(1));
     }
 
     #[test]

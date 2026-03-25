@@ -30,7 +30,6 @@ impl Libp2pMetrics {
 pub struct RelayAutoMetrics {
     candidates_total: AtomicU64,
     candidates_eligible: AtomicU64,
-    candidates_high_confidence: AtomicU64,
     selection_cycles: AtomicU64,
     selected_relays: AtomicU64,
     reservations_active: AtomicU64,
@@ -45,10 +44,9 @@ pub struct RelayAutoMetrics {
 }
 
 impl RelayAutoMetrics {
-    pub fn set_candidate_counts(&self, total: usize, eligible: usize, high_confidence: usize) {
+    pub fn set_candidate_counts(&self, total: usize, eligible: usize) {
         self.candidates_total.store(total as u64, Ordering::Relaxed);
         self.candidates_eligible.store(eligible as u64, Ordering::Relaxed);
-        self.candidates_high_confidence.store(high_confidence as u64, Ordering::Relaxed);
     }
 
     pub fn set_active_reservations(&self, active: usize) {
@@ -96,7 +94,6 @@ impl RelayAutoMetrics {
         RelayAutoMetricsSnapshot {
             candidates_total: self.candidates_total.load(Ordering::Relaxed),
             candidates_eligible: self.candidates_eligible.load(Ordering::Relaxed),
-            candidates_high_confidence: self.candidates_high_confidence.load(Ordering::Relaxed),
             selection_cycles: self.selection_cycles.load(Ordering::Relaxed),
             selected_relays: self.selected_relays.load(Ordering::Relaxed),
             reservations_active: self.reservations_active.load(Ordering::Relaxed),
@@ -163,7 +160,6 @@ pub struct Libp2pMetricsSnapshot {
 pub struct RelayAutoMetricsSnapshot {
     pub candidates_total: u64,
     pub candidates_eligible: u64,
-    pub candidates_high_confidence: u64,
     pub selection_cycles: u64,
     pub selected_relays: u64,
     pub reservations_active: u64,
