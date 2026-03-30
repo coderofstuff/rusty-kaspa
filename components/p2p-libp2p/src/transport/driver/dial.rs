@@ -122,6 +122,13 @@ impl SwarmDriver {
             }
             SwarmCommand::ProbeRelay { address, respond_to } => {
                 debug!("libp2p relay probe request to {address}");
+                if let Some(address_key) = address_key_from_multiaddr(&address)
+                    && let Some(peer_id) = self.connected_peer_for_address_key(&address_key)
+                {
+                    info!("libp2p relay probe reused existing connection to {peer_id} for {address_key}");
+                    let _ = respond_to.send(Ok(peer_id));
+                    return;
+                }
                 let dial_opts = DialOpts::unknown_peer_id().address(address).build();
                 let request_id = dial_opts.connection_id();
                 let started_at = Instant::now();

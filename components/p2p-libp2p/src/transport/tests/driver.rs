@@ -106,6 +106,26 @@ async fn reservation_ack_waits_for_relay_acceptance() {
 }
 
 #[tokio::test]
+async fn relay_probe_reuses_existing_direct_connection() {
+    let (mut driver, _) = test_driver(4);
+    let relay_peer = PeerId::random();
+    let connection_id = make_request_id();
+    let endpoint = libp2p::core::ConnectedPoint::Dialer {
+        address: "/ip4/198.51.100.1/tcp/16112".parse().unwrap(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+    driver.record_connection(connection_id, relay_peer, &endpoint, false);
+
+    let target: Multiaddr = "/ip4/198.51.100.1/tcp/16112".parse().unwrap();
+    let (tx, rx) = oneshot::channel();
+    driver.handle_command(SwarmCommand::ProbeRelay { address: target, respond_to: tx }).await;
+
+    assert_eq!(rx.await.expect("probe result").expect("probe should reuse connection"), relay_peer);
+    assert!(driver.pending_probes.is_empty());
+}
+
+#[tokio::test]
 async fn pending_reservation_times_out_and_cleans_listener() {
     let (mut driver, _) = test_driver(4);
     let relay_peer = PeerId::random();

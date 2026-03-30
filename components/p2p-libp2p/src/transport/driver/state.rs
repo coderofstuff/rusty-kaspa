@@ -191,6 +191,12 @@ impl SwarmDriver {
     pub(super) fn has_direct_connection(&self, peer_id: PeerId) -> bool {
         self.connections.values().any(|conn| conn.peer_id == peer_id && matches!(conn.path, PathKind::Direct))
     }
+    pub(super) fn connected_peer_for_address_key(&self, address_key: &str) -> Option<PeerId> {
+        self.connections
+            .values()
+            .find(|conn| matches!(conn.path, PathKind::Direct) && conn.address_key.as_deref() == Some(address_key))
+            .map(|conn| conn.peer_id)
+    }
     pub(super) fn note_direct_upgrade(&mut self, peer_id: PeerId, had_pending_relay: bool) {
         self.clear_dcutr_retry(peer_id);
         if !had_pending_relay && !self.has_relay_connection(peer_id) {
@@ -212,9 +218,15 @@ impl SwarmDriver {
                 relay_id_from_multiaddr(send_back_addr).or_else(|| relay_id_from_multiaddr(local_addr))
             }
         };
+        let address_key = match endpoint {
+            libp2p::core::ConnectedPoint::Dialer { address, .. } => address_key_from_multiaddr(address),
+            libp2p::core::ConnectedPoint::Listener { send_back_addr, local_addr } => {
+                address_key_from_multiaddr(send_back_addr).or_else(|| address_key_from_multiaddr(local_addr))
+            }
+        };
         let outbound = endpoint.is_dialer();
         self.connections
-            .insert(connection_id, ConnectionEntry { peer_id, path, relay_id, outbound, since: Instant::now(), dcutr_upgraded });
+            .insert(connection_id, ConnectionEntry { peer_id, path, relay_id, address_key, outbound, since: Instant::now(), dcutr_upgraded });
     }
     pub(super) fn close_relay_connections_for_peer(&mut self, peer_id: PeerId, keep: StreamRequestId) {
         let relay_ids: Vec<_> = self
