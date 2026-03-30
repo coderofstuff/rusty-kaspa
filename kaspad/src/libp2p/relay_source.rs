@@ -32,6 +32,9 @@ impl RelayCandidateSource for AddressManagerRelaySource {
                 if matches!(addr.relay_role, Some(RelayRole::Private)) {
                     continue;
                 }
+                if !addr.ip.is_publicly_routable() {
+                    continue;
+                }
                 let Some(relay_port) = addr.relay_port else {
                     continue;
                 };

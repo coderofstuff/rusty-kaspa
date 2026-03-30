@@ -88,21 +88,29 @@ mod relay_source_tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn relay_source_filters_by_service_and_port() {
+    async fn relay_source_filters_private_and_unroutable_candidates() {
         let (db_lifetime, db) = create_temp_db!(ConnBuilder::default().with_files_limit(1));
         let config = ConsensusConfig::new(SIMNET_PARAMS);
         let (am, _) = AddressManager::new(Arc::new(config), db.clone(), Arc::new(TickService::default()));
 
         {
             let mut guard = am.lock();
-            let good = NetAddress::new(IpAddress::from_str("10.0.0.1").unwrap(), 16111)
+            let good = NetAddress::new(IpAddress::from_str("8.8.8.8").unwrap(), 16111)
+                .with_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY)
+                .with_relay_port(Some(16112));
+            let private = NetAddress::new(IpAddress::from_str("10.0.0.1").unwrap(), 16111)
+                .with_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY)
+                .with_relay_port(Some(16112));
+            let cgnat = NetAddress::new(IpAddress::from_str("100.64.0.1").unwrap(), 16111)
                 .with_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY)
                 .with_relay_port(Some(16112));
             let missing_port =
-                NetAddress::new(IpAddress::from_str("10.0.0.2").unwrap(), 16111).with_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY);
-            let missing_service = NetAddress::new(IpAddress::from_str("10.0.0.3").unwrap(), 16111).with_relay_port(Some(16112));
+                NetAddress::new(IpAddress::from_str("8.8.4.4").unwrap(), 16111).with_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY);
+            let missing_service = NetAddress::new(IpAddress::from_str("1.1.1.1").unwrap(), 16111).with_relay_port(Some(16112));
 
             guard.add_address(good);
+            guard.add_address(private);
+            guard.add_address(cgnat);
             guard.add_address(missing_port);
             guard.add_address(missing_service);
         }
@@ -110,7 +118,7 @@ mod relay_source_tests {
         let source = AddressManagerRelaySource::new(am);
         let updates = source.fetch_candidates().await;
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].key, "10.0.0.1:16112");
+        assert_eq!(updates[0].key, "8.8.8.8:16112");
         drop(source);
         drop(db);
         drop(db_lifetime);
@@ -124,7 +132,7 @@ mod relay_source_tests {
         {
             let (am, _) = AddressManager::new(config.clone(), db.clone(), Arc::new(TickService::default()));
             let mut guard = am.lock();
-            let relay = NetAddress::new(IpAddress::from_str("10.0.0.4").unwrap(), 16111)
+            let relay = NetAddress::new(IpAddress::from_str("8.8.8.9").unwrap(), 16111)
                 .with_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY)
                 .with_relay_port(Some(16112))
                 .with_relay_capacity(Some(32))
