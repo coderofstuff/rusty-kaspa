@@ -213,6 +213,38 @@ async fn direct_connection_with_existing_relay_marks_dcutr_upgraded() {
     let direct = driver.connections.get(&direct_conn_id).expect("direct connection entry");
     assert!(matches!(direct.path, PathKind::Direct));
     assert!(direct.dcutr_upgraded, "direct connection should be marked as DCUtR-upgraded when relay path existed");
+    assert!(driver.connections.contains_key(&relay_conn_id), "relay path should stay up until higher layers can migrate");
+}
+
+#[tokio::test]
+async fn inbound_relay_connection_records_before_dialback_preflight() {
+    let (mut driver, peer) = dialback_ready_driver();
+    let relay_peer = driver.active_relay.as_ref().expect("active relay").relay_peer;
+    driver.connections.clear();
+    driver.dialback_cooldowns.clear();
+    driver.dcutr_retries.clear();
+    driver.peer_states.get_mut(&peer).expect("peer state").connected_via_relay = false;
+
+    let connection_id = make_request_id();
+    let endpoint = libp2p::core::ConnectedPoint::Listener {
+        local_addr: format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay_peer}/p2p-circuit").parse().unwrap(),
+        send_back_addr: format!("/p2p/{peer}").parse().unwrap(),
+    };
+
+    driver
+        .handle_event(SwarmEvent::ConnectionEstablished {
+            peer_id: peer,
+            connection_id,
+            endpoint,
+            num_established: std::num::NonZeroU32::new(1).unwrap(),
+            concurrent_dial_errors: None,
+            established_in: Duration::from_millis(0),
+        })
+        .await;
+
+    assert!(driver.has_relay_connection(peer), "relay connection should be tracked before dialback preflight");
+    let retry = driver.dcutr_retries.get(&peer).map(|state| state.last_reason.as_str());
+    assert_ne!(retry, Some("missing_relay_circuit"), "relay connection should avoid false missing-relay retry");
 }
 
 #[test]
@@ -287,6 +319,42 @@ fn enforce_relay_cap_applies_per_unique_peer() {
     driver.record_connection(conn_c, peer_a, &endpoint_c, false);
     driver.enforce_relay_cap(conn_c);
     assert!(driver.connections.contains_key(&conn_c), "same peer should not count toward relay diversity cap");
+}
+
+#[test]
+fn direct_upgraded_peer_does_not_consume_relay_cap() {
+    let (mut driver, _) = test_driver(1);
+    let relay = PeerId::random();
+    let peer_a = PeerId::random();
+    let peer_b = PeerId::random();
+
+    let relay_conn_a = make_request_id();
+    let relay_endpoint_a = libp2p::core::ConnectedPoint::Dialer {
+        address: format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay}/p2p-circuit/p2p/{peer_a}").parse().unwrap(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+    let direct_conn_a = make_request_id();
+    let direct_endpoint_a = libp2p::core::ConnectedPoint::Dialer {
+        address: "/ip4/203.0.113.10/tcp/16612".parse().unwrap(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+    let relay_conn_b = make_request_id();
+    let relay_endpoint_b = libp2p::core::ConnectedPoint::Dialer {
+        address: format!("/ip4/198.51.100.1/tcp/16112/p2p/{relay}/p2p-circuit/p2p/{peer_b}").parse().unwrap(),
+        role_override: libp2p::core::Endpoint::Dialer,
+        port_use: libp2p::core::transport::PortUse::Reuse,
+    };
+
+    driver.record_connection(relay_conn_a, peer_a, &relay_endpoint_a, false);
+    driver.record_connection(direct_conn_a, peer_a, &direct_endpoint_a, true);
+    driver.record_connection(relay_conn_b, peer_b, &relay_endpoint_b, false);
+
+    driver.enforce_relay_cap(relay_conn_b);
+
+    assert!(driver.connections.contains_key(&relay_conn_a), "relay path for upgraded peer should remain during migration");
+    assert!(driver.connections.contains_key(&relay_conn_b), "upgraded peer should not block another relay peer");
 }
 
 #[tokio::test]

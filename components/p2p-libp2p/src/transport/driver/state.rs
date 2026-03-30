@@ -228,20 +228,6 @@ impl SwarmDriver {
         self.connections
             .insert(connection_id, ConnectionEntry { peer_id, path, relay_id, address_key, outbound, since: Instant::now(), dcutr_upgraded });
     }
-    pub(super) fn close_relay_connections_for_peer(&mut self, peer_id: PeerId, keep: StreamRequestId) {
-        let relay_ids: Vec<_> = self
-            .connections
-            .iter()
-            .filter(|(id, conn)| **id != keep && conn.peer_id == peer_id && matches!(conn.path, PathKind::Relay { .. }))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in relay_ids {
-            if self.swarm.close_connection(id) {
-                info!("libp2p: closing relay connection {id:?} to {peer_id} after direct path established");
-            }
-            self.connections.remove(&id);
-        }
-    }
     pub(super) fn enforce_relay_cap(&mut self, connection_id: StreamRequestId) {
         let Some(conn) = self.connections.get(&connection_id) else {
             return;
@@ -253,10 +239,17 @@ impl SwarmDriver {
         let mut relay_peers: HashSet<PeerId> = self
             .connections
             .iter()
-            .filter(|(id, entry)| **id != connection_id && matches!(entry.path, PathKind::Relay { .. }) && entry.relay_id == relay_id)
+            .filter(|(id, entry)| {
+                **id != connection_id
+                    && matches!(entry.path, PathKind::Relay { .. })
+                    && entry.relay_id == relay_id
+                    && !self.has_direct_connection(entry.peer_id)
+            })
             .map(|(_, entry)| entry.peer_id)
             .collect();
-        relay_peers.insert(conn.peer_id);
+        if !self.has_direct_connection(conn.peer_id) {
+            relay_peers.insert(conn.peer_id);
+        }
         let unique_peers = relay_peers.len();
         if unique_peers > self.max_peers_per_relay {
             if self.swarm.close_connection(connection_id) {

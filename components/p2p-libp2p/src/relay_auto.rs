@@ -96,7 +96,10 @@ pub async fn run_relay_auto_worker(
         }
 
         let desired = pool.select_relays(now);
-        let desired_keys: HashSet<String> = desired.iter().map(|sel| sel.key.clone()).collect();
+        let sticky_active_keys: HashSet<String> =
+            active.keys().filter(|key| pool.should_keep_active_reservation(key, now)).cloned().collect();
+        let mut desired_keys: HashSet<String> = desired.iter().map(|sel| sel.key.clone()).collect();
+        desired_keys.extend(sticky_active_keys.iter().cloned());
         if let Some(metrics) = metrics.as_ref() {
             metrics.relay_auto().record_selection_cycle(desired.len());
         }
@@ -136,11 +139,11 @@ pub async fn run_relay_auto_worker(
         }
         candidate_log_states.retain(|key, _| observed_candidate_keys.contains(key));
 
-        // Release reservations that are no longer desired or are rotated out.
+        // Keep live reservations sticky until rotation/disconnect so stale high-scoring
+        // candidates cannot yank us off a working relay mid-session.
         let mut released = Vec::new();
         for (key, reservation) in active.iter() {
-            let rotate = pool.is_rotation_due(key, now);
-            if !desired_keys.contains(key) || rotate {
+            if !pool.should_keep_active_reservation(key, now) {
                 released.push((key.clone(), reservation.reserved_at));
             }
         }
@@ -157,6 +160,9 @@ pub async fn run_relay_auto_worker(
 
         for selection in desired {
             if active.contains_key(&selection.key) {
+                continue;
+            }
+            if active.len() >= config.max_relays.max(1) {
                 continue;
             }
 

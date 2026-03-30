@@ -385,6 +385,10 @@ impl RelayPool {
             .unwrap_or(false)
     }
 
+    pub fn should_keep_active_reservation(&self, key: &str, now: Instant) -> bool {
+        self.entries.contains_key(key) && !self.is_rotation_due(key, now)
+    }
+
     pub fn mark_selected(&mut self, key: &str, now: Instant) {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.last_selected = Some(now);

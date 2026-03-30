@@ -1,4 +1,15 @@
 impl SwarmDriver {
+    pub(super) fn sync_dcutr_candidate(&mut self, addr: &Multiaddr, source: LocalCandidateSource) {
+        if !self.is_usable_external_addr(addr) {
+            return;
+        }
+
+        self.swarm
+            .behaviour_mut()
+            .dcutr
+            .on_swarm_event(FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate { addr }));
+        debug!("libp2p dcutr candidate synced to behaviour: addr={} source={:?}", addr, source);
+    }
     pub(super) fn invalidate_dcutr_cached_candidates(&mut self, source: &str) {
         let peers_with_candidates = self.peer_states.values().filter(|state| !state.remote_dcutr_candidates.is_empty()).count();
         for state in self.peer_states.values_mut() {
@@ -255,6 +266,7 @@ impl SwarmDriver {
         }
         let replaced = self.local_candidate_meta.get(&addr).map(|meta| meta.source);
         self.local_candidate_meta.insert(addr.clone(), LocalCandidateMeta { source, updated_at: Instant::now() });
+        self.sync_dcutr_candidate(&addr, source);
         info!(
             "libp2p dcutr local candidate recorded: addr={} source={:?} replaced={:?} local_candidates={}",
             addr,

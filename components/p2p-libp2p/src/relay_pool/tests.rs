@@ -212,3 +212,21 @@ fn candidate_observability_reports_backoff() {
     assert!(entries[0].in_backoff);
     assert!(!entries[0].has_peer_id);
 }
+
+#[test]
+fn missing_candidate_does_not_keep_active_reservation_sticky() {
+    let config = RelayPoolConfig::new(1, 1);
+    let mut pool = RelayPool::new(config);
+    let now = Instant::now();
+
+    let mut update = make_update(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 30)), 16112);
+    update.ttl = Some(Duration::from_secs(1));
+    let key = update.key.clone();
+    pool.update_candidates(now, vec![update]);
+    pool.mark_selected(&key, now);
+    assert!(pool.should_keep_active_reservation(&key, now));
+
+    let later = now + Duration::from_secs(2);
+    pool.prune_expired(later);
+    assert!(!pool.should_keep_active_reservation(&key, later));
+}
