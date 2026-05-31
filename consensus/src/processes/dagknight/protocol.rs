@@ -1,12 +1,12 @@
 use std::{
     cell::Cell,
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, OnceLock},
 };
 
 use dashmap::DashMap;
 use itertools::Itertools;
-use kaspa_consensus_core::{BlockHashMap, BlockHashSet, HashMapCustomHasher, KType};
+use kaspa_consensus_core::{BlockHashMap, BlockHashSet, KType};
 use kaspa_core::{debug, trace};
 use kaspa_hashes::Hash;
 use kaspa_math::Uint192;
@@ -180,7 +180,6 @@ impl<
         */
 
         // g = find LCCA
-        let use_new_logic = parents.iter().map(|h| self.headers_store.get_daa_score(*h).unwrap()).max().unwrap() >= 25_500_000;
         let mut conflict_genesis = self.common_chain_ancestor(&parents);
         let mut curr_subgroup = Arc::new(parents.to_vec());
         let mut conflict_ordered_parents = vec![];
@@ -212,101 +211,17 @@ impl<
 
             // Pick a "winner" among these subgroups
             let (winning_conflict_genesis, winning_subgroup) = {
-                if !use_new_logic {
-                    let mut blue_work_map = BlockHashMap::new();
+                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup);
 
-                    let max_blue_work = agreement_grouping.iter().max_by_key(|(_, subgroup)| {
-                        // Max by the max blue work in the subgroup, to prioritize groups with higher blue work in their members
-                        subgroup
-                            .iter()
-                            .map(|&b| {
-                                let bw = self.headers_store.get_header(b).unwrap().blue_work;
-                                blue_work_map.insert(b, bw);
-                                bw
-                            })
-                            .max()
-                            .unwrap()
-                    });
-
-                    let curr_genesis_blue_work = self.headers_store.get_header(conflict_genesis).unwrap().blue_work;
-
-                    // Compute which groups would be filtered out based on the threshold. We always
-                    // collect them for logging.
-                    let mut likely_to_lose: HashSet<Hash> = HashSet::new();
-                    if let Some((_, subgroup)) = max_blue_work {
-                        let max_blue_work_after_genesis =
-                            subgroup.iter().map(|&b| blue_work_map.get(&b).copied().unwrap()).max().unwrap() - curr_genesis_blue_work;
-                        for (&g_conflict_genesis, subgroup) in agreement_grouping.iter() {
-                            let subgroup_max_blue_work_after_genesis =
-                                subgroup.iter().map(|&b| blue_work_map.get(&b).copied().unwrap()).max().unwrap()
-                                    - curr_genesis_blue_work;
-                            // a group is only worth considering if its blue work is more than 5% of
-                            // the max blue work among the groups
-                            if subgroup_max_blue_work_after_genesis * 20 < max_blue_work_after_genesis {
-                                //warn!("Subgroup under conflict genesis {:#?} is likely to lose (low blue work after genesis)", g_conflict_genesis);
-                                likely_to_lose.insert(g_conflict_genesis);
-                            }
-                        }
-                    }
-
-                    // TODO[DK]: Process groups from highest blue score first to improve chances of getting the best group
-                    // on the first try
-                    // Always apply the blue-work filter now. Compute the maximum blue work after
-                    // genesis once and then use a single closure to decide which groups remain.
-                    let max_blue_work_after_genesis_opt = if let Some((_, subgroup)) = max_blue_work {
-                        Some(subgroup.iter().map(|&b| blue_work_map.get(&b).copied().unwrap()).max().unwrap() - curr_genesis_blue_work)
-                    } else {
-                        None
-                    };
-
-                    let filtered_group_iter = agreement_grouping.iter().filter(|(_, subgroup)| {
-                        if let Some(max_blue_work_after_genesis) = max_blue_work_after_genesis_opt {
-                            let subgroup_max_blue_work_after_genesis =
-                                subgroup.iter().map(|&b| blue_work_map.get(&b).copied().unwrap()).max().unwrap()
-                                    - curr_genesis_blue_work;
-                            // a group is only worth considering if its blue work is more than 5%
-                            // of the max blue work among the groups
-                            subgroup_max_blue_work_after_genesis * 20 >= max_blue_work_after_genesis
-                        } else {
-                            true
-                        }
-                    });
-
-                    // if there is only one entry remaining in the filtered group, win immediately
-                    if filtered_group_iter.clone().count() == 1 {
-                        let (conflict_genesis, subgroup) = filtered_group_iter.clone().next().unwrap();
-                        debug!(
-                            "Only one subgroup under conflict genesis {:#?} passed the blue work filter, selecting it as the winner",
-                            conflict_genesis
-                        );
-                        (*conflict_genesis, subgroup.clone())
-                    } else {
-                        let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup);
-
-                        let final_winner: (Hash, Arc<Vec<Hash>>) = if best_groups.len() > 1 {
-                            self.tie_breaking(&best_groups)
-                        } else {
-                            let single_winner =
-                                best_groups.into_iter().next().expect("best_groups should be non-empty after filtering");
-                            (single_winner.conflict_genesis, single_winner.subgroup)
-                        };
-
-                        // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
-                        final_winner
-                    }
+                let final_winner = if best_groups.len() > 1 {
+                    self.tie_breaking(&best_groups)
                 } else {
-                    let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup);
+                    let single_winner = best_groups.into_iter().next().expect("best_groups should be non-empty after filtering");
+                    (single_winner.conflict_genesis, single_winner.subgroup)
+                };
 
-                    let final_winner = if best_groups.len() > 1 {
-                        self.tie_breaking(&best_groups)
-                    } else {
-                        let single_winner = best_groups.into_iter().next().expect("best_groups should be non-empty after filtering");
-                        (single_winner.conflict_genesis, single_winner.subgroup)
-                    };
-
-                    // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
-                    final_winner
-                }
+                // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
+                final_winner
             };
 
             // Add the non-winners to the ordered parents
