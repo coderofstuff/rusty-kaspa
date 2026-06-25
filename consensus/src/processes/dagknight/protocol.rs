@@ -6,10 +6,11 @@ use std::{
 
 use dashmap::DashMap;
 use itertools::Itertools;
-use kaspa_consensus_core::{BlockHashMap, BlockHashSet, KType};
-use kaspa_core::{debug, trace};
+use kaspa_consensus_core::KType;
+use kaspa_core::{debug, time::Stopwatch, trace};
 use kaspa_hashes::Hash;
 use kaspa_math::Uint192;
+
 use parking_lot::RwLock;
 
 use crate::{
@@ -28,62 +29,13 @@ use crate::{
             manager::ConflictZoneManager,
             rank_search::RankSearcher,
             tie_breaking::{DagknightTieBreaker, TieBreakInput, TieBreaker},
+            umc_voting::{UmcVoter, UmcVoterInput},
         },
         difficulty::calc_work,
         ghostdag::ordering::SortableBlock,
         reachability::relations::FutureIntersectRelations,
     },
 };
-
-/*
-    Task 0:
-        Hierarchic conflict resolution
-
-        input: set of parents P (|P| >= 1)
-        output:  a selected parent p \in P
-        pseudo:
-
-        while |P| > 1:
-            g = find the latest common chain ancestor of P // the genesis of the conflict
-            split P into subgroups {P_1, ..., P_n} such that blocks within each subgroup agree about the chain ancestor above g // each such subgroup is "united" re the conflict zone induced by g
-            run some deterministic black box protocol F to choose a winner group P_i // to start with, xor all hashes in each subgroup and rank the results by lexicographic hash order
-            P = P_i
-        p = P[0]
-        return p
-
-    Task 1:
-        Goal: a more sophisticated F
-        Possible idea: fix k, run GD over subdag = future(g) \cup past(P), select P_i which contains the GD selected parent from P
-        Main challenge: adapt the GD protocol to run on such a subdag (defined by future and past constrains). We did something like this in the pruning proof by abstracting the relations store
-
-    Task 2:
-        Vanilla DK
-        Implement F with basic DK logic, i.e., searching the k space
-        TBD
-
-    ------------
-
-    Notation: the version of k-coloring where the set of parents you can inherit a blueset for is restricted to to those
-              agreeing with you, should be named DK-committed coloring (megachain = DK-chain)
-
-    There are 3 usages of GD coloring out of selected chain:
-        1. coinbase rewards
-        2. blue score (mainly for blue depth but also for client confirmation counting)
-        3. blue work (mainly for topological sorting and related usages)
-
-    Q. how do keep all these with DK?
-
-    A.
-        For 1. 2. the answer is to have an incremental coloring with a fixed k over the main DK chain (name: global incremental/committed coloring )
-        For 3. it seems like we need a global free coloring (probably same fixed k)
-
-    ------------
-
-    Possible next steps:
-        1. move code to correct place
-        2. moving to DK storage objects
-        3. switch GD/k-coloring to committed coloring
-*/
 
 /// TODO[DK]: If writes here are moved out or batched, revisit this
 /// Global lock map for conflict genesis level locking
@@ -208,19 +160,43 @@ impl<
             }
 
             // Pick a "winner" among these subgroups
-            let (winning_conflict_genesis, winning_subgroup) = {
-                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup);
-
+            // The incremental check (per-block UMC per the paper) is authoritative.
+            // The basic check (aggregate work-based) serves as a secondary validation.
+            let ((winning_conflict_genesis, winning_subgroup), winning_k) = {
+                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup, true);
+                let winning_k = best_groups[0].k;
                 let final_winner = if best_groups.len() > 1 {
                     self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups)
                 } else {
                     let single_winner = best_groups.into_iter().next().expect("best_groups should be non-empty after filtering");
                     (single_winner.conflict_genesis, single_winner.subgroup)
                 };
-
-                // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
-                final_winner
+                (final_winner, winning_k)
             };
+
+            // Sanity check: basic (aggregate) and incremental (per-block) should agree
+            // When they disagree, the incremental check (per-block UMC) is authoritative per the DK paper
+            let sanity_check = {
+                let best_groups_basic = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup, false);
+                let basic_winning_k = best_groups_basic[0].k;
+                let final_winner_basic = if best_groups_basic.len() > 1 {
+                    self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups_basic)
+                } else {
+                    let single = best_groups_basic.into_iter().next().expect("best_groups should be non-empty after filtering");
+                    (single.conflict_genesis, single.subgroup)
+                };
+                (final_winner_basic, basic_winning_k)
+            };
+
+            assert!(
+                winning_subgroup == sanity_check.0.1,
+                "UMC basic and incremental differ for conflict_genesis {}, basic_winner {:?}, incremental_winner {:?} | k_basic = {} | k_incremental = {} | using incremental",
+                conflict_genesis.to_le_u64()[3],
+                sanity_check.0.1.iter().map(|h| h.to_le_u64()[3]).collect_vec(),
+                winning_subgroup.iter().map(|h| h.to_le_u64()[3]).collect_vec(),
+                sanity_check.1,
+                winning_k
+            );
 
             // Add the non-winners to the ordered parents
             agreement_grouping.iter().for_each(|(&conflict_genesis, subgroup)| {
@@ -297,6 +273,132 @@ impl<
         virtual_cd.blue_work + deficit > virtual_cd.past_red_work
     }
 
+    /// Incremental UMC cascade voting using UmcVoter with floor-based heap.
+    ///
+    /// For each blue block B, the floor is a lower bound on its score:
+    ///   floor(B) = past_red_work(B) + arlb(B) - effective_past_blue(B) - anticone_blue_work(B)
+    /// where effective_past_blue = past_blue_work(B) + work(B) (absorbs self-term into floor).
+    ///
+    /// The check is: floor(B) >= -deficit' where deficit' = total_blue_work + deficit - total_non_gray_red_work.
+    /// This is equivalent to: future_blue_work(B) + deficit >= future_red_work(B).
+    ///
+    /// Gray reds (chain ancestors of the winning subgroup's next chain ancestor) are excluded.
+    ///
+    /// Delegates to [UmcVoter] in the `umc_voting` module.
+    fn incremental_umc_voting(
+        &self,
+        conflict_genesis: Hash,
+        k: KType,
+        conflict_zone_manager: &ConflictZoneManager<C, O, D, R>,
+        subgroup: &[Hash],
+        virtual_cd: &ColoringData,
+    ) -> bool {
+        // Compute the next chain ancestor of the subgroup
+        let next_chain_ancestor = self.reachability_service.get_next_chain_ancestor(subgroup[0], conflict_genesis);
+
+        // Walk VSPC chain exactly like the basic check to collect zone data
+        let mut curr_cd: Arc<ColoringData> = Arc::new(virtual_cd.clone());
+
+        let mut blue_set = kaspa_consensus_core::BlockHashSet::default();
+        let mut red_set: Vec<Hash> = Vec::new();
+
+        let blue_work = virtual_cd.blue_work;
+        let red_work = virtual_cd.past_red_work;
+
+        // Deficit is sqrt(k) * work(conflict_genesis) in work units
+        let deficit_work_basis = calc_work(self.headers_store.get_bits(conflict_genesis).unwrap());
+        let deficit = Uint192::from_u64(k.isqrt() as u64) * deficit_work_basis;
+
+        if blue_work + deficit <= red_work {
+            // Short-circuit if we know that root doesn't have majority coverage:
+            return false;
+        }
+
+        // TODO[DK]: Move all this below to umc_voting
+        let mut virtual_coloring_data_map = HashMap::<Hash, PastColoringData>::new();
+
+        let blue_anticone_map = self.extract_blue_anticone_map(conflict_genesis, &conflict_zone_manager, Arc::new(virtual_cd.clone()));
+
+        loop {
+            if curr_cd.selected_parent == conflict_genesis {
+                break;
+            }
+
+            // Process mergeset blues: collect into blue set and compute past counters
+            for &mbb in curr_cd.mergeset_blues.iter().filter(|&&b| self.reachability_service.is_dag_ancestor_of(conflict_genesis, b)) {
+                blue_set.insert(mbb);
+
+                let (past_blue_work, past_red_work) = if curr_cd.selected_parent == mbb {
+                    let sp_cd = conflict_zone_manager.get_data(curr_cd.selected_parent).unwrap();
+                    (sp_cd.blue_work, sp_cd.past_red_work)
+                } else {
+                    let anticone_blue_work = curr_cd.blues_anticone_work.get(&mbb).copied().unwrap();
+
+                    let future_blue_work: Uint192 = curr_cd
+                        .mergeset_blues
+                        .iter()
+                        .filter(|&&c| c != mbb && self.reachability_service.is_dag_ancestor_of(mbb, c))
+                        .map(|&c| calc_work(self.headers_store.get_bits(c).unwrap()))
+                        .sum();
+
+                    let self_work = calc_work(self.headers_store.get_bits(mbb).unwrap());
+                    let past_blue_work = curr_cd.blue_work - anticone_blue_work - future_blue_work - self_work;
+
+                    // past_red_work: subtract only future reds from curr_cd.past_red_work.
+                    // The overestimate in past_red_work is exactly offset by the corresponding
+                    // underestimate in arlb, so the floor remains accurate.
+                    let future_red_work: Uint192 = curr_cd
+                        .mergeset_reds
+                        .iter()
+                        .filter(|&&r| self.reachability_service.is_dag_ancestor_of(mbb, r))
+                        .map(|&r| calc_work(self.headers_store.get_bits(r).unwrap()))
+                        .sum();
+
+                    let past_red_work_upper_bound = curr_cd.past_red_work - future_red_work;
+
+                    (past_blue_work, past_red_work_upper_bound)
+                };
+
+                let mut coloring_data = PastColoringData::default();
+                coloring_data.past_blue_work = past_blue_work;
+                coloring_data.past_red_work = past_red_work;
+
+                if let Some(&anticone_work) = blue_anticone_map.get(&mbb) {
+                    coloring_data.anticone_blue_work = anticone_work;
+                }
+
+                virtual_coloring_data_map.insert(mbb, coloring_data);
+            }
+
+            curr_cd.mergeset_reds.iter().for_each(|&b| {
+                if !self.reachability_service.is_chain_ancestor_of(next_chain_ancestor, b) {
+                    red_set.push(b);
+                }
+            });
+
+            curr_cd = conflict_zone_manager.get_data(curr_cd.selected_parent).unwrap();
+        }
+
+        blue_set.insert(conflict_genesis);
+        virtual_coloring_data_map.insert(conflict_genesis, PastColoringData::default());
+
+        let input = UmcVoterInput {
+            conflict_genesis,
+            k,
+            next_chain_ancestor,
+            blue_set,
+            red_set,
+            blue_work,
+            red_work,
+            deficit,
+            deficit_work_basis,
+            virtual_coloring_data_map,
+        };
+
+        let voter = UmcVoter::new(&self.reachability_service, &*self.headers_store);
+        voter.run_cascade(&input)
+    }
+
     /// Tie-breaking rule in case of multiple winning subgroups with the same rank value.
     fn tie_breaking(&self, conflict_genesis: Hash, all_tips: &[Hash], subgroups: &[GroupMetadata]) -> (Hash, Arc<Vec<Hash>>) {
         debug!("Winning groups had rank k = {}", subgroups[0].k);
@@ -327,6 +429,7 @@ impl<
         conflict_genesis: Hash,
         agreeing_subgroups: &HashMap<Hash, Arc<Vec<Hash>>>,
         all_tips: &[Hash],
+        use_incremental: bool,
     ) -> Vec<GroupMetadata> {
         let mut group_map = Cell::new(agreeing_subgroups.clone());
         let best_groups_cell = Cell::new(vec![]);
@@ -336,12 +439,19 @@ impl<
                 .iter()
                 .filter_map(|(curr_conflict_genesis, subgroup)| {
                     // `subgroup` is an `&Arc<Vec<Hash>>` here; pass a `&[Hash]` to the colouring function
-                    self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k).map(|selected_parent| {
-                        (
-                            (*curr_conflict_genesis, subgroup.clone()),
-                            GroupMetadata { conflict_genesis: *curr_conflict_genesis, subgroup: subgroup.clone(), k, selected_parent },
-                        )
-                    })
+                    self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k, use_incremental).map(
+                        |selected_parent| {
+                            (
+                                (*curr_conflict_genesis, subgroup.clone()),
+                                GroupMetadata {
+                                    conflict_genesis: *curr_conflict_genesis,
+                                    subgroup: subgroup.clone(),
+                                    k,
+                                    selected_parent,
+                                },
+                            )
+                        },
+                    )
                 })
                 .unzip();
 
@@ -368,6 +478,7 @@ impl<
         subgroup: &[Hash],
         all_tips: &[Hash],
         k_to_check: KType,
+        use_incremental: bool,
     ) -> Option<SortableBlock> {
         let reachability_service = self.reachability_service.clone();
         let relations_store = self.relations_store.read();
@@ -390,9 +501,28 @@ impl<
 
         // selected a parent in this subgroup => Conditioned upon virtual agreeing with this subgroup
         let subgroup_virtual_sp = conflict_zone_manager.find_selected_parent(subgroup.iter().copied());
-        let virtual_gd = conflict_zone_manager.k_colouring(all_tips, k_to_check, Some(subgroup_virtual_sp));
+        let virtual_cd = conflict_zone_manager.k_colouring(all_tips, k_to_check, Some(subgroup_virtual_sp));
 
-        if self.umc_cascade_voting(conflict_genesis, subgroup, virtual_gd, k_to_check, &conflict_zone_manager) {
+        let umc_result = if !use_incremental {
+            self.umc_cascade_voting(conflict_genesis, subgroup, virtual_cd.clone(), k_to_check, &conflict_zone_manager)
+        } else {
+            let stopwatch = Stopwatch::new("incremental_umc_voting");
+            let incremental_umc =
+                self.incremental_umc_voting(conflict_genesis, k_to_check, &conflict_zone_manager, subgroup, &virtual_cd);
+            if stopwatch.elapsed() > std::time::Duration::from_millis(500) {
+                debug!(
+                    "UMC voting took {:#?} for conflict_genesis {}, subgroup size {}, k = {}",
+                    stopwatch.elapsed(),
+                    conflict_genesis,
+                    subgroup.len(),
+                    k_to_check
+                );
+            }
+
+            incremental_umc
+        };
+
+        if umc_result {
             Some(SortableBlock {
                 hash: subgroup_virtual_sp,
                 blue_work: self.headers_store.get_header(subgroup_virtual_sp).unwrap().blue_work,
@@ -401,211 +531,29 @@ impl<
             None
         }
     }
-}
 
-mod ct {
-    use super::*;
-    use std::{
-        cmp::Ordering,
-        collections::{
-            BTreeSet,
-            hash_map::Entry::{Occupied, Vacant},
-        },
-    };
+    fn extract_blue_anticone_map(
+        &self,
+        conflict_genesis: Hash,
+        czm: &ConflictZoneManager<C, O, D, R>,
+        pov_cd: Arc<ColoringData>,
+    ) -> HashMap<Hash, Uint192> {
+        let mut anticone_map = HashMap::new();
+        let mut curr_cd = pov_cd;
 
-    /// BTree entry
-    #[derive(Eq, Clone)]
-    pub struct CascadeTreeEntry {
-        pub hash: Hash,
-        pub floor: i64,
-    }
-
-    impl CascadeTreeEntry {
-        pub fn new(hash: Hash, floor: i64) -> Self {
-            Self { hash, floor }
-        }
-    }
-
-    impl PartialEq for CascadeTreeEntry {
-        fn eq(&self, other: &Self) -> bool {
-            self.floor == other.floor && self.hash == other.hash
-        }
-    }
-
-    impl PartialOrd for CascadeTreeEntry {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    impl Ord for CascadeTreeEntry {
-        fn cmp(&self, other: &Self) -> Ordering {
-            self.floor.cmp(&other.floor).then_with(|| self.hash.cmp(&other.hash))
-        }
-    }
-
-    #[derive(Default)]
-    pub struct CascadeTree {
-        btree: BTreeSet<CascadeTreeEntry>,
-        rev_index: BlockHashMap<i64>,
-
-        // Exact counters
-        past_blues: BlockHashMap<u64>,
-        past_reds: BlockHashMap<u64>,
-        anticone_blues: BlockHashMap<u64>,
-
-        /// Anticone reds lower bound
-        arlb: BlockHashMap<u64>,
-    }
-
-    impl CascadeTree {
-        /// Insert a new block.
-        pub fn insert(
-            &mut self,
-            hash: Hash,
-            past_blues: u64,
-            past_reds: u64,
-            anticone_blues: u64,
-            anticone_reds_lower_bound: u64,
-        ) -> bool {
-            match self.past_blues.entry(hash) {
-                Occupied(_) => return false,
-                Vacant(e) => e.insert(past_blues),
-            };
-            self.past_reds.insert(hash, past_reds).is_none().then_some(()).unwrap();
-            self.anticone_blues.insert(hash, anticone_blues).is_none().then_some(()).unwrap();
-            self.arlb.insert(hash, anticone_reds_lower_bound).is_none().then_some(()).unwrap();
-
-            let floor = past_reds as i64 + anticone_reds_lower_bound as i64 - past_blues as i64 - anticone_blues as i64;
-            self.btree.insert(CascadeTreeEntry::new(hash, floor)).then_some(()).unwrap();
-            self.rev_index.insert(hash, floor).is_none().then_some(()).unwrap();
-
-            true
-        }
-
-        /// Update `anticone_blues` of an existing block.
-        ///
-        /// TODO: Result
-        pub fn _update_anticone_blues(&mut self, hash: Hash, anticone_blues: u64) {
-            let prev_floor = self.rev_index[&hash];
-            let prev_anticone_blues = self.anticone_blues.insert(hash, anticone_blues).unwrap();
-            let new_floor = prev_floor - (anticone_blues as i64 - prev_anticone_blues as i64);
-            self.btree.remove(&CascadeTreeEntry::new(hash, prev_floor)).then_some(()).unwrap();
-            self.btree.insert(CascadeTreeEntry::new(hash, new_floor)).then_some(()).unwrap();
-            self.rev_index.insert(hash, new_floor);
-            assert!(anticone_blues > prev_anticone_blues);
-        }
-
-        /// Update `anticone_reds_lower_bound` of an existing block.
-        ///
-        /// TODO: Result
-        pub fn _update_anticone_reds_lower_bound(&mut self, hash: Hash, anticone_reds_lower_bound: u64) {
-            let prev_floor = self.rev_index[&hash];
-            let prev_arlb = self.arlb.insert(hash, anticone_reds_lower_bound).unwrap();
-            let new_floor = prev_floor + (anticone_reds_lower_bound as i64 - prev_arlb as i64);
-            self.btree.remove(&CascadeTreeEntry::new(hash, prev_floor)).then_some(()).unwrap();
-            self.btree.insert(CascadeTreeEntry::new(hash, new_floor)).then_some(()).unwrap();
-            self.rev_index.insert(hash, new_floor);
-            assert!(anticone_reds_lower_bound > prev_arlb);
-        }
-
-        // pub fn peek_min(&self) -> CascadeTreeEntry {
-        //     self.btree.first().cloned().unwrap()
-        // }
-    }
-}
-
-use ct::CascadeTree;
-
-/// Cascade related data structures
-#[derive(Default)]
-pub struct CascadeDast {
-    /// TEMP: the full DAG (as of this processing point)
-    g: BlockHashSet,
-
-    /// Blue set
-    blueset: BlockHashSet,
-
-    // B tree ordered by floor values
-    tree: CascadeTree,
-}
-
-pub struct TraversalContext<'a, T: ReachabilityStore + ?Sized, S: RelationsStore + ChildrenStore + ?Sized> {
-    /// The reachability oracle
-    _oracle: &'a T,
-    /// The relations oracle (local DAG area)
-    _relations: &'a S,
-}
-
-impl<'a, T: ReachabilityStore + ?Sized, S: RelationsStore + ChildrenStore + ?Sized> TraversalContext<'a, T, S> {
-    pub fn new(reachability: &'a T, _relations: &'a S) -> Self {
-        Self { _oracle: reachability, _relations }
-    }
-}
-
-pub type MemTraversalContext<'a> = TraversalContext<'a, MemoryReachabilityStore, MemoryRelationsStore>;
-
-pub enum BlockColouring {
-    Blue { anticone_blues: u64, past: u64 },
-    Red,
-}
-
-pub struct CascadeContext<'a> {
-    /// Traversal ctx
-    _ctx: MemTraversalContext<'a>,
-
-    /// Cascade data structure
-    dast: CascadeDast,
-
-    /// The allowed deficit
-    /// TODO: should this be measured by work units?
-    _deficit_parameter: i64,
-
-    /// Cached result of cascade voting
-    cached_vote: bool,
-}
-
-impl<'a> CascadeContext<'a> {
-    pub fn new(_ctx: MemTraversalContext<'a>, _deficit_parameter: i64) -> Self {
-        let cached_vote = true; // The empty set is a d-UMC by definition
-        Self { _ctx, dast: Default::default(), _deficit_parameter, cached_vote }
-    }
-
-    /// Insert a new block `hash` where `blue` indicates whether the block is blue or not.
-    /// Returns whether the resulting blue cluster *contains* a subset of blocks which is
-    /// a d-UMC (via incremental cascade voting)
-    pub fn insert(&mut self, hash: Hash, colouring: BlockColouring) -> bool {
-        self.dast.g.insert(hash).then_some(()).unwrap();
-        if let BlockColouring::Blue { anticone_blues, past } = colouring {
-            self.dast.blueset.insert(hash).then_some(()).unwrap();
-
-            let total_blues = self.dast.blueset.len() as u64;
-            let total_reds = self.dast.g.len() as u64 - total_blues;
-            let past_blues = total_blues - 1 - anticone_blues; // -1 for this block; future is empty
-            let past_reds = past - past_blues;
-            let anticone_reds = total_reds - past_reds; // this block is not red, so there is no need to subtract 1; future is empty
-
-            self.dast.tree.insert(hash, past_blues, past_reds, anticone_blues, anticone_reds).then_some(()).unwrap();
-
-            if self.cached_vote {
-                // A blue block preserves the positive vote
-                return true;
+        loop {
+            if curr_cd.selected_parent == conflict_genesis {
+                break;
             }
-        } else if !self.cached_vote {
-            // A red block preserves the negative votes
-            return true;
+
+            for (&hash, &work) in &curr_cd.blues_anticone_work {
+                anticone_map.entry(hash).or_insert(work);
+            }
+
+            curr_cd = czm.get_data(curr_cd.selected_parent).unwrap();
         }
 
-        self.cached_vote = self.vote();
-        self.cached_vote
-    }
-
-    // fn peek_min(&self) -> CascadeTreeEntry {
-    //     self.dast.tree.peek_min()
-    // }
-
-    pub fn vote(&mut self) -> bool {
-        todo!()
+        anticone_map
     }
 }
 
@@ -632,9 +580,9 @@ mod tests {
     use std::str::FromStr;
     use std::{cell::RefCell, fs::File};
 
-    use kaspa_consensus_core::HashMapCustomHasher;
     use kaspa_consensus_core::blockhash::ORIGIN;
     use kaspa_consensus_core::header::Header;
+    use kaspa_consensus_core::{BlockHashSet, HashMapCustomHasher};
     use parking_lot::lock_api::RwLock;
 
     use super::*;

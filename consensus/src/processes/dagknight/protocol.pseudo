@@ -19,6 +19,9 @@ Denote the score lower bound:
 
 floor_i := |U| - past_blues[i] - anticone_blues[i]      - (|(G \ U)| - past_reds[i] - L[i])
 
+-> floor_i := - past_blues[i] - anticone_blues[i]      + (past_reds[i] + L[i])
+           := antifuture_reds - antifuture_blues
+
 So
     floor_i ≤ score_i
 
@@ -50,3 +53,84 @@ Algorithm 1:
                 push updated f to H
             else:
                 N = N + 1
+
+---
+
+# Voting Algorithm:
+
+let H denote a heap of floor values  
+let S denote a secondary heap of floor values for negative blues popped from H
+let N = 0 // Negative blues counter
+let threshold = total_red_work - total_blue_work + deficit
+
+loop:
+    let f_i = pop min floor value from H // i is the block index
+
+    if f_i >= -threshold + N:
+        return true
+    
+    calc score_i accurately and update L[i]
+        > by reading the new reds from red_set starting from red_set[(f_i.red_index + 1)..=(red_set.length - 1)]
+    if f_i increased:
+        push updated f to H
+    else:
+        N = N + 1
+        S.push(f_i)
+    
+    if H is empty:
+        return false
+
+# Definition
+all_tips - the full set of tips for the current block we are running DK for
+subgroup - a group of tips that agree with each other in this conflict
+- in code, the next chain ancestor after conflict genesis is the same for all these blocks
+
+virtual - the virtual conditioned on agreeing with this subgroup. The conditioned VSPC (cVSPC) from this virtual will give the coloring
+for the conflict zone
+
+mcb - merging chain block
+
+# Calculation of Counters
+
+## Counters
+past_blue_work
+anticone_blue_work
+past_red_work_upper_bound
+anticone_red_work_lower_bound
+
+### past_blue_work
+
+1. if a block B is chain block in the cVSPC, it's past_blue_work counters are exactly correct from cVSPC's POV
+   so: B.past_blue_work can be used as is
+2. else:
+   B.past_blue_work = mcb.past_blue_work - future_B_work_in_mcb_mergeset_blues - mcb.blues_anticone_work[B] - work(B)
+
+### anticone_blue_work
+virtual contains blues_anticone_work, similar to blues_anticone_sizes which is maintained when inheriting the selected parent's POV
+
+procedure:
+  anticone_work_map = map{}
+  // coloring_data
+  cd = virtual_coloring_data
+
+  while not conflict_genesis:
+    for key in cd.blues_anticone_work:
+      if key not in anticone_work_map:
+        anticone_work_map[key] = cd.blues_anticone_work[key]
+
+    cd = cd.selected_parent.coloring_data
+
+rationale:
+
+blues_anticone_work is maintained when interiting the SP's POV. The latest coloring data has the most up to date total value for the entire zone
+any missing blue's data can be collected through their first occurrence in the cVSPC.
+
+### past_red_work_upper_bound and anticone_red_lower_bound
+
+Again, for cVSPC chain blocks, these values are exact (or exactly calculable)
+
+Due to the presence of "gray blocks", it's not very easy to calculate past_red_work efficiently without doing O(R) amount of work. However, instead
+of attempting to calculate past_red_work exactly, we can settle for a past_red_work_upper_bound where this value may contain work from the anticone.
+
+This is acceptable as long as the past_red_work_upper_bound + anticone_red_lower_bound == past_red_work_exact + anticone_red_lower_bound'
+(meaning, we don't double count an anticone block)
