@@ -15,8 +15,7 @@ use crate::{
     model::{
         services::reachability::{MTReachabilityService, ReachabilityService},
         stores::{
-            dagknight::{DagknightKey, DagknightStore, DagknightStoreReader},
-            ghostdag::GhostdagData,
+            dagknight::{ColoringData, DagknightKey, DagknightStore, DagknightStoreReader},
             headers::HeaderStoreReader,
             reachability::ReachabilityStoreReader,
             relations::RelationsStoreReader,
@@ -27,16 +26,20 @@ use crate::{
         ghostdag::{
             mergeset::unordered_mergeset_without_selected_parent,
             ordering::SortableBlock,
-            protocol::{ChainBlock, ColoringOutput, ColoringState},
+            protocol::{ColoringOutput, ColoringState},
         },
         reachability::relations::FutureIntersectRelations,
     },
 };
 
-// START Copied from GD Manager
-// NOTE: This is a copy from GD Manager right now, but the idea here is that it will update k_colouring to
-// be more in line with what the paper needs
-// Renamed from ghostdag_customized to k_colouring
+   /// Chain block with attached coloring data.
+/// Used internally by ConflictZoneManager to walk the VSPC chain during candidate checking.
+struct DagknightChainBlock {
+    hash: Option<Hash>, // if set to `None`, signals being the new block
+    data: Arc<ColoringData>,
+}
+
+ // NOTE: Uses ColoringData instead of GhostdagData for all zone coloring operations.
 pub struct ConflictZoneManager<
     C: DagknightStore + DagknightStoreReader,
     O: HeaderStoreReader,
@@ -84,10 +87,10 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
         self.dagknight_store.has(key).unwrap()
     }
 
-    pub fn insert(&self, pov_hash: Hash, gd: Arc<GhostdagData>) -> Result<(), StoreError> {
+    pub fn insert(&self, pov_hash: Hash, cd: Arc<ColoringData>) -> Result<(), StoreError> {
         let key = self.get_key(pov_hash);
 
-        self.dagknight_store.insert(key, gd)
+        self.dagknight_store.insert(key, cd)
     }
 
     fn get_key(&self, pov_hash: Hash) -> DagknightKey {
@@ -118,33 +121,94 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
         Ok(self.dagknight_store.get_data(key)?.blues_anticone_sizes.clone())
     }
 
-    pub fn get_data(&self, pov_hash: Hash) -> Result<Arc<GhostdagData>, StoreError> {
+    /// Returns the blues_anticone_work from the store for the given hash.
+    /// Maps each blue block to the total work of blue blocks in its anticone (from POV of this block).
+    pub fn get_blues_anticone_work(&self, pov_hash: Hash) -> Result<BlockHashMap<BlueWorkType>, StoreError> {
+        let key = self.get_key(pov_hash);
+
+        Ok(self.dagknight_store.get_data(key)?.blues_anticone_work.clone())
+    }
+
+    /// Returns the past_count from the store for the given hash.
+    /// The past_count represents the number of blocks in this block's past
+    /// that are within the conflict zone.
+    pub fn get_past_count(&self, pov_hash: Hash) -> Result<u64, StoreError> {
+        let key = self.get_key(pov_hash);
+
+        Ok(self.dagknight_store.get_data(key)?.past_count)
+    }
+
+    /// Returns the past_reds from the store for the given hash.
+    /// The past_reds represents the number of red blocks in this block's past
+    /// that are within the conflict zone.
+    pub fn get_past_reds(&self, pov_hash: Hash) -> Result<u64, StoreError> {
+        let key = self.get_key(pov_hash);
+
+        Ok(self.dagknight_store.get_data(key)?.past_reds)
+    }
+
+    /// Returns the past_red_work from the store for the given hash.
+    /// The past_red_work represents the total work of red blocks in this block's past
+    /// that are within the conflict zone.
+    pub fn get_past_red_work(&self, pov_hash: Hash) -> Result<kaspa_math::Uint192, StoreError> {
+        let key = self.get_key(pov_hash);
+
+        Ok(self.dagknight_store.get_data(key)?.past_red_work)
+    }
+
+    /// Returns the past_grays from the store for the given hash.
+    /// The past_grays represents the number of gray blocks in this block's past
+    /// that are within the conflict zone.
+    pub fn get_past_grays(&self, pov_hash: Hash) -> Result<u64, StoreError> {
+        let key = self.get_key(pov_hash);
+
+        Ok(self.dagknight_store.get_data(key)?.past_grays)
+    }
+
+    /// Returns the past_gray_work from the store for the given hash.
+    /// The past_gray_work represents the total work of gray blocks in this block's past
+    /// that are within the conflict zone.
+    pub fn get_past_gray_work(&self, pov_hash: Hash) -> Result<kaspa_math::Uint192, StoreError> {
+        let key = self.get_key(pov_hash);
+
+        Ok(self.dagknight_store.get_data(key)?.past_gray_work)
+    }
+
+    pub fn get_data(&self, pov_hash: Hash) -> Result<Arc<ColoringData>, StoreError> {
         let key = self.get_key(pov_hash);
 
         self.dagknight_store.get_data(key)
     }
 
-    pub fn k_colouring(&self, parents: &[Hash], k: KType, custom_selected_parent: Option<Hash>) -> GhostdagData {
+    pub fn k_colouring(&self, parents: &[Hash], k: KType, custom_selected_parent: Option<Hash>) -> Arc<ColoringData> {
         assert!(!parents.is_empty(), "genesis must be added via a call to init");
 
         // Run the GHOSTDAG parent selection algorithm
         let selected_parent = custom_selected_parent.unwrap_or(self.find_selected_parent(parents.iter().copied()));
         // Handle the special case of origin children first
         if selected_parent.is_origin() {
-            // ORIGIN is always a single parent so both blue score and work should remain zero
-            return GhostdagData::new_with_selected_parent(selected_parent, 1); // k is only a capacity hint here
+            // ORIGIN is always a single parent so all counters remain zero
+            let cd = ColoringData::new_with_selected_parent(selected_parent, 1);
+            // ColoringData sets past counters to 0, which is correct for origin children
+            return Arc::new(cd);
         }
         // Initialize new GHOSTDAG block data with the selected parent
-        let mut new_block_data = GhostdagData::new_with_selected_parent(selected_parent, k);
+        let mut new_block_data = ColoringData::new_with_selected_parent(selected_parent, k);
         // Get the mergeset in consensus-agreed topological order (topological here means forward in time from blocks to children)
         let ordered_mergeset = self.ordered_mergeset_without_selected_parent(selected_parent, parents);
 
         for blue_candidate in ordered_mergeset.iter().cloned() {
-            let coloring = self.check_blue_candidate(&new_block_data, blue_candidate, k);
+            let coloring = self.check_blue_candidate(Arc::new(new_block_data.clone()), blue_candidate, k);
 
             if let ColoringOutput::Blue(blue_anticone_size, blues_anticone_sizes) = coloring {
                 // No k-cluster violation found, we can now set the candidate block as blue
-                new_block_data.add_blue(blue_candidate, blue_anticone_size, &blues_anticone_sizes);
+                let candidate_work = calc_work(self.headers_store.get_bits(blue_candidate).unwrap());
+                let mut blues_anticone_work = BlockHashMap::with_capacity(blues_anticone_sizes.len());
+                for (peer, _) in &blues_anticone_sizes {
+                    let peer_work = calc_work(self.headers_store.get_bits(*peer).unwrap());
+                    blues_anticone_work.insert(*peer, peer_work);
+                }
+                new_block_data.add_blue(blue_candidate, blue_anticone_size, &blues_anticone_sizes, &blues_anticone_work, candidate_work);
             } else {
                 new_block_data.add_red(blue_candidate);
             }
@@ -156,15 +220,69 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
             new_block_data.mergeset_blues.iter().cloned().map(|hash| calc_work(self.headers_store.get_bits(hash).unwrap())).sum();
         let blue_work: BlueWorkType = self.get_blue_work(selected_parent).unwrap() + added_blue_work;
 
-        new_block_data.finalize_score_and_work(blue_score, blue_work);
+        new_block_data.finalize_score_work_and_past_count(blue_score, blue_work, 0);
 
-        new_block_data
+        // Convert to ColoringData with incremental past counters
+        // All counters inherited from selected parent + mergeset contributions:
+        //   past_count(B)     = past_count(SP(B))     + |mergeset_blues(B)| + |mergeset_reds(B)|
+        //   past_reds(B)      = past_reds(SP(B))      + |mergeset_reds(B)|
+        //   past_red_work(B)  = past_red_work(SP(B))  + work(mergeset_reds(B))
+        let sp_data = self.get_data(selected_parent).unwrap();
+        let sp_past_count = sp_data.past_count;
+        let sp_past_reds = sp_data.past_reds;
+        let sp_past_red_work = sp_data.past_red_work;
+        let sp_past_grays = sp_data.past_grays;
+        let sp_past_gray_work = sp_data.past_gray_work;
+
+        let mergeset_size = new_block_data.mergeset_blues.len() + new_block_data.mergeset_reds.len();
+        let past_count = sp_past_count + mergeset_size as u64;
+
+        let mut past_grays = sp_past_grays;
+        let mut past_gray_work = sp_past_gray_work;
+        let mut past_reds = sp_past_reds;
+        let mut past_red_work = sp_past_red_work;
+
+        // During free search we don't care about nca
+        let nca = if selected_parent == self.root || self.free_search {
+            self.root
+        } else {
+            self.reachability_service.get_next_chain_ancestor(selected_parent, self.root)
+        };
+
+        new_block_data.mergeset_reds.iter().cloned().for_each(|mrr_hash| {
+            let curr_work = calc_work(self.headers_store.get_bits(mrr_hash).unwrap());
+            // Everything is red during free_search as the concept of grayness isn't used there
+            if !self.free_search && self.reachability_service.is_chain_ancestor_of(nca, mrr_hash) {
+                //gray
+                past_grays += 1;
+                past_gray_work = past_gray_work + curr_work;
+            } else {
+                //red
+                past_reds += 1;
+                past_red_work = past_red_work + curr_work;
+            }
+        });
+
+        Arc::new(ColoringData::new(
+            new_block_data.blue_score,
+            new_block_data.blue_work,
+            new_block_data.selected_parent,
+            new_block_data.mergeset_blues,
+            new_block_data.mergeset_reds,
+            new_block_data.blues_anticone_sizes,
+            new_block_data.blues_anticone_work,
+            past_count,
+            past_grays,
+            past_gray_work,
+            past_reds,
+            past_red_work,
+        ))
     }
 
     fn check_blue_candidate_with_chain_block(
         &self,
-        new_block_data: &GhostdagData,
-        chain_block: &ChainBlock,
+        new_block_data: &ColoringData,
+        chain_block: &DagknightChainBlock,
         blue_candidate: Hash,
         candidate_blues_anticone_sizes: &mut BlockHashMap<KType>,
         candidate_blue_anticone_size: &mut KType,
@@ -198,7 +316,7 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
             // in past-to-future topological order, so even if chain_block == new_block, an existing blue
             // cannot be in the future of a candidate blue
 
-            let peer_blue_anticone_size = self.blue_anticone_size(peer, new_block_data);
+            let peer_blue_anticone_size = self.blue_anticone_size_and_work(peer, new_block_data).0;
             candidate_blues_anticone_sizes.insert(peer, peer_blue_anticone_size);
 
             *candidate_blue_anticone_size += 1;
@@ -223,26 +341,27 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
         ColoringState::Pending
     }
 
-    /// Returns the blue anticone size of `block` from the worldview of `context`.
-    /// Expects `block` to be in the blue set of `context`
-    fn blue_anticone_size(&self, block: Hash, context: &GhostdagData) -> KType {
+    /// Returns the blue anticone size and work of `block` from the worldview of `context`.
+    /// Expects `block` to be in the blue set of `context`.
+    /// Returns (anticone_size, anticone_work).
+    fn blue_anticone_size_and_work(&self, block: Hash, context: &ColoringData) -> (KType, BlueWorkType) {
         let mut current_blues_anticone_sizes = HashKTypeMap::clone(&context.blues_anticone_sizes);
+        let mut current_blues_anticone_work: BlockHashMap<BlueWorkType> = context.blues_anticone_work.clone();
         let mut current_selected_parent = context.selected_parent;
         loop {
-            if let Some(size) = current_blues_anticone_sizes.get(&block) {
-                return *size;
+            let size = current_blues_anticone_sizes.get(&block).copied();
+            let work = current_blues_anticone_work.get(&block).copied().unwrap_or_default();
+            if let Some(size) = size {
+                return (size, work);
             }
 
-            // if current_selected_parent == self.genesis_hash || current_selected_parent == blockhash::ORIGIN {
-            //     panic!("block {block} is not in blue set of the given context");
-            // }
-
             current_blues_anticone_sizes = self.get_blues_anticone_sizes(current_selected_parent).unwrap();
+            current_blues_anticone_work = self.get_blues_anticone_work(current_selected_parent).unwrap();
             current_selected_parent = self.get_selected_parent(current_selected_parent).unwrap();
         }
     }
 
-    fn check_blue_candidate(&self, new_block_data: &GhostdagData, blue_candidate: Hash, k: KType) -> ColoringOutput {
+    fn check_blue_candidate(&self, new_block_data: Arc<ColoringData>, blue_candidate: Hash, k: KType) -> ColoringOutput {
         // The maximum length of new_block_data.mergeset_blues can be K+1 because
         // it contains the selected parent.
         if new_block_data.mergeset_blues.len() as KType == k + 1 {
@@ -254,12 +373,12 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
         // of blue_candidate, and check for each one of them if blue_candidate potentially
         // enlarges their blue anticone to be over K, or that they enlarge the blue anticone
         // of blue_candidate to be over K.
-        let mut chain_block = ChainBlock { hash: None, data: new_block_data.into() };
+        let mut chain_block = DagknightChainBlock { hash: None, data: new_block_data };
         let mut candidate_blue_anticone_size: KType = 0;
 
         loop {
             let state = self.check_blue_candidate_with_chain_block(
-                new_block_data,
+                &chain_block.data,
                 &chain_block,
                 blue_candidate,
                 &mut candidate_blues_anticone_sizes,
@@ -273,10 +392,8 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
                 ColoringState::Pending => (), // continue looping
             }
 
-            chain_block = ChainBlock {
-                hash: Some(chain_block.data.selected_parent),
-                data: self.get_data(chain_block.data.selected_parent).unwrap().into(),
-            }
+            let sp = chain_block.data.selected_parent;
+            chain_block = DagknightChainBlock { hash: Some(sp), data: self.get_data(sp).unwrap() }
         }
     }
 
@@ -325,15 +442,22 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
 
     pub fn init_root(&self) {
         if !self.has(self.root) {
+            // Root has all past counters = 0 (it's the conflict genesis, nothing is in its past within the zone)
             self.insert(
                 self.root,
-                Arc::new(GhostdagData::new(
+                Arc::new(ColoringData::new(
                     0,
                     Default::default(),
                     blockhash::ORIGIN,
                     BlockHashes::new(Vec::new()),
                     BlockHashes::new(Vec::new()),
                     HashKTypeMap::new(BlockHashMap::new()),
+                    BlockHashMap::new(),
+                    0,                         // past_count
+                    0,                         // past_reds
+                    kaspa_math::Uint192::ZERO, // past_red_work
+                    0,
+                    kaspa_math::Uint192::ZERO,
                 )),
             )
             .idempotent()
@@ -428,9 +552,9 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
                     self.find_selected_parent(agreeing_parents.iter().copied())
                 };
 
-                let current_gd = self.k_colouring(parents, self.k, Some(selected_parent));
+                let current_cd = self.k_colouring(parents, self.k, Some(selected_parent));
 
-                self.insert(current_hash, Arc::new(current_gd)).idempotent().unwrap();
+                self.insert(current_hash, current_cd).idempotent().unwrap();
             }
 
             for child in self.relations_store.get_children(current_hash).unwrap().read().iter().copied() {
@@ -457,7 +581,9 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
 mod tests {
     use super::*;
     use crate::model::stores::{
-        dagknight::MemoryDagknightStore, headers::MemoryHeaderStore, reachability::MemoryReachabilityStore,
+        dagknight::{ColoringData, MemoryDagknightStore},
+        headers::MemoryHeaderStore,
+        reachability::MemoryReachabilityStore,
         relations::MemoryRelationsStore,
     };
     use crate::processes::reachability::tests::{DagBlock, DagBuilder};
@@ -592,9 +718,9 @@ mod tests {
             (hash_y, hash_z),
             (hash_x, hash_y),
         ] {
-            let gd = GhostdagData::new_with_selected_parent(selected_parent, 0);
-            manager_committed.insert(hash, Arc::new(gd.clone())).unwrap();
-            manager_free.insert(hash, Arc::new(gd)).unwrap();
+            let cd = Arc::new(ColoringData::new_with_selected_parent(selected_parent, 0));
+            manager_committed.insert(hash, cd.clone()).unwrap();
+            manager_free.insert(hash, cd).unwrap();
         }
 
         // Tips are F and W (no records yet)
