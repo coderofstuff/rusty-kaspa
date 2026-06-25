@@ -16,12 +16,10 @@ use crate::{
     model::{
         services::reachability::{MTReachabilityService, ReachabilityService},
         stores::{
-            children::ChildrenStore,
-            dagknight::{DagknightStore, DagknightStoreReader},
-            ghostdag::GhostdagData,
+            dagknight::{ColoringData, DagknightStore, DagknightStoreReader, PastColoringData},
             headers::HeaderStoreReader,
-            reachability::{MemoryReachabilityStore, ReachabilityStore, ReachabilityStoreReader},
-            relations::{MemoryRelationsStore, RelationsStore, RelationsStoreReader},
+            reachability::ReachabilityStoreReader,
+            relations::RelationsStoreReader,
         },
     },
     processes::{
@@ -274,10 +272,10 @@ impl<
     fn umc_cascade_voting(
         &self,
         conflict_genesis: Hash,
-        subgroup: &[Hash],
-        virtual_gd: GhostdagData,
+        _subgroup: &[Hash],
+        virtual_cd: Arc<ColoringData>,
         k: KType,
-        conflict_zone_manager: &ConflictZoneManager<C, O, D, R>,
+        _conflict_zone_manager: &ConflictZoneManager<C, O, D, R>,
     ) -> bool {
         /*
             inputs: G, U, d
@@ -296,35 +294,7 @@ impl<
         let deficit_work_basis = calc_work(self.headers_store.get_bits(conflict_genesis).unwrap());
         let deficit = Uint192::from_u64(k.isqrt() as u64) * deficit_work_basis;
 
-        let blue_block_work = virtual_gd.blue_work;
-        let mut gray_block_work = Uint192::ZERO;
-        let mut red_block_work = Uint192::ZERO;
-        let next_chain_ancestor_of_subgroup = self.reachability_service.get_next_chain_ancestor(subgroup[0], conflict_genesis);
-
-        // Iterate through the VSPC red mergeset to determine red/gray work
-        let mut curr_gd = Arc::new(virtual_gd);
-
-        while curr_gd.selected_parent != conflict_genesis {
-            for &red_block in curr_gd.mergeset_reds.iter() {
-                let red_block_bits = self.headers_store.get_bits(red_block).unwrap();
-                let red_work = calc_work(red_block_bits);
-
-                if self.reachability_service.is_chain_ancestor_of(next_chain_ancestor_of_subgroup, red_block) {
-                    gray_block_work = gray_block_work + red_work;
-                } else {
-                    red_block_work = red_block_work + red_work;
-                }
-            }
-
-            curr_gd = conflict_zone_manager.get_data(curr_gd.selected_parent).unwrap();
-        }
-
-        debug!(
-            "k = {} | blue work = {} | gray work = {} | red work = {} | deficit = {}",
-            k, blue_block_work, gray_block_work, red_block_work, deficit
-        );
-
-        blue_block_work + deficit > red_block_work
+        virtual_cd.blue_work + deficit > virtual_cd.past_red_work
     }
 
     /// Tie-breaking rule in case of multiple winning subgroups with the same rank value.
