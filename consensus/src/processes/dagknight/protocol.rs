@@ -329,9 +329,6 @@ impl<
 
     /// Tie-breaking rule in case of multiple winning subgroups with the same rank value.
     fn tie_breaking(&self, conflict_genesis: Hash, all_tips: &[Hash], subgroups: &[GroupMetadata]) -> (Hash, Arc<Vec<Hash>>) {
-        // TODO[DK]: Apply actual logic later
-        let use_new_logic = false;
-
         let tie_breaking_winner = {
             // Always run this to compare stats:
             debug!("Winning groups had rank k = {}", subgroups[0].k);
@@ -351,13 +348,7 @@ impl<
             (winning_conflict_genesis, winning_subgroup)
         };
 
-        if !use_new_logic {
-            debug!("Winning groups had rank k = {}", subgroups[0].k);
-            let winning_subgroup = subgroups.iter().max_by_key(|g| &g.selected_parent).expect("subgroups is non-empty");
-            (winning_subgroup.conflict_genesis, winning_subgroup.subgroup.clone())
-        } else {
-            tie_breaking_winner
-        }
+        tie_breaking_winner
     }
 
     /// Follows the Calculate-Rank algorithm in the DK paper
@@ -682,6 +673,7 @@ mod tests {
     use parking_lot::lock_api::RwLock;
 
     use super::*;
+    use crate::model::stores::dagknight::{MemoryUmcPersistenceStore, UmcPersistenceStats};
     use crate::model::stores::ghostdag::{GhostdagStore, GhostdagStoreReader};
     use crate::model::stores::headers::MemoryHeaderStore;
     use crate::processes::ghostdag::protocol::GhostdagManager;
