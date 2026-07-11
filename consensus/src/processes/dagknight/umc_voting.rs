@@ -390,7 +390,8 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
             self.dast.tree.last_red_index.insert(min_entry.hash, current_index);
 
             // Result is a negative blue — pop it and store in secondary heap
-            let (entry, past_blue_work, past_red_work, anticone_blue_work, arlb, _last_red_index) = self.dast.tree.pop_min_with_counters().unwrap();
+            let (entry, past_blue_work, past_red_work, anticone_blue_work, arlb, _last_red_index) =
+                self.dast.tree.pop_min_with_counters().unwrap();
             self.negative_blues = self.negative_blues + calc_work(self.headers_store.get_bits(entry.hash).unwrap());
 
             self.dast.secondary_heap.insert(PoppedBlue {
@@ -636,16 +637,26 @@ where
 
         let traversal_ctx = TraversalContext::new(self.reachability);
 
-        // Determine whether we can restore from persisted state
+        // Determine whether we can restore from persisted state.
+        // Staleness check: both persisted blues AND persisted reds must be subsets of
+        // the current zone. If the zone shrank (e.g., tips moved and some blocks became
+        // grays or were excluded), any stale persisted state would produce incorrect
+        // ARlb and seen_red_work values.
         let (was_restored, persisted_set): (bool, BlockHashSet) = if let Some(ref persisted) = persisted {
             let persisted_blue_hashes: BlockHashSet =
                 persisted.tree_entries.iter().map(|e| e.hash).chain(persisted.secondary_heap.iter().map(|p| p.hash)).collect();
 
-            if persisted_blue_hashes.is_subset(&input.blue_set) {
-                // Persisted blues are still valid — mark as restorable
-                (true, persisted_blue_hashes)
+            let persisted_red_set: BlockHashSet = persisted.red_set.iter().copied().collect();
+
+            // Both blues and reds must be valid subsets of the current zone
+            if persisted_blue_hashes.is_subset(&input.blue_set)
+                && persisted_red_set.is_subset(&input.red_set.iter().copied().collect::<BlockHashSet>())
+            {
+                // Build full persisted set (blues + reds) for deduplication during heap collection.
+                let persisted_set: BlockHashSet = persisted_blue_hashes.into_iter().chain(persisted.red_set.iter().copied()).collect();
+                (true, persisted_set)
             } else {
-                // Zone shrank or changed — fall back to from-scratch
+                // Zone changed — fall back to from-scratch
                 (false, BlockHashSet::default())
             }
         } else {
@@ -698,6 +709,21 @@ where
             let header = self.headers_store.get_header(hash).expect("header must exist");
             topological_heap.push(Reverse(SortableBlock { hash, blue_work: header.blue_work }));
             new_blocks_added = true;
+        }
+
+        // Insert conflict genesis into the cascade tree if not already present.
+        // run_cascade() always inserts conflict genesis as a blue with default counters.
+        // The incremental path skips it from the heap (line 694-696), so we must
+        // ensure it's in the tree before calling vote().
+        if !cascade_ctx.dast.tree.has(input.conflict_genesis) {
+            cascade_ctx.insert(
+                input.conflict_genesis,
+                BlockColouring::Blue {
+                    anticone_blue_work: Uint192::ZERO,
+                    past_blue_work: Uint192::ZERO,
+                    past_red_work: Uint192::ZERO,
+                },
+            );
         }
 
         // If no new blocks were added, use cached result or re-check
