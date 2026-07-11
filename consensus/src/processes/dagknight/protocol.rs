@@ -434,6 +434,18 @@ impl<
 
             let (result, new_state, was_restored) = voter.run_cascade_incremental(&input, persisted);
 
+            // DEBUG: assert incremental matches full run — remove when confident
+            let full_result = voter.run_cascade(&input);
+            assert!(
+                result == full_result,
+                "Incremental ({}) differs from full run ({}) for conflict_genesis {} | k={} | was_restored={}",
+                result,
+                full_result,
+                conflict_genesis,
+                k,
+                was_restored,
+            );
+
             // Record stats
             if let Some(stats) = &self.umc_persistence_stats {
                 stats.record(was_restored, persisted_blocks, zone_blocks);

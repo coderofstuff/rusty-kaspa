@@ -139,7 +139,7 @@ impl CascadeTree {
     }
 
     /// Pop the minimum entry in the tree with all its counters.
-    pub fn pop_min_with_counters(&mut self) -> Option<(CascadeTreeEntry, Uint192, Uint192, Uint192, Uint192)> {
+    pub fn pop_min_with_counters(&mut self) -> Option<(CascadeTreeEntry, Uint192, Uint192, Uint192, Uint192, usize)> {
         let min_entry = self.peek_min()?;
         self.btree.remove(&min_entry);
         let _prev_floor = self.rev_index.remove(&min_entry.hash).unwrap();
@@ -147,7 +147,8 @@ impl CascadeTree {
         let past_red_work = self.past_red_work.remove(&min_entry.hash).unwrap();
         let anticone_blue_work = self.anticone_blue_work.remove(&min_entry.hash).unwrap();
         let arlb = self.arlb.remove(&min_entry.hash).unwrap();
-        Some((min_entry, past_blue_work, past_red_work, anticone_blue_work, arlb))
+        let last_red_index = self.last_red_index.remove(&min_entry.hash).unwrap();
+        Some((min_entry, past_blue_work, past_red_work, anticone_blue_work, arlb, last_red_index))
     }
 
     pub fn has(&self, hash: Hash) -> bool {
@@ -341,7 +342,7 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
             self.dast.tree.last_red_index.insert(min_entry.hash, current_index);
 
             // Result is a negative blue — pop it and store in secondary heap
-            let (entry, past_blue_work, past_red_work, anticone_blue_work, arlb) = self.dast.tree.pop_min_with_counters().unwrap();
+            let (entry, past_blue_work, past_red_work, anticone_blue_work, arlb, _last_red_index) = self.dast.tree.pop_min_with_counters().unwrap();
             self.negative_blues = self.negative_blues + calc_work(self.headers_store.get_bits(entry.hash).unwrap());
 
             self.dast.secondary_heap.insert(PoppedBlue {
@@ -616,41 +617,38 @@ where
             CascadeContext::new(input.conflict_genesis, traversal_ctx, self.headers_store, threshold_work)
         };
 
-        // Collect new mergeset blocks by walking the chain from virtual downward.
-        // Skip blocks already in persisted set. Continue past persisted chain blocks
-        // to collect mergeset members from lower levels.
+        // Collect new blocks: blues and reds not in the persisted set.
+        // This mirrors run_cascade() which processes all blue_set and red_set
+        // blocks in topological order. Chain blocks are in blue_set but NOT in
+        // any mergeset (mergeset excludes the selected parent), so we must use
+        // blue_set directly rather than walking chain_blocks.
         let mut topological_heap: BinaryHeap<Reverse<SortableBlock>> = BinaryHeap::new();
         let mut new_blocks_added = false;
 
-        for cb in input.chain_blocks.iter() {
-            // Collect mergeset blues from this chain block
-            for &mbb in cb.mergeset_blues.iter() {
-                if persisted_set.contains(&mbb) {
-                    // Already in persisted set — skip
-                    continue;
-                }
-
-                if mbb == input.conflict_genesis {
-                    // Conflict genesis is handled separately
-                    continue;
-                }
-
-                let header = self.headers_store.get_header(mbb).expect("header must exist");
-                topological_heap.push(Reverse(SortableBlock { hash: mbb, blue_work: header.blue_work }));
-                new_blocks_added = true;
+        // New blues: all blues not in persisted set, excluding conflict_genesis
+        for &hash in input.blue_set.iter() {
+            if persisted_set.contains(&hash) {
+                continue;
             }
 
-            // Collect mergeset reds from this chain block
-            for &mrb in cb.mergeset_reds.iter() {
-                if persisted_set.contains(&mrb) {
-                    // Already in persisted set — skip
-                    continue;
-                }
-
-                let header = self.headers_store.get_header(mrb).expect("header must exist");
-                topological_heap.push(Reverse(SortableBlock { hash: mrb, blue_work: header.blue_work }));
-                new_blocks_added = true;
+            if hash == input.conflict_genesis {
+                continue;
             }
+
+            let header = self.headers_store.get_header(hash).expect("header must exist");
+            topological_heap.push(Reverse(SortableBlock { hash, blue_work: header.blue_work }));
+            new_blocks_added = true;
+        }
+
+        // New reds: all reds not in persisted set
+        for &hash in input.red_set.iter() {
+            if persisted_set.contains(&hash) {
+                continue;
+            }
+
+            let header = self.headers_store.get_header(hash).expect("header must exist");
+            topological_heap.push(Reverse(SortableBlock { hash, blue_work: header.blue_work }));
+            new_blocks_added = true;
         }
 
         // If no new blocks were added, use cached result or re-check
