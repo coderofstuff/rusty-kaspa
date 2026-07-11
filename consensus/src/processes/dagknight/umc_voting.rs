@@ -7,7 +7,6 @@ use std::{
 };
 
 use kaspa_consensus_core::{BlockHashMap, BlockHashSet, KType};
-use kaspa_core::info;
 use kaspa_hashes::Hash;
 use kaspa_math::{Uint192, int::SignedInteger};
 use kaspa_utils::mem_size::MemSizeEstimator;
@@ -284,8 +283,8 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
             self.dast.tree.red_index += 1;
 
             if !self.try_promote_from_secondary(hash) && !self.cached_vote {
-                // Red preserves negative vote — but don't short-circuit if any negatives were revived
-                return true;
+                // Red preserves negative vote — short-circuit: vote stays negative
+                return false;
             }
         }
 
@@ -463,6 +462,18 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
 // UmcVoter — the main entry point for UMC cascade voting
 // ============================================================================
 
+/// Data for a single chain block during the chain walk from virtual to conflict_genesis.
+/// Contains mergeset blues and reds that this chain block contributes.
+#[derive(Clone, Debug)]
+pub struct ChainBlockData {
+    /// Hash of the chain block itself
+    pub hash: Hash,
+    /// Blue blocks in this chain block's mergeset
+    pub mergeset_blues: Vec<Hash>,
+    /// Red blocks in this chain block's mergeset
+    pub mergeset_reds: Vec<Hash>,
+}
+
 /// Input data for UMC cascade voting.
 #[derive(Clone)]
 pub struct UmcVoterInput {
@@ -476,6 +487,9 @@ pub struct UmcVoterInput {
     pub deficit: Uint192,
     pub deficit_work_basis: Uint192,
     pub virtual_coloring_data_map: HashMap<Hash, PastColoringData>,
+    /// Chain blocks in topological order from virtual down to conflict_genesis.
+    /// Each block contains its mergeset blues and reds for incremental traversal.
+    pub chain_blocks: Vec<ChainBlockData>,
 }
 
 /// UMC cascade voter.
@@ -554,6 +568,10 @@ where
 
     /// Run cascade voting incrementally, restoring from persisted state when available.
     ///
+    /// Walks the chain from virtual downward via `chain_blocks`, collecting mergeset blocks
+    /// into a topological heap. Skips blocks already in the persisted set and stops when
+    /// a chain block's selected_parent is in the persisted set.
+    ///
     /// Returns `(vote_result, final_state, was_restored)` where:
     /// - `vote_result`: whether the blue cluster contains a d-UMC
     /// - `final_state`: the cascade state after processing (for persistence)
@@ -563,7 +581,6 @@ where
         input: &UmcVoterInput,
         persisted: Option<UmcPersistedState>,
     ) -> (bool, UmcPersistedState, bool) {
-        // info!("incremental UMC triggered | cg: {} | k: {} | nca: {}", input.conflict_genesis, input.k, input.next_chain_ancestor);
         // Deficit and threshold
         let deficit = Uint192::from_u64(input.k.isqrt() as u64) * input.deficit_work_basis;
         let threshold_work = SignedWork::from(input.red_work) - SignedWork::from(input.blue_work) - SignedWork::from(deficit);
@@ -571,21 +588,19 @@ where
         let traversal_ctx = TraversalContext::new(self.reachability);
 
         // Determine whether we can restore from persisted state
-        let mut was_restored = false;
-        let persisted_blues: BlockHashSet = if let Some(ref persisted) = persisted {
+        let (was_restored, persisted_set): (bool, BlockHashSet) = if let Some(ref persisted) = persisted {
             let persisted_blue_hashes: BlockHashSet =
                 persisted.tree_entries.iter().map(|e| e.hash).chain(persisted.secondary_heap.iter().map(|p| p.hash)).collect();
 
             if persisted_blue_hashes.is_subset(&input.blue_set) {
                 // Persisted blues are still valid — mark as restorable
-                was_restored = true;
-                persisted_blue_hashes
+                (true, persisted_blue_hashes)
             } else {
                 // Zone shrank or changed — fall back to from-scratch
-                BlockHashSet::default()
+                (false, BlockHashSet::default())
             }
         } else {
-            BlockHashSet::default()
+            (false, BlockHashSet::default())
         };
 
         let mut cascade_ctx = if was_restored {
@@ -601,63 +616,87 @@ where
             CascadeContext::new(input.conflict_genesis, traversal_ctx, self.headers_store, threshold_work)
         };
 
-        // Determine which blues/reds are new (not already in cascade_ctx's tree)
-        let new_blues: Vec<Hash> = input.blue_set.iter().filter(|h| !persisted_blues.contains(h)).copied().collect();
+        // Collect new mergeset blocks by walking the chain from virtual downward.
+        // Skip blocks already in persisted set. Continue past persisted chain blocks
+        // to collect mergeset members from lower levels.
+        let mut topological_heap: BinaryHeap<Reverse<SortableBlock>> = BinaryHeap::new();
+        let mut new_blocks_added = false;
 
-        let new_reds: Vec<Hash> = if let Some(ref persisted) = persisted {
-            input.red_set.iter().filter(|h| !persisted.red_set.contains(*h)).copied().collect()
-        } else {
-            input.red_set.clone()
-        };
+        for cb in input.chain_blocks.iter() {
+            // Collect mergeset blues from this chain block
+            for &mbb in cb.mergeset_blues.iter() {
+                if persisted_set.contains(&mbb) {
+                    // Already in persisted set — skip
+                    continue;
+                }
 
-        if was_restored && new_blues.is_empty() && new_reds.is_empty() {
-            // Zone unchanged — use cached vote if available, otherwise run vote()
+                if mbb == input.conflict_genesis {
+                    // Conflict genesis is handled separately
+                    continue;
+                }
+
+                let header = self.headers_store.get_header(mbb).expect("header must exist");
+                topological_heap.push(Reverse(SortableBlock { hash: mbb, blue_work: header.blue_work }));
+                new_blocks_added = true;
+            }
+
+            // Collect mergeset reds from this chain block
+            for &mrb in cb.mergeset_reds.iter() {
+                if persisted_set.contains(&mrb) {
+                    // Already in persisted set — skip
+                    continue;
+                }
+
+                let header = self.headers_store.get_header(mrb).expect("header must exist");
+                topological_heap.push(Reverse(SortableBlock { hash: mrb, blue_work: header.blue_work }));
+                new_blocks_added = true;
+            }
+        }
+
+        // If no new blocks were added, use cached result or re-check
+        if was_restored && !new_blocks_added {
             if cascade_ctx.cached_vote {
                 let result = cascade_ctx.cached_vote;
                 let state = cascade_ctx.extract_state(Hash::default());
                 return (result, state, was_restored);
             }
-            // Vote was negative, need to re-check
             let result = cascade_ctx.vote();
             let state = cascade_ctx.extract_state(Hash::default());
             return (result, state, was_restored);
         }
 
-        // Process new blues in topological order
-        let mut topological_heap: BinaryHeap<Reverse<SortableBlock>> = BinaryHeap::new();
-
-        for &hash in new_blues.iter() {
-            if hash != input.conflict_genesis {
-                let header = self.headers_store.get_header(hash).expect("header must exist");
-                topological_heap.push(Reverse(SortableBlock { hash, blue_work: header.blue_work }));
-            }
-        }
-
-        // Process new reds — insert them directly (no topological ordering needed for reds)
-        for &red_hash in new_reds.iter() {
-            cascade_ctx.seen_red_work = cascade_ctx.seen_red_work + calc_work(self.headers_store.get_bits(red_hash).unwrap());
-            cascade_ctx.dast.red_set.push(red_hash);
-            cascade_ctx.dast.tree.red_index += 1;
-
-            if !cascade_ctx.try_promote_from_secondary(red_hash) && !cascade_ctx.cached_vote {
-                // Red preserves negative vote — but don't short-circuit if any negatives were revived
-                let result = true;
-                let state = cascade_ctx.extract_state(Hash::default());
-                return (result, state, was_restored);
-            }
-        }
-
-        // Insert new blues in topological order
+        // Process new blocks in topological order (blues and reds interleaved).
+        // seen_red_work must only include reds encountered BEFORE each blue in
+        // topological order — otherwise a blue's initial ARlb gets inflated with
+        // reds that are in its future (not anticone).
         while let Some(Reverse(SortableBlock { hash, .. })) = topological_heap.pop() {
-            let counters = input.virtual_coloring_data_map.get(&hash).cloned().unwrap_or_default();
-            let past_blue_work = counters.past_blue_work;
-            let past_red_work = counters.past_red_work;
-            let anticone_blue_work = counters.anticone_blue_work;
+            if input.blue_set.contains(&hash) {
+                // New blue — insert with correct seen_red_work (only reds in its past)
+                let counters = input.virtual_coloring_data_map.get(&hash).cloned().unwrap_or_default();
+                let past_blue_work = counters.past_blue_work;
+                let past_red_work = counters.past_red_work;
+                let anticone_blue_work = counters.anticone_blue_work;
 
-            cascade_ctx.insert(hash, BlockColouring::Blue { anticone_blue_work, past_blue_work, past_red_work });
+                cascade_ctx.insert(hash, BlockColouring::Blue { anticone_blue_work, past_blue_work, past_red_work });
+            } else {
+                // New red — increment counters and check for promotions
+                cascade_ctx.seen_red_work = cascade_ctx.seen_red_work + calc_work(self.headers_store.get_bits(hash).unwrap());
+                cascade_ctx.dast.red_set.push(hash);
+                cascade_ctx.dast.tree.red_index += 1;
+
+                if !cascade_ctx.try_promote_from_secondary(hash) && !cascade_ctx.cached_vote {
+                    // Red preserves negative vote — short-circuit: vote stays negative
+                    cascade_ctx.cached_vote = false;
+                } else {
+                    cascade_ctx.cached_vote = cascade_ctx.vote();
+                }
+            }
         }
 
-        let result = cascade_ctx.cached_vote;
+        // Run vote() to ensure persisted blues get their ARlb incrementally updated
+        // for new reds, and to produce the correct final result.
+        // This mirrors run_cascade() which always ends with cascade_ctx.vote().
+        let result = cascade_ctx.vote();
         let state = cascade_ctx.extract_state(Hash::default());
         (result, state, was_restored)
     }
@@ -1077,6 +1116,11 @@ mod tests {
             },
         );
 
+        // Chain blocks: walk from virtual downward.
+        // For run 1: virtual's mergeset blues = [b1], mergeset reds = [r1], selected_parent = b1
+        // b1's selected_parent = genesis (loop ends)
+        let chain_blocks_1 = vec![ChainBlockData { hash: b1, mergeset_blues: vec![b1], mergeset_reds: vec![r1] }];
+
         let input_1 = UmcVoterInput {
             conflict_genesis: genesis,
             k,
@@ -1088,6 +1132,7 @@ mod tests {
             deficit,
             deficit_work_basis,
             virtual_coloring_data_map: virtual_coloring_data_map_1,
+            chain_blocks: chain_blocks_1,
         };
 
         // First run: no persisted state → from scratch
@@ -1135,6 +1180,16 @@ mod tests {
             },
         );
 
+        // Chain blocks: walk from virtual downward.
+        // Virtual's mergeset blues = [b3], reds = [r3], selected_parent = b2
+        // B2's mergeset blues = [b2], reds = [r2], selected_parent = b1
+        // B1's mergeset blues = [b1], reds = [r1], selected_parent = genesis
+        let chain_blocks_2 = vec![
+            ChainBlockData { hash: b2, mergeset_blues: vec![b3], mergeset_reds: vec![r3] },
+            ChainBlockData { hash: b1, mergeset_blues: vec![b2], mergeset_reds: vec![r2] },
+            ChainBlockData { hash: genesis, mergeset_blues: vec![b1], mergeset_reds: vec![r1] },
+        ];
+
         let input_2 = UmcVoterInput {
             conflict_genesis: genesis,
             k,
@@ -1146,6 +1201,7 @@ mod tests {
             deficit,
             deficit_work_basis,
             virtual_coloring_data_map: virtual_coloring_data_map_2,
+            chain_blocks: chain_blocks_2,
         };
 
         // Second run: with persisted state → should restore and process deltas

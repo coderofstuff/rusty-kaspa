@@ -325,6 +325,7 @@ impl<
 
         // TODO[DK]: Move all this below to umc_voting
         let mut virtual_coloring_data_map = HashMap::<Hash, PastColoringData>::new();
+        let mut chain_blocks: Vec<super::umc_voting::ChainBlockData> = Vec::new();
 
         let blue_anticone_map = self.extract_blue_anticone_map(conflict_genesis, &conflict_zone_manager, Arc::new(virtual_cd.clone()));
 
@@ -332,6 +333,14 @@ impl<
             if curr_cd.selected_parent == conflict_genesis {
                 break;
             }
+
+            // Collect chain block data for incremental traversal
+            let cb_data = super::umc_voting::ChainBlockData {
+                hash: curr_cd.selected_parent,
+                mergeset_blues: curr_cd.mergeset_blues.iter().copied().collect(),
+                mergeset_reds: curr_cd.mergeset_reds.iter().copied().collect(),
+            };
+            chain_blocks.push(cb_data);
 
             // Process mergeset blues: collect into blue set and compute past counters
             for &mbb in curr_cd.mergeset_blues.iter().filter(|&&b| self.reachability_service.is_dag_ancestor_of(conflict_genesis, b)) {
@@ -402,6 +411,7 @@ impl<
             deficit,
             deficit_work_basis,
             virtual_coloring_data_map,
+            chain_blocks,
         };
 
         // Try incremental voting with persistence
