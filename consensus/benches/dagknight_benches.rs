@@ -14,7 +14,9 @@ use kaspa_consensus::{
     model::{
         services::reachability::MTReachabilityService,
         stores::{
-            dagknight::MemoryDagknightStore, headers::MemoryHeaderStore, reachability::MemoryReachabilityStore,
+            dagknight::{MemoryDagknightStore, MemoryUmcPersistenceStore, UmcPersistenceStats},
+            headers::MemoryHeaderStore,
+            reachability::MemoryReachabilityStore,
             relations::MemoryRelationsStore,
         },
     },
@@ -82,7 +84,8 @@ fn run_tie_breaking_at_k(k: KType) -> (Hash, usize) {
         headers_store: headers_store.clone(),
         reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
         relations_store: Arc::new(RwLock::new(relations.clone())),
-        umc_persistence_store: None,
+        umc_persistence_store: Some(Arc::new(MemoryUmcPersistenceStore::default())),
+        umc_persistence_stats: Some(Arc::new(UmcPersistenceStats::new())),
     };
 
     // Build DAG: sort blocks by blue_work, insert into stores

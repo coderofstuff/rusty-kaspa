@@ -320,6 +320,9 @@ fn main_impl(mut args: Args) {
             }
         }
 
+        // Print UMC persistence stats
+        info!("{}", consensus.umc_persistence_stats().snapshot());
+
         drop(consensus);
         return;
     }
@@ -347,6 +350,10 @@ fn main_impl(mut args: Args) {
     if let Some(stop_perf_monitor) = stop_perf_monitor {
         _ = rt.block_on(stop_perf_monitor);
     }
+
+    // Print UMC persistence stats (effort saved by incremental cascade voting)
+    info!("{}", consensus.umc_persistence_stats().snapshot());
+
     drop(consensus);
 }
 

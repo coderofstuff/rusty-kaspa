@@ -76,7 +76,8 @@ use kaspa_consensus_core::{
         TransactionType, UtxoEntry,
     },
 };
-use kaspa_consensus_notify::root::ConsensusNotificationRoot;
+  use kaspa_consensus_notify::root::ConsensusNotificationRoot;
+use crate::model::stores::dagknight::UmcPersistenceStats;
 
 use crossbeam_channel::{
     Receiver as CrossbeamReceiver, Sender as CrossbeamSender, bounded as bounded_crossbeam, unbounded as unbounded_crossbeam,
@@ -376,6 +377,12 @@ impl Consensus {
     /// Acquires a consensus session, blocking data-pruning from occurring until released
     pub fn acquire_session(&self) -> SessionReadGuard<'_> {
         self.pruning_lock.blocking_read()
+    }
+
+    /// Returns a reference to the UMC persistence statistics tracker.
+    /// Use this to query effort-saved metrics for incremental UMC cascade voting.
+    pub fn umc_persistence_stats(&self) -> Arc<UmcPersistenceStats> {
+        self.services.umc_persistence_stats.clone()
     }
 
     fn validate_and_insert_block_impl(

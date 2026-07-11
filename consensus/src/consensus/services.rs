@@ -74,6 +74,7 @@ pub struct ConsensusServices {
     pub mass_calculator: MassCalculator,
     pub transaction_validator: TransactionValidator,
     pub dagknight_executor: Option<DbDagknightExecutor>,
+    pub umc_persistence_stats: Arc<crate::model::stores::dagknight::UmcPersistenceStats>,
 }
 
 impl ConsensusServices {
@@ -138,6 +139,8 @@ impl ConsensusServices {
         );
 
         // TODO[DK]: Use a config or ForkActivation to gate this
+        let umc_persistence_stats = Arc::new(crate::model::stores::dagknight::UmcPersistenceStats::new());
+
         let dagknight_executor = storage.dagknight_store.as_ref().map(|dagknight_store| DagknightExecutor {
             genesis_hash: params.genesis.hash,
             dagknight_store: dagknight_store.clone(),
@@ -148,6 +151,7 @@ impl ConsensusServices {
                 .umc_persistence_store
                 .clone()
                 .map(|s| s as Arc<dyn crate::model::stores::dagknight::UmcPersistenceStore + Send + Sync>),
+            umc_persistence_stats: Some(umc_persistence_stats.clone()),
         });
 
         let coinbase_manager = CoinbaseManager::new(
@@ -244,6 +248,7 @@ impl ConsensusServices {
             mass_calculator,
             transaction_validator,
             dagknight_executor,
+            umc_persistence_stats,
         })
     }
 }

@@ -19,7 +19,7 @@ use crate::{
         stores::{
             dagknight::{
                 ColoringData, DagknightStore, DagknightStoreReader, PastColoringData, UmcPersistenceKey,
-                UmcPersistenceStore,
+                UmcPersistenceStats, UmcPersistenceStore,
             },
             headers::HeaderStoreReader,
             reachability::ReachabilityStoreReader,
@@ -99,6 +99,8 @@ pub struct DagknightExecutor<
     pub relations_store: Arc<RwLock<D>>,
     pub reachability_service: MTReachabilityService<R>,
     pub umc_persistence_store: Option<Arc<dyn UmcPersistenceStore + Send + Sync>>,
+    /// Optional stats tracker for incremental UMC persistence effort savings.
+    pub umc_persistence_stats: Option<Arc<UmcPersistenceStats>>,
 }
 
 #[derive(Clone)]
@@ -413,7 +415,19 @@ impl<
                 Ok(None) | Err(_) => None, // Fallback to from-scratch on any error
             };
 
-            let (result, new_state, _was_restored) = voter.run_cascade_incremental(&input, persisted);
+            // Compute zone size for stats (before voting)
+            let zone_blocks = input.blue_set.len() + input.red_set.len();
+            let persisted_blocks = persisted
+                .as_ref()
+                .map(|s| s.tree_entries.len() + s.secondary_heap.len())
+                .unwrap_or(0);
+
+            let (result, new_state, was_restored) = voter.run_cascade_incremental(&input, persisted);
+
+            // Record stats
+            if let Some(stats) = &self.umc_persistence_stats {
+                stats.record(was_restored, persisted_blocks, zone_blocks);
+            }
 
             // Persist updated state
             if let Err(e) = store.insert(key, new_state) {
@@ -709,6 +723,7 @@ mod tests {
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
             umc_persistence_store: None,
+            umc_persistence_stats: None,
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
@@ -913,6 +928,7 @@ mod tests {
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
             umc_persistence_store: None,
+            umc_persistence_stats: None,
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
@@ -993,6 +1009,7 @@ mod tests {
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
             umc_persistence_store: None,
+            umc_persistence_stats: None,
         };
 
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);

@@ -376,9 +376,95 @@ impl DagknightStore for DbDagknightStore {
 
 use kaspa_math::{Uint192, int::SignedInteger};
 use parking_lot::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Signed work value (difference of two Uint192 work values).
 type SignedWork = SignedInteger<Uint192>;
+
+/// Accumulated statistics for incremental UMC persistence.
+/// Tracks how much effort is saved by restoring from persisted cascade state.
+///
+/// **Effort saved** is measured as:
+/// ```text
+/// blocks_skipped = blocks already in persisted heap (tree + secondary heap)
+/// total_blocks   = blue_set.len() + red_set.len()  (current conflict zone size)
+/// effort_saved   = blocks_skipped / total_blocks
+/// ```
+///
+/// This ratio shows what fraction of zone blocks were *not* re-processed because
+/// they were already in the cascade heap from a previous evaluation.
+#[derive(Default)]
+pub struct UmcPersistenceStats {
+    /// Total number of incremental UMC evaluations
+    total_calls: AtomicU64,
+    /// Number of evaluations that restored from persisted state
+    restored_calls: AtomicU64,
+    /// Total blocks in zone across all calls (blues + reds)
+    total_blocks_in_zone: AtomicU64,
+    /// Total blocks already in persisted heap across restored calls (skipped)
+    total_blocks_skipped: AtomicU64,
+}
+
+impl UmcPersistenceStats {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the result of a single incremental UMC evaluation.
+    ///
+    /// - `was_restored`: whether persisted state was loaded
+    /// - `persisted_blocks`: number of blocks already in the heap (tree + secondary), 0 if not restored
+    /// - `zone_blocks`: total blocks in the current conflict zone (blues + reds)
+    pub fn record(&self, was_restored: bool, persisted_blocks: usize, zone_blocks: usize) {
+        self.total_calls.fetch_add(1, Ordering::Relaxed);
+        self.total_blocks_in_zone.fetch_add(zone_blocks as u64, Ordering::Relaxed);
+
+        if was_restored {
+            self.restored_calls.fetch_add(1, Ordering::Relaxed);
+            self.total_blocks_skipped.fetch_add(persisted_blocks as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// Reset all counters.
+    pub fn reset(&self) {
+        self.total_calls.store(0, Ordering::Relaxed);
+        self.restored_calls.store(0, Ordering::Relaxed);
+        self.total_blocks_in_zone.store(0, Ordering::Relaxed);
+        self.total_blocks_skipped.store(0, Ordering::Relaxed);
+    }
+
+    /// Returns a formatted summary string.
+    pub fn snapshot(&self) -> String {
+        let total = self.total_calls.load(Ordering::Relaxed);
+        let restored = self.restored_calls.load(Ordering::Relaxed);
+        let in_zone = self.total_blocks_in_zone.load(Ordering::Relaxed);
+        let skipped = self.total_blocks_skipped.load(Ordering::Relaxed);
+
+        let effort_saved_pct = if in_zone > 0 {
+            (skipped as f64 / in_zone as f64) * 100.0
+        } else {
+            0.0
+        };
+
+      let avg_skipped_per_call = if total > 0 {
+            skipped as f64 / total as f64
+        } else {
+            0.0
+        };
+
+        let restored_pct = if total > 0 {
+            (restored as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        format!(
+            "UMC Persistence Stats: calls={}, restored={} ({:.1}%), \
+             total_zone_blocks={}, skipped={}, effort_saved={:.1}%, avg_skipped_per_call={:.1}",
+            total, restored, restored_pct, in_zone, skipped, effort_saved_pct, avg_skipped_per_call,
+        )
+    }
+}
 
 /// A blue block that was popped from the primary tree as "negative".
 #[derive(Clone, Debug, Serialize, Deserialize)]
