@@ -8,7 +8,6 @@ use std::{
 
 use kaspa_consensus_core::{BlockHashMap, BlockHashSet, KType};
 use kaspa_hashes::Hash;
-use kaspa_core::trace;
 use kaspa_math::{Uint192, int::SignedInteger};
 use kaspa_utils::mem_size::MemSizeEstimator;
 
@@ -580,6 +579,123 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
         }
     }
 
+    /// Recover from red staleness by recomputing ARlb for all persisted blues.
+    ///
+    /// When a red leaves the zone, any blue that had that red in its anticone has
+    /// an inflated ARlb. We recompute ARlb by checking each stale red against each
+    /// persisted blue: if the stale red is in the blue's anticone, subtract its work.
+    ///
+    /// Monotonicity: removing reds can only improve (decrease) blue floors, so:
+    /// - cached_vote == true stays true (fast path, no work needed)
+    /// - cached_vote == false may flip to true (must recompute)
+    ///
+    /// After updating ARlb, runs try_promote_from_secondary to promote blues
+    /// whose floors improved past the threshold.
+    pub(super) fn recover_from_red_staleness(&mut self, stale_reds: &BlockHashSet) {
+        if stale_reds.is_empty() {
+            return;
+        }
+
+        // Fast path: vote was already positive; removing reds can only improve floors,
+        // so a positive vote stays positive. Just subtract stale red work from seen_red_work.
+        if self.cached_vote {
+            for &red in stale_reds {
+                let bits = self.headers_store.get_bits(red).unwrap_or(0x207fffff);
+                self.seen_red_work = self.seen_red_work.saturating_sub(calc_work(bits));
+            }
+            return;
+        }
+
+        // Slow path: vote was negative (or unknown), must recompute ARlb for all blues.
+        // For each persisted blue, subtract the work of stale reds that are in its anticone.
+        // A red is in the blue's anticone if they are NOT ancestors/descendants of each other.
+
+        // --- Primary tree blues ---
+        // Collect updates first to avoid borrow conflicts
+        let tree_updates: Vec<(Hash, Uint192)> = self
+            .dast
+            .tree
+            .rev_index
+            .keys()
+            .filter_map(|&hash| {
+                let persisted_arlb = *self.dast.tree.arlb.get(&hash).unwrap();
+                let mut new_arlb = persisted_arlb;
+
+                for &stale_red in stale_reds {
+                    // Skip if stale red is in blue's past or future
+                    if self.ctx.oracle.is_dag_ancestor_of(stale_red, hash)
+                        || self.ctx.oracle.is_dag_ancestor_of(hash, stale_red)
+                    {
+                        continue;
+                    }
+                    // Stale red is in blue's anticone — remove its contribution
+                    let red_bits = self.headers_store.get_bits(stale_red).unwrap_or(0x207fffff);
+                    let red_work = calc_work(red_bits);
+                    new_arlb = new_arlb.saturating_sub(red_work);
+                }
+
+                if new_arlb != persisted_arlb {
+                    Some((hash, new_arlb))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (hash, new_arlb) in tree_updates {
+            self.dast.tree.update_anticone_reds_lower_bound(hash, new_arlb);
+            // Reset last_red_index so that subsequent incremental scans start fresh
+            self.dast.tree.last_red_index.insert(hash, self.dast.tree.red_index);
+        }
+
+        // --- Secondary heap blues ---
+        let secondary_updates: Vec<(PoppedBlue, Uint192)> = self
+            .dast
+            .secondary_heap
+            .iter()
+            .filter_map(|pb| {
+                let mut new_arlb = pb.arlb;
+
+                for &stale_red in stale_reds {
+                    if self.ctx.oracle.is_dag_ancestor_of(stale_red, pb.hash)
+                        || self.ctx.oracle.is_dag_ancestor_of(pb.hash, stale_red)
+                    {
+                        continue;
+                    }
+                    let red_bits = self.headers_store.get_bits(stale_red).unwrap_or(0x207fffff);
+                    let red_work = calc_work(red_bits);
+                    new_arlb = new_arlb.saturating_sub(red_work);
+                }
+
+                if new_arlb != pb.arlb {
+                    Some((pb.clone(), new_arlb))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (pb, new_arlb) in secondary_updates {
+            let new_floor = SignedWork::from(pb.past_red_work) + SignedWork::from(new_arlb)
+                - SignedWork::from(pb.past_blue_work)
+                - SignedWork::from(pb.anticone_blue_work);
+            self.dast.secondary_heap.remove(&pb);
+            self.dast.secondary_heap.insert(PoppedBlue {
+                hash: pb.hash,
+                floor: new_floor,
+                past_blue_work: pb.past_blue_work,
+                past_red_work: pb.past_red_work,
+                anticone_blue_work: pb.anticone_blue_work,
+                arlb: new_arlb,
+                last_red_index: pb.last_red_index,
+            });
+        }
+
+        // After ARlb improved, some secondary heap blues may now qualify for promotion
+        // Pass a dummy hash since try_promote_from_secondary doesn't actually use it
+        self.try_promote_from_secondary(Hash::default());
+    }
+
     /// Extract current state for persistence.
     /// The `tip_set_hash` is populated by the caller for staleness detection.
     pub(super) fn extract_state(&self, tip_set_hash: Hash) -> UmcPersistedState {
@@ -749,13 +865,18 @@ where
         // grays or were excluded), any stale persisted state would produce incorrect
         // ARlb and seen_red_work values.
         //
-        // Recovery path: if ONLY blues are stale (reds are valid), we can recover by:
-        //   1. Removing stale blues from the cascade structure
-        //   2. Recomputing anticone_blue_work for remaining persisted blues
-        //   3. Comparing old vs new — only re-insert into primary tree if changed
-        // This works because ARlb (which depends on reds) remains valid.
-        let (diag, persisted_set, stale_blue_hashes): (UmcFallbackDiagnostics, BlockHashSet, BlockHashSet) =
-            if let Some(ref persisted) = persisted {
+        // Recovery paths:
+        //   - Blue-only staleness: remove stale blues, recompute anticone_blue_work
+        //   - Red-only staleness: recompute ARlb by subtracting stale red contributions
+        //   - Both stale: apply blue recovery first, then red recovery
+        // Both recoveries compose cleanly because they affect independent values
+        // (anticone_blue_work depends only on blues; ARlb depends only on reds).
+        let (diag, persisted_set, stale_blue_hashes, stale_red_hashes): (
+            UmcFallbackDiagnostics,
+            BlockHashSet,
+            BlockHashSet,
+            BlockHashSet,
+        ) = if let Some(ref persisted) = persisted {
                 let persisted_blue_hashes: BlockHashSet = persisted
                     .tree_entries
                     .iter()
@@ -767,10 +888,18 @@ where
                 let current_red_set: BlockHashSet = input.red_set.iter().copied().collect();
 
                 // Identify stale blocks
-                let stale_blue_hashes: BlockHashSet =
-                    persisted_blue_hashes.iter().filter(|h| !input.blue_set.contains(h)).copied().collect();
+                let stale_blue_hashes: BlockHashSet = persisted_blue_hashes
+                    .iter()
+                    .filter(|h| !input.blue_set.contains(h))
+                    .copied()
+                    .collect();
                 let stale_blues = stale_blue_hashes.len();
-                let stale_reds = persisted_red_set.iter().filter(|h| !current_red_set.contains(h)).count();
+                let stale_red_hashes: BlockHashSet = persisted_red_set
+                    .iter()
+                    .filter(|h| !current_red_set.contains(h))
+                    .copied()
+                    .collect();
+                let stale_reds = stale_red_hashes.len();
                 let persisted_blues_count = persisted_blue_hashes.len();
                 let persisted_reds_count = persisted_red_set.len();
 
@@ -779,52 +908,40 @@ where
 
                 if blues_ok && reds_ok {
                     // Full restore — no staleness
-                    let persisted_set: BlockHashSet = persisted_blue_hashes.into_iter().chain(persisted.red_set.iter().copied()).collect();
+                    let persisted_set: BlockHashSet =
+                        persisted_blue_hashes.into_iter().chain(persisted.red_set.iter().copied()).collect();
                     let diag = UmcFallbackDiagnostics {
                         was_restored: true,
                         persisted_blocks: persisted.tree_entries.len() + persisted.secondary_heap.len(),
                         ..Default::default()
                     };
-                    (diag, persisted_set, BlockHashSet::default())
-                } else if !blues_ok && reds_ok {
-                    // Blues stale but reds OK — can recover by removing stale blues
-                    // and adjusting anticone_blue_work for affected blues
+                    (diag, persisted_set, BlockHashSet::default(), BlockHashSet::default())
+                } else {
+                    // Staleness detected — recover by restoring and then fixing affected values
                     let non_stale_blues: BlockHashSet = persisted_blue_hashes
                         .into_iter()
                         .filter(|h| input.blue_set.contains(h))
                         .collect();
-                    let persisted_set: BlockHashSet = non_stale_blues.into_iter().chain(persisted.red_set.iter().copied()).collect();
-                    let diag = UmcFallbackDiagnostics {
-                        was_recovered: true,
-                        persisted_blocks: persisted.tree_entries.len() + persisted.secondary_heap.len(),
-                        stale_blues,
-                        stale_reds: 0,
-                        ..Default::default()
-                    };
-                    (diag, persisted_set, stale_blue_hashes)
-                } else {
-                    // Reds stale (or both) — ARlb corrupted, must fall back to from-scratch
-                    trace!(
-                        "UMC persistence fallback: stale_blues={}, stale_reds={}, persisted_blues={}, persisted_reds={}, current_blues={}, current_reds={}",
-                        stale_blues,
-                        stale_reds,
-                        persisted_blues_count,
-                        persisted_reds_count,
-                        input.blue_set.len(),
-                        input.red_set.len()
-                    );
+                    let persisted_set: BlockHashSet =
+                        non_stale_blues.into_iter().chain(persisted.red_set.iter().copied()).collect();
                     let diag = UmcFallbackDiagnostics {
                         was_restored: false,
+                        was_recovered: true,
+                        persisted_blocks: persisted.tree_entries.len() + persisted.secondary_heap.len(),
                         stale_blues,
                         stale_reds,
                         persisted_blues_on_fallback: persisted_blues_count,
                         persisted_reds_on_fallback: persisted_reds_count,
-                        ..Default::default()
                     };
-                    (diag, BlockHashSet::default(), BlockHashSet::default())
+                    (diag, persisted_set, stale_blue_hashes, stale_red_hashes)
                 }
             } else {
-                (UmcFallbackDiagnostics::default(), BlockHashSet::default(), BlockHashSet::default())
+                (
+                    UmcFallbackDiagnostics::default(),
+                    BlockHashSet::default(),
+                    BlockHashSet::default(),
+                    BlockHashSet::default(),
+                )
             };
 
         let mut cascade_ctx = if diag.was_restored || diag.was_recovered {
@@ -837,13 +954,20 @@ where
                 &input.virtual_coloring_data_map,
             )
         } else {
-            // No persisted state or stale — from scratch
+            // No persisted state — from scratch
             CascadeContext::new(input.conflict_genesis, traversal_ctx, self.headers_store, threshold_work)
         };
 
-        // If recovered from blue staleness, remove stale blues and adjust anticone_blue_work
-        if diag.was_recovered && !stale_blue_hashes.is_empty() {
-            cascade_ctx.recover_from_blue_staleness(&stale_blue_hashes, &input.virtual_coloring_data_map);
+        // Apply recovery: blue staleness first (removes stale blues, fixes anticone_blue_work),
+        // then red staleness (recomputes ARlb for remaining blues).
+        // Order matters: blue removal may eliminate blues whose ARlb we'd otherwise fix.
+        if diag.was_recovered {
+            if !stale_blue_hashes.is_empty() {
+                cascade_ctx.recover_from_blue_staleness(&stale_blue_hashes, &input.virtual_coloring_data_map);
+            }
+            if !stale_red_hashes.is_empty() {
+                cascade_ctx.recover_from_red_staleness(&stale_red_hashes);
+            }
         }
 
         // Always ensure conflict genesis is in the cascade tree.

@@ -420,28 +420,30 @@ pub struct UmcFallbackDiagnostics {
 pub struct UmcPersistenceStats {
     /// Total number of incremental UMC evaluations
     total_calls: AtomicU64,
-    /// Number of evaluations that restored from persisted state
+    /// Number of evaluations that restored from persisted state (no staleness)
     restored_calls: AtomicU64,
-    /// Number of evaluations where persisted state existed but was rejected (fallback)
+    /// Number of evaluations that recovered from staleness (persisted state repaired incrementally)
+    recovered_calls: AtomicU64,
+    /// Number of evaluations that fell back to from-scratch (no persisted state or irrecoverable)
     fallback_calls: AtomicU64,
-    /// Fallbacks where blues were valid but reds had stale entries (only reds stale)
-    fallback_blue_ok_red_stale: AtomicU64,
-    /// Fallbacks where reds were valid but blues had stale entries (only blues stale)
-    fallback_blue_stale_red_ok: AtomicU64,
-    /// Fallbacks where both blues and reds had stale entries
-    fallback_both_stale: AtomicU64,
+    /// Staleness categories among recovered+fallback calls: blues OK, reds stale
+    category_blue_ok_red_stale: AtomicU64,
+    /// Staleness categories among recovered+fallback calls: blues stale, reds OK
+    category_blue_stale_red_ok: AtomicU64,
+    /// Staleness categories among recovered+fallback calls: both stale
+    category_both_stale: AtomicU64,
     /// Total blocks in zone across all calls (blues + reds)
     total_blocks_in_zone: AtomicU64,
-    /// Total blocks already in persisted heap across restored calls (skipped)
+    /// Total blocks already in persisted heap across restored/recovered calls (skipped)
     total_blocks_skipped: AtomicU64,
-    /// Total stale blues across all fallback calls
-    total_stale_blues_on_fallback: AtomicU64,
-    /// Total stale reds across all fallback calls
-    total_stale_reds_on_fallback: AtomicU64,
-    /// Total persisted blues when fallback occurred
-    total_persisted_blues_on_fallback: AtomicU64,
-    /// Total persisted reds when fallback occurred
-    total_persisted_reds_on_fallback: AtomicU64,
+    /// Total stale blues across all recovered calls
+    total_stale_blues_on_recovery: AtomicU64,
+    /// Total stale reds across all recovered calls
+    total_stale_reds_on_recovery: AtomicU64,
+    /// Average persisted blues on recovery
+    total_persisted_blues_on_recovery: AtomicU64,
+    /// Average persisted reds on recovery
+    total_persisted_reds_on_recovery: AtomicU64,
 }
 
 impl UmcPersistenceStats {
@@ -454,28 +456,32 @@ impl UmcPersistenceStats {
         self.total_calls.fetch_add(1, Ordering::Relaxed);
         self.total_blocks_in_zone.fetch_add(zone_blocks as u64, Ordering::Relaxed);
 
-        if diag.was_restored || diag.was_recovered {
-            // Both restored and recovered count as successful (skipped processing persisted blocks)
+        if diag.was_restored {
+            // Clean restore — no staleness
             self.restored_calls.fetch_add(1, Ordering::Relaxed);
             self.total_blocks_skipped.fetch_add(diag.persisted_blocks as u64, Ordering::Relaxed);
-        } else if diag.stale_blues > 0 || diag.stale_reds > 0 {
-            // Had persisted state but fell back due to staleness
-            self.fallback_calls.fetch_add(1, Ordering::Relaxed);
-            self.total_stale_blues_on_fallback.fetch_add(diag.stale_blues as u64, Ordering::Relaxed);
-            self.total_stale_reds_on_fallback.fetch_add(diag.stale_reds as u64, Ordering::Relaxed);
-            self.total_persisted_blues_on_fallback.fetch_add(diag.persisted_blues_on_fallback as u64, Ordering::Relaxed);
-            self.total_persisted_reds_on_fallback.fetch_add(diag.persisted_reds_on_fallback as u64, Ordering::Relaxed);
+        } else if diag.was_recovered {
+            // Recovered from staleness incrementally
+            self.recovered_calls.fetch_add(1, Ordering::Relaxed);
+            self.total_blocks_skipped.fetch_add(diag.persisted_blocks as u64, Ordering::Relaxed);
+            self.total_stale_blues_on_recovery.fetch_add(diag.stale_blues as u64, Ordering::Relaxed);
+            self.total_stale_reds_on_recovery.fetch_add(diag.stale_reds as u64, Ordering::Relaxed);
+            self.total_persisted_blues_on_recovery.fetch_add(diag.persisted_blues_on_fallback as u64, Ordering::Relaxed);
+            self.total_persisted_reds_on_recovery.fetch_add(diag.persisted_reds_on_fallback as u64, Ordering::Relaxed);
 
-            // Categorize by staleness type
+            // Categorize staleness type
             let blues_stale = diag.stale_blues > 0;
             let reds_stale = diag.stale_reds > 0;
             if blues_stale && reds_stale {
-                self.fallback_both_stale.fetch_add(1, Ordering::Relaxed);
+                self.category_both_stale.fetch_add(1, Ordering::Relaxed);
             } else if blues_stale {
-                self.fallback_blue_stale_red_ok.fetch_add(1, Ordering::Relaxed);
+                self.category_blue_stale_red_ok.fetch_add(1, Ordering::Relaxed);
             } else {
-                self.fallback_blue_ok_red_stale.fetch_add(1, Ordering::Relaxed);
+                self.category_blue_ok_red_stale.fetch_add(1, Ordering::Relaxed);
             }
+        } else if diag.stale_blues > 0 || diag.stale_reds > 0 {
+            // Had persisted state but fell back (shouldn't happen with full recovery)
+            self.fallback_calls.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -483,32 +489,34 @@ impl UmcPersistenceStats {
     pub fn reset(&self) {
         self.total_calls.store(0, Ordering::Relaxed);
         self.restored_calls.store(0, Ordering::Relaxed);
+        self.recovered_calls.store(0, Ordering::Relaxed);
         self.fallback_calls.store(0, Ordering::Relaxed);
-        self.fallback_blue_ok_red_stale.store(0, Ordering::Relaxed);
-        self.fallback_blue_stale_red_ok.store(0, Ordering::Relaxed);
-        self.fallback_both_stale.store(0, Ordering::Relaxed);
+        self.category_blue_ok_red_stale.store(0, Ordering::Relaxed);
+        self.category_blue_stale_red_ok.store(0, Ordering::Relaxed);
+        self.category_both_stale.store(0, Ordering::Relaxed);
         self.total_blocks_in_zone.store(0, Ordering::Relaxed);
         self.total_blocks_skipped.store(0, Ordering::Relaxed);
-        self.total_stale_blues_on_fallback.store(0, Ordering::Relaxed);
-        self.total_stale_reds_on_fallback.store(0, Ordering::Relaxed);
-        self.total_persisted_blues_on_fallback.store(0, Ordering::Relaxed);
-        self.total_persisted_reds_on_fallback.store(0, Ordering::Relaxed);
+        self.total_stale_blues_on_recovery.store(0, Ordering::Relaxed);
+        self.total_stale_reds_on_recovery.store(0, Ordering::Relaxed);
+        self.total_persisted_blues_on_recovery.store(0, Ordering::Relaxed);
+        self.total_persisted_reds_on_recovery.store(0, Ordering::Relaxed);
     }
 
     /// Returns a formatted summary string.
     pub fn snapshot(&self) -> String {
         let total = self.total_calls.load(Ordering::Relaxed);
         let restored = self.restored_calls.load(Ordering::Relaxed);
+        let recovered = self.recovered_calls.load(Ordering::Relaxed);
         let fallbacks = self.fallback_calls.load(Ordering::Relaxed);
-        let fb_blue_ok_red_stale = self.fallback_blue_ok_red_stale.load(Ordering::Relaxed);
-        let fb_blue_stale_red_ok = self.fallback_blue_stale_red_ok.load(Ordering::Relaxed);
-        let fb_both_stale = self.fallback_both_stale.load(Ordering::Relaxed);
+        let cat_blue_ok_red_stale = self.category_blue_ok_red_stale.load(Ordering::Relaxed);
+        let cat_blue_stale_red_ok = self.category_blue_stale_red_ok.load(Ordering::Relaxed);
+        let cat_both_stale = self.category_both_stale.load(Ordering::Relaxed);
         let in_zone = self.total_blocks_in_zone.load(Ordering::Relaxed);
         let skipped = self.total_blocks_skipped.load(Ordering::Relaxed);
-        let stale_blues = self.total_stale_blues_on_fallback.load(Ordering::Relaxed);
-        let stale_reds = self.total_stale_reds_on_fallback.load(Ordering::Relaxed);
-        let persisted_blues_fb = self.total_persisted_blues_on_fallback.load(Ordering::Relaxed);
-        let persisted_reds_fb = self.total_persisted_reds_on_fallback.load(Ordering::Relaxed);
+        let stale_blues = self.total_stale_blues_on_recovery.load(Ordering::Relaxed);
+        let stale_reds = self.total_stale_reds_on_recovery.load(Ordering::Relaxed);
+        let persisted_blues_rec = self.total_persisted_blues_on_recovery.load(Ordering::Relaxed);
+        let persisted_reds_rec = self.total_persisted_reds_on_recovery.load(Ordering::Relaxed);
 
         let effort_saved_pct = if in_zone > 0 {
             (skipped as f64 / in_zone as f64) * 100.0
@@ -522,71 +530,62 @@ impl UmcPersistenceStats {
             0.0
         };
 
-        let restored_pct = if total > 0 {
-            (restored as f64 / total as f64) * 100.0
+        let reused_pct = if total > 0 {
+            (restored as f64 + recovered as f64) / total as f64 * 100.0
         } else {
             0.0
         };
 
-        // Staleness diagnostics on fallback
-        let avg_stale_blues = if fallbacks > 0 {
-            stale_blues as f64 / fallbacks as f64
+        // Recovery diagnostics
+        let avg_stale_blues = if recovered > 0 {
+            stale_blues as f64 / recovered as f64
         } else {
             0.0
         };
-        let avg_stale_reds = if fallbacks > 0 {
-            stale_reds as f64 / fallbacks as f64
+        let avg_stale_reds = if recovered > 0 {
+            stale_reds as f64 / recovered as f64
         } else {
             0.0
         };
-        let avg_persisted_blues_fb = if fallbacks > 0 {
-            persisted_blues_fb as f64 / fallbacks as f64
+        let avg_persisted_blues_rec = if recovered > 0 {
+            persisted_blues_rec as f64 / recovered as f64
         } else {
             0.0
         };
-        let avg_persisted_reds_fb = if fallbacks > 0 {
-            persisted_reds_fb as f64 / fallbacks as f64
-        } else {
-            0.0
-        };
-        let stale_pct_blues = if persisted_blues_fb > 0 {
-            stale_blues as f64 / persisted_blues_fb as f64 * 100.0
-        } else {
-            0.0
-        };
-        let stale_pct_reds = if persisted_reds_fb > 0 {
-            stale_reds as f64 / persisted_reds_fb as f64 * 100.0
+        let avg_persisted_reds_rec = if recovered > 0 {
+            persisted_reds_rec as f64 / recovered as f64
         } else {
             0.0
         };
 
-        // Fallback category percentages
-        let fb_red_stale_pct = if fallbacks > 0 {
-            fb_blue_ok_red_stale as f64 / fallbacks as f64 * 100.0
+        // Recovery category percentages (among recovered calls)
+        let cat_red_stale_pct = if recovered > 0 {
+            cat_blue_ok_red_stale as f64 / recovered as f64 * 100.0
         } else {
             0.0
         };
-        let fb_blue_stale_pct = if fallbacks > 0 {
-            fb_blue_stale_red_ok as f64 / fallbacks as f64 * 100.0
+        let cat_blue_stale_pct = if recovered > 0 {
+            cat_blue_stale_red_ok as f64 / recovered as f64 * 100.0
         } else {
             0.0
         };
-        let fb_both_pct = if fallbacks > 0 {
-            fb_both_stale as f64 / fallbacks as f64 * 100.0
+        let cat_both_pct = if recovered > 0 {
+            cat_both_stale as f64 / recovered as f64 * 100.0
         } else {
             0.0
         };
 
         format!(
-            "UMC Persistence Stats: calls={}, restored={} ({:.1}%), \
+            "UMC Persistence Stats: calls={}, reused={} ({:.1}%), \
+             restored={}, recovered={}, fallbacks={} | \
              total_zone_blocks={}, skipped={}, effort_saved={:.1}%, avg_skipped_per_call={:.1} | \
-             fallbacks={}, categories=[blue_ok_red_stale={} ({:.1}%), blue_stale_red_ok={} ({:.1}%), both_stale={} ({:.1}%)], \
-             avg_stale_blues={:.1} ({:.1}% of persisted), avg_stale_reds={:.1} ({:.1}% of persisted), \
-             avg_persisted_on_fallback=blues={:.1}, reds={:.1}",
-            total, restored, restored_pct, in_zone, skipped, effort_saved_pct, avg_skipped_per_call,
-            fallbacks, fb_blue_ok_red_stale, fb_red_stale_pct, fb_blue_stale_red_ok, fb_blue_stale_pct, fb_both_stale, fb_both_pct,
-            avg_stale_blues, stale_pct_blues, avg_stale_reds, stale_pct_reds,
-            avg_persisted_blues_fb, avg_persisted_reds_fb,
+             recovery_categories=[blue_ok_red_stale={} ({:.1}%), blue_stale_red_ok={} ({:.1}%), both_stale={} ({:.1}%)], \
+             recovery_avg_stale=blues={:.1}, reds={:.1}, persisted=blues={:.1}, reds={:.1}",
+            total, restored + recovered, reused_pct,
+            restored, recovered, fallbacks,
+            in_zone, skipped, effort_saved_pct, avg_skipped_per_call,
+            cat_blue_ok_red_stale, cat_red_stale_pct, cat_blue_stale_red_ok, cat_blue_stale_pct, cat_both_stale, cat_both_pct,
+            avg_stale_blues, avg_stale_reds, avg_persisted_blues_rec, avg_persisted_reds_rec,
         )
     }
 }
