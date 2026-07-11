@@ -428,7 +428,7 @@ impl<
             // Compute zone size for stats (before voting)
             let zone_blocks = input.blue_set.len() + input.red_set.len();
 
-            let (result, new_state, diag) = voter.run_cascade_incremental(&input, persisted);
+            let (result, new_state, diag) = voter.run_cascade_incremental(&input, persisted, &Default::default());
 
             // DEBUG: assert incremental matches full run — remove when confident
             let full_result = voter.run_cascade(&input);

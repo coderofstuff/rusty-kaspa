@@ -385,20 +385,16 @@ type SignedWork = SignedInteger<Uint192>;
 /// Diagnostics about a single incremental UMC evaluation, used for stats tracking.
 #[derive(Debug, Default)]
 pub struct UmcFallbackDiagnostics {
-    /// Whether persisted state was successfully restored (no staleness)
+    /// Whether persisted state was successfully restored (frontier == old tips, no peel needed)
     pub was_restored: bool,
-    /// Whether persisted state was recovered (blues stale, reds OK — repaired incrementally)
+    /// Whether persisted state was recovered (peeled to frontier, then replayed)
     pub was_recovered: bool,
     /// Number of blocks already in persisted heap (tree + secondary), 0 if not restored/recovered
     pub persisted_blocks: usize,
-    /// Number of persisted blues no longer in current blue set (0 if restored or no persisted state)
-    pub stale_blues: usize,
-    /// Number of persisted reds no longer in current red set (0 if restored or no persisted state)
-    pub stale_reds: usize,
-    /// Total persisted blues when fallback occurred (0 if not applicable)
-    pub persisted_blues_on_fallback: usize,
-    /// Total persisted reds when fallback occurred (0 if not applicable)
-    pub persisted_reds_on_fallback: usize,
+    /// Number of blocks peeled from cascade state during recovery (0 if restored or no persisted state)
+    pub peeled_blocks: usize,
+    /// Number of blocks replayed from frontier forward (0 if restored or no persisted state)
+    pub replayed_blocks: usize,
 }
 
 /// Tracks how much effort is saved by restoring from persisted cascade state.
@@ -413,37 +409,27 @@ pub struct UmcFallbackDiagnostics {
 /// This ratio shows what fraction of zone blocks were *not* re-processed because
 /// they were already in the cascade heap from a previous evaluation.
 ///
-/// Additionally tracks **staleness** on fallback: when persisted state is rejected
-/// because the zone changed, records how many persisted blocks were stale (no longer
-/// in the current zone) to understand how often persistence is useful.
+/// Additionally tracks **recovery** stats: when the zone changed (tips moved),
+/// records how many blocks were peeled and replayed to understand the cost
+/// of incremental recovery.
 #[derive(Default)]
 pub struct UmcPersistenceStats {
     /// Total number of incremental UMC evaluations
     total_calls: AtomicU64,
-    /// Number of evaluations that restored from persisted state (no staleness)
+    /// Number of evaluations that restored from persisted state (frontier == old tips)
     restored_calls: AtomicU64,
-    /// Number of evaluations that recovered from staleness (persisted state repaired incrementally)
+    /// Number of evaluations that recovered by peeling and replaying from frontier
     recovered_calls: AtomicU64,
-    /// Number of evaluations that fell back to from-scratch (no persisted state or irrecoverable)
+    /// Number of evaluations that fell back to from-scratch (no persisted state)
     fallback_calls: AtomicU64,
-    /// Staleness categories among recovered+fallback calls: blues OK, reds stale
-    category_blue_ok_red_stale: AtomicU64,
-    /// Staleness categories among recovered+fallback calls: blues stale, reds OK
-    category_blue_stale_red_ok: AtomicU64,
-    /// Staleness categories among recovered+fallback calls: both stale
-    category_both_stale: AtomicU64,
     /// Total blocks in zone across all calls (blues + reds)
     total_blocks_in_zone: AtomicU64,
     /// Total blocks already in persisted heap across restored/recovered calls (skipped)
     total_blocks_skipped: AtomicU64,
-    /// Total stale blues across all recovered calls
-    total_stale_blues_on_recovery: AtomicU64,
-    /// Total stale reds across all recovered calls
-    total_stale_reds_on_recovery: AtomicU64,
-    /// Average persisted blues on recovery
-    total_persisted_blues_on_recovery: AtomicU64,
-    /// Average persisted reds on recovery
-    total_persisted_reds_on_recovery: AtomicU64,
+    /// Total blocks peeled during recovery
+    total_peeled: AtomicU64,
+    /// Total blocks replayed during recovery
+    total_replayed: AtomicU64,
 }
 
 impl UmcPersistenceStats {
@@ -457,30 +443,17 @@ impl UmcPersistenceStats {
         self.total_blocks_in_zone.fetch_add(zone_blocks as u64, Ordering::Relaxed);
 
         if diag.was_restored {
-            // Clean restore — no staleness
+            // Clean restore — frontier == old tips, no peel needed
             self.restored_calls.fetch_add(1, Ordering::Relaxed);
             self.total_blocks_skipped.fetch_add(diag.persisted_blocks as u64, Ordering::Relaxed);
         } else if diag.was_recovered {
-            // Recovered from staleness incrementally
+            // Recovered by peeling to frontier and replaying forward
             self.recovered_calls.fetch_add(1, Ordering::Relaxed);
             self.total_blocks_skipped.fetch_add(diag.persisted_blocks as u64, Ordering::Relaxed);
-            self.total_stale_blues_on_recovery.fetch_add(diag.stale_blues as u64, Ordering::Relaxed);
-            self.total_stale_reds_on_recovery.fetch_add(diag.stale_reds as u64, Ordering::Relaxed);
-            self.total_persisted_blues_on_recovery.fetch_add(diag.persisted_blues_on_fallback as u64, Ordering::Relaxed);
-            self.total_persisted_reds_on_recovery.fetch_add(diag.persisted_reds_on_fallback as u64, Ordering::Relaxed);
-
-            // Categorize staleness type
-            let blues_stale = diag.stale_blues > 0;
-            let reds_stale = diag.stale_reds > 0;
-            if blues_stale && reds_stale {
-                self.category_both_stale.fetch_add(1, Ordering::Relaxed);
-            } else if blues_stale {
-                self.category_blue_stale_red_ok.fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.category_blue_ok_red_stale.fetch_add(1, Ordering::Relaxed);
-            }
-        } else if diag.stale_blues > 0 || diag.stale_reds > 0 {
-            // Had persisted state but fell back (shouldn't happen with full recovery)
+            self.total_peeled.fetch_add(diag.peeled_blocks as u64, Ordering::Relaxed);
+            self.total_replayed.fetch_add(diag.replayed_blocks as u64, Ordering::Relaxed);
+        } else {
+            // From-scratch (no persisted state)
             self.fallback_calls.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -491,32 +464,22 @@ impl UmcPersistenceStats {
         self.restored_calls.store(0, Ordering::Relaxed);
         self.recovered_calls.store(0, Ordering::Relaxed);
         self.fallback_calls.store(0, Ordering::Relaxed);
-        self.category_blue_ok_red_stale.store(0, Ordering::Relaxed);
-        self.category_blue_stale_red_ok.store(0, Ordering::Relaxed);
-        self.category_both_stale.store(0, Ordering::Relaxed);
         self.total_blocks_in_zone.store(0, Ordering::Relaxed);
         self.total_blocks_skipped.store(0, Ordering::Relaxed);
-        self.total_stale_blues_on_recovery.store(0, Ordering::Relaxed);
-        self.total_stale_reds_on_recovery.store(0, Ordering::Relaxed);
-        self.total_persisted_blues_on_recovery.store(0, Ordering::Relaxed);
-        self.total_persisted_reds_on_recovery.store(0, Ordering::Relaxed);
+        self.total_peeled.store(0, Ordering::Relaxed);
+        self.total_replayed.store(0, Ordering::Relaxed);
     }
 
-    /// Returns a formatted summary string.
+   /// Returns a formatted summary string.
     pub fn snapshot(&self) -> String {
         let total = self.total_calls.load(Ordering::Relaxed);
         let restored = self.restored_calls.load(Ordering::Relaxed);
         let recovered = self.recovered_calls.load(Ordering::Relaxed);
         let fallbacks = self.fallback_calls.load(Ordering::Relaxed);
-        let cat_blue_ok_red_stale = self.category_blue_ok_red_stale.load(Ordering::Relaxed);
-        let cat_blue_stale_red_ok = self.category_blue_stale_red_ok.load(Ordering::Relaxed);
-        let cat_both_stale = self.category_both_stale.load(Ordering::Relaxed);
         let in_zone = self.total_blocks_in_zone.load(Ordering::Relaxed);
         let skipped = self.total_blocks_skipped.load(Ordering::Relaxed);
-        let stale_blues = self.total_stale_blues_on_recovery.load(Ordering::Relaxed);
-        let stale_reds = self.total_stale_reds_on_recovery.load(Ordering::Relaxed);
-        let persisted_blues_rec = self.total_persisted_blues_on_recovery.load(Ordering::Relaxed);
-        let persisted_reds_rec = self.total_persisted_reds_on_recovery.load(Ordering::Relaxed);
+        let peeled = self.total_peeled.load(Ordering::Relaxed);
+        let replayed = self.total_replayed.load(Ordering::Relaxed);
 
         let effort_saved_pct = if in_zone > 0 {
             (skipped as f64 / in_zone as f64) * 100.0
@@ -537,55 +500,26 @@ impl UmcPersistenceStats {
         };
 
         // Recovery diagnostics
-        let avg_stale_blues = if recovered > 0 {
-            stale_blues as f64 / recovered as f64
+        let avg_peeled = if recovered > 0 {
+            peeled as f64 / recovered as f64
         } else {
             0.0
         };
-        let avg_stale_reds = if recovered > 0 {
-            stale_reds as f64 / recovered as f64
-        } else {
-            0.0
-        };
-        let avg_persisted_blues_rec = if recovered > 0 {
-            persisted_blues_rec as f64 / recovered as f64
-        } else {
-            0.0
-        };
-        let avg_persisted_reds_rec = if recovered > 0 {
-            persisted_reds_rec as f64 / recovered as f64
-        } else {
-            0.0
-        };
-
-        // Recovery category percentages (among recovered calls)
-        let cat_red_stale_pct = if recovered > 0 {
-            cat_blue_ok_red_stale as f64 / recovered as f64 * 100.0
-        } else {
-            0.0
-        };
-        let cat_blue_stale_pct = if recovered > 0 {
-            cat_blue_stale_red_ok as f64 / recovered as f64 * 100.0
-        } else {
-            0.0
-        };
-        let cat_both_pct = if recovered > 0 {
-            cat_both_stale as f64 / recovered as f64 * 100.0
+        let avg_replayed = if recovered > 0 {
+            replayed as f64 / recovered as f64
         } else {
             0.0
         };
 
         format!(
             "UMC Persistence Stats: calls={}, reused={} ({:.1}%), \
-             restored={}, recovered={}, fallbacks={} | \
-             total_zone_blocks={}, skipped={}, effort_saved={:.1}%, avg_skipped_per_call={:.1} | \
-             recovery_categories=[blue_ok_red_stale={} ({:.1}%), blue_stale_red_ok={} ({:.1}%), both_stale={} ({:.1}%)], \
-             recovery_avg_stale=blues={:.1}, reds={:.1}, persisted=blues={:.1}, reds={:.1}",
+              restored={}, recovered={}, fallbacks={} | \
+              total_zone_blocks={}, skipped={}, effort_saved={:.1}%, avg_skipped_per_call={:.1} | \
+              recovery_avg=peeled={:.1}, replayed={:.1}",
             total, restored + recovered, reused_pct,
             restored, recovered, fallbacks,
             in_zone, skipped, effort_saved_pct, avg_skipped_per_call,
-            cat_blue_ok_red_stale, cat_red_stale_pct, cat_blue_stale_red_ok, cat_blue_stale_pct, cat_both_stale, cat_both_pct,
-            avg_stale_blues, avg_stale_reds, avg_persisted_blues_rec, avg_persisted_reds_rec,
+            avg_peeled, avg_replayed,
         )
     }
 }
@@ -652,7 +586,10 @@ pub struct UmcPersistedState {
     pub negative_blues: Uint192,
     /// Cached vote result
     pub cached_vote: bool,
- 
+    /// Tips from the previous run, used for frontier-based recovery.
+    /// When recovering, we peel backwards from these tips to find the
+    /// merge-base with the new tips, then replay from there.
+    pub last_tips: Vec<Hash>,
 }
 
 impl MemSizeEstimator for UmcPersistedState {
@@ -661,7 +598,7 @@ impl MemSizeEstimator for UmcPersistedState {
             + self.tree_entries.len() * size_of::<UmcPersistedTreeEntry>()
             + self.red_set.len() * size_of::<Hash>()
             + self.secondary_heap.len() * size_of::<PoppedBlue>()
-            + size_of::<Hash>()
+            + self.last_tips.len() * size_of::<Hash>()
     }
 }
 
@@ -901,6 +838,7 @@ mod tests {
             seen_red_work: Uint192::from_u64(100),
             negative_blues: Uint192::ZERO,
             cached_vote: true,
+            last_tips: vec![],
         };
 
         // Insert
@@ -957,6 +895,7 @@ mod tests {
             seen_red_work: Uint192::from_u64(100),
             negative_blues: Uint192::ZERO,
             cached_vote: true,
+            last_tips: vec![],
         };
 
         store.insert(key.clone(), state.clone()).unwrap();

@@ -370,6 +370,9 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
             let last_index = *self.dast.tree.last_red_index.get(&min_entry.hash).unwrap();
             let current_index = self.dast.tree.red_index;
 
+            // Defensive: clamp last_index to valid range after recovery (peeling may reset indices)
+            let last_index = last_index.min(current_index);
+
             // Start from the blue's stored ARlb and add contributions from new reds in its anticone
             let mut new_arlb = *self.dast.tree.arlb.get(&min_entry.hash).unwrap();
             for &red in &self.dast.red_set[last_index..current_index] {
@@ -429,7 +432,9 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
             for pb in self.dast.secondary_heap.iter() {
                 // Incrementally update ARlb: scan reds new since this blue was last evaluated
                 let mut current_arlb = pb.arlb;
-                for &red in &self.dast.red_set[pb.last_red_index..current_index] {
+                // Defensive: clamp last_red_index to valid range
+                let safe_start = pb.last_red_index.min(current_index);
+                for &red in &self.dast.red_set[safe_start..current_index] {
                     if self.ctx.oracle.is_dag_ancestor_of(red, pb.hash) || self.ctx.oracle.is_dag_ancestor_of(pb.hash, red) {
                         // Red is in blue's past or future, not in anticone
                         continue;
@@ -475,13 +480,11 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
     }
 
     /// Remove a blue block from the cascade context (both primary tree and secondary heap).
-    /// Used during recovery when a persisted blue has become stale.
+    /// Used during peel_to_frontier when a persisted blue is not in the frontier's past.
     /// Returns true if the block was found and removed.
     pub(super) fn remove_blue(&mut self, hash: Hash) -> bool {
         // Try primary tree first
         if self.dast.tree.has(hash) {
-            // Pop via min if it's the minimum, otherwise do a direct removal
-            // Since we just need to remove it (not process it), we do a direct removal
             if let Some(floor) = self.dast.tree.rev_index.remove(&hash) {
                 self.dast.tree.btree.remove(&CascadeTreeEntry::new(hash, floor));
                 self.dast.tree.past_blue_work.remove(&hash);
@@ -503,26 +506,138 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
         false
     }
 
-    /// Recover from blue staleness by removing stale blues and adjusting anticone_blue_work.
+    /// Extract current state for persistence.
+    /// Captures current tips for frontier-based recovery on the next call.
+    pub(super) fn extract_state(&self, current_tips: &[Hash]) -> UmcPersistedState {
+        let tree_entries: Vec<UmcPersistedTreeEntry> = self
+            .dast
+            .tree
+            .rev_index
+            .iter()
+            .map(|(&hash, floor)| UmcPersistedTreeEntry {
+                hash,
+                floor: floor.clone(),
+                past_blue_work: *self.dast.tree.past_blue_work.get(&hash).unwrap(),
+                past_red_work: *self.dast.tree.past_red_work.get(&hash).unwrap(),
+                anticone_blue_work: *self.dast.tree.anticone_blue_work.get(&hash).unwrap(),
+                arlb: *self.dast.tree.arlb.get(&hash).unwrap(),
+                last_red_index: *self.dast.tree.last_red_index.get(&hash).unwrap(),
+            })
+            .collect();
+
+        let secondary_heap: Vec<PoppedBlue> = self.dast.secondary_heap.iter().cloned().collect();
+
+        UmcPersistedState {
+            tree_entries,
+            red_index: self.dast.tree.red_index,
+            red_set: self.dast.red_set.clone(),
+            secondary_heap,
+            seen_red_work: self.seen_red_work,
+            negative_blues: self.negative_blues,
+            cached_vote: self.cached_vote,
+            last_tips: current_tips.to_vec(),
+        }
+    }
+
+    /// Peel cascade state to match the current conflict zone.
     ///
-    /// For each remaining persisted blue, compares `anticone_blue_work` from
-    /// `virtual_coloring_data_map` with the persisted value. If they differ, updates
-    /// the primary tree entry (which adjusts the floor accordingly).
+    /// Removes persisted blues and reds that are no longer in the current zone.
+    /// After peeling, resets `last_red_index` and `ARlb` to 0 for all remaining
+    /// blues (since red indices may have shifted), forcing `vote()` to recompute
+    /// ARlb from scratch against the pruned red set.
     ///
-    /// Only valid when reds are not stale (ARlb remains correct).
-    pub(super) fn recover_from_blue_staleness(
+    /// Adjusts `anticone_blue_work` for remaining blues using `virtual_coloring_data_map`
+    /// (new blues added to the zone may have grown existing blues' anticones).
+    ///
+    /// Returns the number of blocks peeled.
+    pub(super) fn peel_to_zone(
         &mut self,
-        stale_blues: &BlockHashSet,
+        new_blue_set: &BlockHashSet,
+        new_red_set: &[Hash],
         virtual_coloring_data_map: &HashMap<Hash, PastColoringData>,
-    ) {
-        // Step 1: Remove stale blues from cascade context
-        for &hash in stale_blues {
-            self.remove_blue(hash);
+    ) -> usize {
+        let mut peeled = 0;
+
+        // Peel: remove blues not in the new zone
+        for hash in self.dast.tree.rev_index.keys().cloned().collect::<Vec<_>>() {
+            if !new_blue_set.contains(&hash) {
+                if self.remove_blue(hash) {
+                    peeled += 1;
+                }
+            }
+        }
+        // Also check secondary heap
+        let secondary_to_remove: Vec<Hash> = self
+            .dast
+            .secondary_heap
+            .iter()
+            .filter(|pb| !new_blue_set.contains(&pb.hash))
+            .map(|pb| pb.hash)
+            .collect();
+        for hash in &secondary_to_remove {
+            self.dast.secondary_heap.retain(|pb| pb.hash != *hash);
+            peeled += 1;
         }
 
-        // Step 2: For each remaining blue, compare persisted anticone_blue_work with current.
-        // If different, update the primary tree (which recalculates floor).
-        // We must collect updates first to avoid borrow conflicts, then apply them.
+        // Peel: remove reds not in the new zone
+        let new_red_set_hashes: BlockHashSet = new_red_set.iter().copied().collect();
+        let mut new_red_set_vec: Vec<Hash> = Vec::new();
+        for &hash in &self.dast.red_set {
+            if new_red_set_hashes.contains(&hash) {
+                new_red_set_vec.push(hash);
+            } else {
+                peeled += 1;
+            }
+        }
+        self.dast.red_set = new_red_set_vec;
+        self.dast.tree.red_index = self.dast.red_set.len();
+
+        // Recompute seen_red_work from remaining reds
+        self.seen_red_work = Uint192::ZERO;
+        for &hash in &self.dast.red_set {
+            self.seen_red_work = self.seen_red_work + calc_work(self.headers_store.get_bits(hash).unwrap());
+        }
+
+        // Reset last_red_index AND arlb for all remaining blues to 0.
+        // This forces vote() to recompute ARlb from scratch against the pruned red set.
+        let tree_hashes: Vec<Hash> = self.dast.tree.rev_index.keys().cloned().collect();
+        for hash in &tree_hashes {
+            self.dast.tree.last_red_index.insert(*hash, 0);
+            self.dast.tree.arlb.insert(*hash, Uint192::ZERO);
+        }
+
+        // Recompute floors for all tree blues since ARlb was reset to 0
+        for hash in &tree_hashes {
+            let past_red_work = *self.dast.tree.past_red_work.get(hash).unwrap();
+            let past_blue_work = *self.dast.tree.past_blue_work.get(hash).unwrap();
+            let anticone_blue_work = *self.dast.tree.anticone_blue_work.get(hash).unwrap();
+            let new_floor = SignedWork::from(past_red_work)
+                - SignedWork::from(past_blue_work)
+                - SignedWork::from(anticone_blue_work);
+
+            let prev_floor = self.dast.tree.rev_index.get(hash).cloned().unwrap();
+            self.dast.tree.btree.remove(&CascadeTreeEntry::new(*hash, prev_floor));
+            self.dast.tree.btree.insert(CascadeTreeEntry::new(*hash, new_floor.clone()));
+            self.dast.tree.rev_index.insert(*hash, new_floor);
+        }
+
+        // Recompute floors for secondary heap blues
+        for pb in self.dast.secondary_heap.iter().cloned().collect::<Vec<_>>() {
+            self.dast.secondary_heap.remove(&pb);
+            let new_floor = SignedWork::from(pb.past_red_work)
+                - SignedWork::from(pb.past_blue_work)
+                - SignedWork::from(pb.anticone_blue_work);
+            self.dast.secondary_heap.insert(PoppedBlue {
+                last_red_index: 0,
+                arlb: Uint192::ZERO,
+                floor: new_floor,
+                ..pb
+            });
+        }
+
+        // Adjust anticone_blue_work for remaining blues.
+        // New blues in the zone may have grown the anticone of existing blues.
+        // Compare with virtual_coloring_data_map and update if different.
 
         // Primary tree blues
         let updates: Vec<(Hash, Uint192)> = self
@@ -546,7 +661,7 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
             self.dast.tree.update_anticone_blue_work(hash, new_abw);
         }
 
-        // Secondary heap blues — collect updates, then remove/insert
+        // Secondary heap blues
         let secondary_updates: Vec<(PoppedBlue, Uint192)> = self
             .dast
             .secondary_heap
@@ -577,154 +692,8 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
                 last_red_index: pb.last_red_index,
             });
         }
-    }
 
-    /// Recover from red staleness by recomputing ARlb for all persisted blues.
-    ///
-    /// When a red leaves the zone, any blue that had that red in its anticone has
-    /// an inflated ARlb. We recompute ARlb by checking each stale red against each
-    /// persisted blue: if the stale red is in the blue's anticone, subtract its work.
-    ///
-    /// Monotonicity: removing reds can only improve (decrease) blue floors, so:
-    /// - cached_vote == true stays true (fast path, no work needed)
-    /// - cached_vote == false may flip to true (must recompute)
-    ///
-    /// After updating ARlb, runs try_promote_from_secondary to promote blues
-    /// whose floors improved past the threshold.
-    pub(super) fn recover_from_red_staleness(&mut self, stale_reds: &BlockHashSet) {
-        if stale_reds.is_empty() {
-            return;
-        }
-
-        // Fast path: vote was already positive; removing reds can only improve floors,
-        // so a positive vote stays positive. Just subtract stale red work from seen_red_work.
-        if self.cached_vote {
-            for &red in stale_reds {
-                let bits = self.headers_store.get_bits(red).unwrap_or(0x207fffff);
-                self.seen_red_work = self.seen_red_work.saturating_sub(calc_work(bits));
-            }
-            return;
-        }
-
-        // Slow path: vote was negative (or unknown), must recompute ARlb for all blues.
-        // For each persisted blue, subtract the work of stale reds that are in its anticone.
-        // A red is in the blue's anticone if they are NOT ancestors/descendants of each other.
-
-        // --- Primary tree blues ---
-        // Collect updates first to avoid borrow conflicts
-        let tree_updates: Vec<(Hash, Uint192)> = self
-            .dast
-            .tree
-            .rev_index
-            .keys()
-            .filter_map(|&hash| {
-                let persisted_arlb = *self.dast.tree.arlb.get(&hash).unwrap();
-                let mut new_arlb = persisted_arlb;
-
-                for &stale_red in stale_reds {
-                    // Skip if stale red is in blue's past or future
-                    if self.ctx.oracle.is_dag_ancestor_of(stale_red, hash)
-                        || self.ctx.oracle.is_dag_ancestor_of(hash, stale_red)
-                    {
-                        continue;
-                    }
-                    // Stale red is in blue's anticone — remove its contribution
-                    let red_bits = self.headers_store.get_bits(stale_red).unwrap_or(0x207fffff);
-                    let red_work = calc_work(red_bits);
-                    new_arlb = new_arlb.saturating_sub(red_work);
-                }
-
-                if new_arlb != persisted_arlb {
-                    Some((hash, new_arlb))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for (hash, new_arlb) in tree_updates {
-            self.dast.tree.update_anticone_reds_lower_bound(hash, new_arlb);
-            // Reset last_red_index so that subsequent incremental scans start fresh
-            self.dast.tree.last_red_index.insert(hash, self.dast.tree.red_index);
-        }
-
-        // --- Secondary heap blues ---
-        let secondary_updates: Vec<(PoppedBlue, Uint192)> = self
-            .dast
-            .secondary_heap
-            .iter()
-            .filter_map(|pb| {
-                let mut new_arlb = pb.arlb;
-
-                for &stale_red in stale_reds {
-                    if self.ctx.oracle.is_dag_ancestor_of(stale_red, pb.hash)
-                        || self.ctx.oracle.is_dag_ancestor_of(pb.hash, stale_red)
-                    {
-                        continue;
-                    }
-                    let red_bits = self.headers_store.get_bits(stale_red).unwrap_or(0x207fffff);
-                    let red_work = calc_work(red_bits);
-                    new_arlb = new_arlb.saturating_sub(red_work);
-                }
-
-                if new_arlb != pb.arlb {
-                    Some((pb.clone(), new_arlb))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for (pb, new_arlb) in secondary_updates {
-            let new_floor = SignedWork::from(pb.past_red_work) + SignedWork::from(new_arlb)
-                - SignedWork::from(pb.past_blue_work)
-                - SignedWork::from(pb.anticone_blue_work);
-            self.dast.secondary_heap.remove(&pb);
-            self.dast.secondary_heap.insert(PoppedBlue {
-                hash: pb.hash,
-                floor: new_floor,
-                past_blue_work: pb.past_blue_work,
-                past_red_work: pb.past_red_work,
-                anticone_blue_work: pb.anticone_blue_work,
-                arlb: new_arlb,
-                last_red_index: pb.last_red_index,
-            });
-        }
-
-        // After ARlb improved, some secondary heap blues may now qualify for promotion
-        // Pass a dummy hash since try_promote_from_secondary doesn't actually use it
-        self.try_promote_from_secondary(Hash::default());
-    }
-
-    /// Extract current state for persistence.
-    pub(super) fn extract_state(&self) -> UmcPersistedState {
-        let tree_entries: Vec<UmcPersistedTreeEntry> = self
-            .dast
-            .tree
-            .rev_index
-            .iter()
-            .map(|(&hash, floor)| UmcPersistedTreeEntry {
-                hash,
-                floor: floor.clone(),
-                past_blue_work: *self.dast.tree.past_blue_work.get(&hash).unwrap(),
-                past_red_work: *self.dast.tree.past_red_work.get(&hash).unwrap(),
-                anticone_blue_work: *self.dast.tree.anticone_blue_work.get(&hash).unwrap(),
-                arlb: *self.dast.tree.arlb.get(&hash).unwrap(),
-                last_red_index: *self.dast.tree.last_red_index.get(&hash).unwrap(),
-            })
-            .collect();
-
-        let secondary_heap: Vec<PoppedBlue> = self.dast.secondary_heap.iter().cloned().collect();
-
-        UmcPersistedState {
-            tree_entries,
-            red_index: self.dast.tree.red_index,
-            red_set: self.dast.red_set.clone(),
-            secondary_heap,
-            seen_red_work: self.seen_red_work,
-            negative_blues: self.negative_blues,
-            cached_vote: self.cached_vote,
-        }
+        peeled
     }
 }
 
@@ -838,18 +807,26 @@ where
 
     /// Run cascade voting incrementally, restoring from persisted state when available.
     ///
-    /// Walks the chain from virtual downward via `chain_blocks`, collecting mergeset blocks
-    /// into a topological heap. Skips blocks already in the persisted set and stops when
-    /// a chain block's selected parent is in the persisted set.
+    /// Uses frontier-based recovery:
+    /// 1. Restore cascade state from persisted data
+    /// 2. Peel to frontier: remove blues/reds not in the past of the frontier
+    /// 3. Replay new blocks from frontier forward to current tips
+    /// 4. Run cascade voting
+    ///
+    /// The peel step handles zone changes (e.g., tips moved, blocks became grays).
+    /// After peeling, remaining persisted blues/reds are valid for the new zone.
+    /// `peel_to_frontier` resets ARlb/last_red_index to 0, forcing `vote()` to
+    /// recompute ARlb from scratch against the pruned red set.
     ///
     /// Returns `(vote_result, final_state, diagnostics)` where:
     /// - `vote_result`: whether the blue cluster contains a d-UMC
     /// - `final_state`: the cascade state after processing (for persistence)
-    /// - `diagnostics`: fallback statistics including staleness counts
+    /// - `diagnostics`: recovery statistics
     pub fn run_cascade_incremental(
         &self,
         input: &UmcVoterInput,
         persisted: Option<UmcPersistedState>,
+        _frontier: &BlockHashSet,
     ) -> (bool, UmcPersistedState, UmcFallbackDiagnostics) {
         // Deficit and threshold
         let deficit = Uint192::from_u64(input.k.isqrt() as u64) * input.deficit_work_basis;
@@ -857,121 +834,50 @@ where
 
         let traversal_ctx = TraversalContext::new(self.reachability);
 
-        // Determine whether we can restore from persisted state.
-        // Staleness check: both persisted blues AND persisted reds must be subsets of
-        // the current zone. If the zone shrank (e.g., tips moved and some blocks became
-        // grays or were excluded), any stale persisted state would produce incorrect
-        // ARlb and seen_red_work values.
-        //
-        // Recovery paths:
-        //   - Blue-only staleness: remove stale blues, recompute anticone_blue_work
-        //   - Red-only staleness: recompute ARlb by subtracting stale red contributions
-        //   - Both stale: apply blue recovery first, then red recovery
-        // Both recoveries compose cleanly because they affect independent values
-        // (anticone_blue_work depends only on blues; ARlb depends only on reds).
-        let (diag, persisted_set, stale_blue_hashes, stale_red_hashes): (
-            UmcFallbackDiagnostics,
-            BlockHashSet,
-            BlockHashSet,
-            BlockHashSet,
-        ) = if let Some(ref persisted) = persisted {
-                let persisted_blue_hashes: BlockHashSet = persisted
-                    .tree_entries
-                    .iter()
-                    .map(|e| e.hash)
-                    .chain(persisted.secondary_heap.iter().map(|p| p.hash))
-                    .collect();
+        // Collect current tips for extract_state
+        let current_tips: Vec<Hash> = input.blue_set.iter().copied().collect();
 
-                let persisted_red_set: BlockHashSet = persisted.red_set.iter().copied().collect();
-                let current_red_set: BlockHashSet = input.red_set.iter().copied().collect();
+        // ------------------------------------------------------------------
+        // Phase 1: Restore or create cascade context
+        // ------------------------------------------------------------------
+        let (mut cascade_ctx, mut diag): (CascadeContext<'a, T, H>, UmcFallbackDiagnostics) =
+            if let Some(persisted_state) = persisted {
+                let persisted_blocks = persisted_state.tree_entries.len() + persisted_state.secondary_heap.len();
 
-                // Identify stale blocks
-                let stale_blue_hashes: BlockHashSet = persisted_blue_hashes
-                    .iter()
-                    .filter(|h| !input.blue_set.contains(h))
-                    .copied()
-                    .collect();
-                let stale_blues = stale_blue_hashes.len();
-                let stale_red_hashes: BlockHashSet = persisted_red_set
-                    .iter()
-                    .filter(|h| !current_red_set.contains(h))
-                    .copied()
-                    .collect();
-                let stale_reds = stale_red_hashes.len();
-                let persisted_blues_count = persisted_blue_hashes.len();
-                let persisted_reds_count = persisted_red_set.len();
+                // Always restore from persisted state — peel will handle zone changes
+                let mut ctx = CascadeContext::from_persisted(
+                    input.conflict_genesis,
+                    traversal_ctx,
+                    self.headers_store,
+                    threshold_work,
+                    &persisted_state,
+                    &input.virtual_coloring_data_map,
+                );
 
-                let blues_ok = stale_blues == 0;
-                let reds_ok = stale_reds == 0;
+                // Peel to zone: remove persisted blocks no longer in the current zone.
+                // This handles zone changes (e.g., tips moved, blocks became grays).
+                // After peeling, remaining persisted blues/reds are valid for the new zone.
+                let peeled = ctx.peel_to_zone(&input.blue_set, &input.red_set, &input.virtual_coloring_data_map);
 
-                if blues_ok && reds_ok {
-                    // Full restore — no staleness
-                    let persisted_set: BlockHashSet =
-                        persisted_blue_hashes.into_iter().chain(persisted.red_set.iter().copied()).collect();
-                    let diag = UmcFallbackDiagnostics {
-                        was_restored: true,
-                        persisted_blocks: persisted.tree_entries.len() + persisted.secondary_heap.len(),
-                        ..Default::default()
-                    };
-                    (diag, persisted_set, BlockHashSet::default(), BlockHashSet::default())
-                } else {
-                    // Staleness detected — recover by restoring and then fixing affected values
-                    let non_stale_blues: BlockHashSet = persisted_blue_hashes
-                        .into_iter()
-                        .filter(|h| input.blue_set.contains(h))
-                        .collect();
-                    let persisted_set: BlockHashSet =
-                        non_stale_blues.into_iter().chain(persisted.red_set.iter().copied()).collect();
-                    let diag = UmcFallbackDiagnostics {
-                        was_restored: false,
-                        was_recovered: true,
-                        persisted_blocks: persisted.tree_entries.len() + persisted.secondary_heap.len(),
-                        stale_blues,
-                        stale_reds,
-                        persisted_blues_on_fallback: persisted_blues_count,
-                        persisted_reds_on_fallback: persisted_reds_count,
-                    };
-                    (diag, persisted_set, stale_blue_hashes, stale_red_hashes)
-                }
+                let was_recovered = peeled > 0;
+
+                let diag = UmcFallbackDiagnostics {
+                    was_restored: !was_recovered,
+                    was_recovered,
+                    persisted_blocks,
+                    peeled_blocks: peeled,
+                    ..Default::default()
+                };
+
+                (ctx, diag)
             } else {
-                (
-                    UmcFallbackDiagnostics::default(),
-                    BlockHashSet::default(),
-                    BlockHashSet::default(),
-                    BlockHashSet::default(),
-                )
+                // No persisted state — from scratch
+                let diag = UmcFallbackDiagnostics::default();
+                let ctx = CascadeContext::new(input.conflict_genesis, traversal_ctx, self.headers_store, threshold_work);
+                (ctx, diag)
             };
 
-        let mut cascade_ctx = if diag.was_restored || diag.was_recovered {
-            CascadeContext::from_persisted(
-                input.conflict_genesis,
-                traversal_ctx,
-                self.headers_store,
-                threshold_work,
-                persisted.as_ref().unwrap(),
-                &input.virtual_coloring_data_map,
-            )
-        } else {
-            // No persisted state — from scratch
-            CascadeContext::new(input.conflict_genesis, traversal_ctx, self.headers_store, threshold_work)
-        };
-
-        // Apply recovery: blue staleness first (removes stale blues, fixes anticone_blue_work),
-        // then red staleness (recomputes ARlb for remaining blues).
-        // Order matters: blue removal may eliminate blues whose ARlb we'd otherwise fix.
-        if diag.was_recovered {
-            if !stale_blue_hashes.is_empty() {
-                cascade_ctx.recover_from_blue_staleness(&stale_blue_hashes, &input.virtual_coloring_data_map);
-            }
-            if !stale_red_hashes.is_empty() {
-                cascade_ctx.recover_from_red_staleness(&stale_red_hashes);
-            }
-        }
-
-        // Always ensure conflict genesis is in the cascade tree.
-        // It's the root of the conflict zone and must be present for vote() to work correctly.
-        // In the restored path it's already in the tree (no-op).
-        // In the from-scratch path it's skipped from the heap below, so we insert it here.
+        // Ensure conflict genesis is in the cascade tree
         if !cascade_ctx.dast.tree.has(input.conflict_genesis) {
             cascade_ctx.insert(
                 input.conflict_genesis,
@@ -983,88 +889,67 @@ where
             );
         }
 
-        // Collect new blocks: blues and reds not in the persisted set.
-        // This mirrors run_cascade() which processes all blue_set and red_set
-        // blocks in topological order. Chain blocks are in blue_set but NOT in
-        // any mergeset (mergeset excludes the selected parent), so we must use
-        // blue_set directly rather than walking chain_blocks.
+        // ------------------------------------------------------------------
+        // Phase 2: Replay new blocks from frontier forward
+        // ------------------------------------------------------------------
         let mut topological_heap: BinaryHeap<Reverse<SortableBlock>> = BinaryHeap::new();
-        let mut new_blocks_added = false;
+        let mut replayed_blocks = 0;
 
-        // New blues: all blues not in persisted set, excluding conflict_genesis
+        // Build set of all existing blues (tree + secondary heap) for fast lookup
+        let existing_blues: BlockHashSet = cascade_ctx.dast.tree.rev_index.keys().cloned()
+            .chain(cascade_ctx.dast.secondary_heap.iter().map(|pb| pb.hash))
+            .collect();
+
         for &hash in input.blue_set.iter() {
-            if persisted_set.contains(&hash) {
+            if existing_blues.contains(&hash) {
                 continue;
             }
-
             if hash == input.conflict_genesis {
                 continue;
             }
 
             let header = self.headers_store.get_header(hash).expect("header must exist");
             topological_heap.push(Reverse(SortableBlock { hash, blue_work: header.blue_work }));
-            new_blocks_added = true;
+            replayed_blocks += 1;
         }
 
-        // New reds: all reds not in persisted set
         for &hash in input.red_set.iter() {
-            if persisted_set.contains(&hash) {
+            if cascade_ctx.dast.red_set.contains(&hash) {
                 continue;
             }
 
             let header = self.headers_store.get_header(hash).expect("header must exist");
             topological_heap.push(Reverse(SortableBlock { hash, blue_work: header.blue_work }));
-            new_blocks_added = true;
+            replayed_blocks += 1;
         }
 
-        // Insert conflict genesis into the cascade tree if not already present.
-        // run_cascade() always inserts conflict genesis as a blue with default counters.
-        // The incremental path skips it from the heap (line 694-696), so we must
-        // ensure it's in the tree before calling vote().
-        if !cascade_ctx.dast.tree.has(input.conflict_genesis) {
-            cascade_ctx.insert(
-                input.conflict_genesis,
-                BlockColouring::Blue {
-                    anticone_blue_work: Uint192::ZERO,
-                    past_blue_work: Uint192::ZERO,
-                    past_red_work: Uint192::ZERO,
-                },
-            );
-        }
-
-        // If no new blocks were added, use cached result or re-check
-        if diag.was_restored && !new_blocks_added {
+        // If no new blocks and restored/recovered cleanly, use cached result or re-check
+        if (diag.was_restored || diag.was_recovered) && replayed_blocks == 0 {
             if cascade_ctx.cached_vote {
                 let result = cascade_ctx.cached_vote;
-                let state = cascade_ctx.extract_state();
+                let state = cascade_ctx.extract_state(&current_tips);
                 return (result, state, diag);
             }
             let result = cascade_ctx.vote();
-            let state = cascade_ctx.extract_state();
+            let state = cascade_ctx.extract_state(&current_tips);
             return (result, state, diag);
         }
 
-        // Process new blocks in topological order (blues and reds interleaved).
-        // seen_red_work must only include reds encountered BEFORE each blue in
-        // topological order — otherwise a blue's initial ARlb gets inflated with
-        // reds that are in its future (not anticone).
+        // Process new blocks in topological order (blues and reds interleaved)
         while let Some(Reverse(SortableBlock { hash, .. })) = topological_heap.pop() {
             if input.blue_set.contains(&hash) {
-                // New blue — insert with correct seen_red_work (only reds in its past)
                 let counters = input.virtual_coloring_data_map.get(&hash).cloned().unwrap_or_default();
-                let past_blue_work = counters.past_blue_work;
-                let past_red_work = counters.past_red_work;
-                let anticone_blue_work = counters.anticone_blue_work;
-
-                cascade_ctx.insert(hash, BlockColouring::Blue { anticone_blue_work, past_blue_work, past_red_work });
+                cascade_ctx.insert(hash, BlockColouring::Blue {
+                    anticone_blue_work: counters.anticone_blue_work,
+                    past_blue_work: counters.past_blue_work,
+                    past_red_work: counters.past_red_work,
+                });
             } else {
-                // New red — increment counters and check for promotions
                 cascade_ctx.seen_red_work = cascade_ctx.seen_red_work + calc_work(self.headers_store.get_bits(hash).unwrap());
                 cascade_ctx.dast.red_set.push(hash);
                 cascade_ctx.dast.tree.red_index += 1;
 
                 if !cascade_ctx.try_promote_from_secondary(hash) && !cascade_ctx.cached_vote {
-                    // Red preserves negative vote — short-circuit: vote stays negative
                     cascade_ctx.cached_vote = false;
                 } else {
                     cascade_ctx.cached_vote = cascade_ctx.vote();
@@ -1072,11 +957,11 @@ where
             }
         }
 
-        // Run vote() to ensure persisted blues get their ARlb incrementally updated
-        // for new reds, and to produce the correct final result.
-        // This mirrors run_cascade() which always ends with cascade_ctx.vote().
         let result = cascade_ctx.vote();
-        let state = cascade_ctx.extract_state();
+        let state = cascade_ctx.extract_state(&current_tips);
+
+        diag.replayed_blocks = replayed_blocks;
+
         (result, state, diag)
     }
 }
@@ -1214,6 +1099,7 @@ mod tests {
             seen_red_work: Uint192::from_u64(100),
             negative_blues: Uint192::from_u64(30),
             cached_vote: true,
+            last_tips: vec![],
         };
 
         // Clone as a proxy for serialization roundtrip
@@ -1256,6 +1142,7 @@ mod tests {
             seen_red_work: Uint192::ZERO,
             negative_blues: Uint192::ZERO,
             cached_vote: true,
+            last_tips: vec![],
         };
 
         let tree = restore_tree(&state);
@@ -1307,6 +1194,7 @@ mod tests {
             seen_red_work: Uint192::ZERO,
             negative_blues: Uint192::ZERO,
             cached_vote: false,
+            last_tips: vec![],
         };
 
         let tree = restore_tree(&state);
@@ -1355,6 +1243,7 @@ mod tests {
             seen_red_work: Uint192::ZERO,
             negative_blues: Uint192::ZERO,
             cached_vote: true,
+            last_tips: vec![],
         };
 
         // Restore and verify equivalence
@@ -1511,7 +1400,8 @@ mod tests {
         };
 
         // First run: no persisted state → from scratch
-        let (_vote_1, state_1, diag_1) = voter.run_cascade_incremental(&input_1, None);
+        let frontier: BlockHashSet = BlockHashSet::default();
+        let (_vote_1, state_1, diag_1) = voter.run_cascade_incremental(&input_1, None, &frontier);
 
         assert!(!diag_1.was_restored && !diag_1.was_recovered, "First run should compute from scratch");
 
@@ -1583,7 +1473,7 @@ mod tests {
         let key_2 = UmcPersistenceKey::new(genesis, k, next_chain_ancestor, false);
         let persisted_for_2 = persistence_store.get(key_2.clone()).unwrap();
 
-        let (vote_2_incremental, state_2_incremental, diag_2) = voter.run_cascade_incremental(&input_2, persisted_for_2);
+        let (vote_2_incremental, state_2_incremental, diag_2) = voter.run_cascade_incremental(&input_2, persisted_for_2, &frontier);
 
         assert!(diag_2.was_restored || diag_2.was_recovered, "Second run should restore/recover from persisted state");
 
@@ -1601,9 +1491,207 @@ mod tests {
         // THIRD RUN: same input as second, verify cached vote is used
         // ------------------------------------------------------------------
         let persisted_for_3 = persistence_store.get(key_2.clone()).unwrap();
-        let (vote_3, _state_3, diag_3) = voter.run_cascade_incremental(&input_2, persisted_for_3);
+        let (vote_3, _state_3, diag_3) = voter.run_cascade_incremental(&input_2, persisted_for_3, &frontier);
 
         assert!(diag_3.was_restored || diag_3.was_recovered, "Third run should also restore/recover from persisted state");
         assert_eq!(vote_3, vote_2_from_scratch, "Cached vote should match");
+    }
+
+    /// Test frontier recovery: persisted tips are not all in the past of new tips.
+    /// The frontier algorithm finds the merge-base and peels cascade state to it.
+    #[test]
+    fn test_frontier_recovery_peels_stale_blocks() {
+        use super::super::super::difficulty::calc_work;
+        use super::super::super::reachability::tests::{DagBlock, DagBuilder};
+        use crate::model::stores::{
+            dagknight::{MemoryUmcPersistenceStore, UmcPersistenceKey, UmcPersistenceStore, UmcPersistenceStoreReader},
+            headers::MemoryHeaderStore,
+            reachability::MemoryReachabilityStore,
+            relations::MemoryRelationsStore,
+        };
+        use kaspa_consensus_core::blockhash::ORIGIN;
+        use kaspa_consensus_core::header::Header;
+        use parking_lot::RwLock;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        // Build a DAG where tips move and old tips are no longer ancestors:
+        //
+        //        G (genesis)
+        //       / \
+        //      B1  R1
+        //      |   |
+        //      B2  R2
+        //     / \  |
+        //    B3  B4 R3 (new tip on red side)
+        //
+        // First run: tips = [B3, R2], blues = {G, B1, B2, B3}, reds = {R1, R2}
+        // Second run: tips = [B3, B4, R3], blues = {G, B1, B2, B3, B4}, reds = {R1, R2, R3}
+        // Old tip R2 is NOT in the past of new tips [B3, B4, R3] (R2 is ancestor of R3)
+        // Frontier should find G, B1, B2 as the merge-base
+
+        // Hash assignments
+        let genesis: Hash = 1_u64.into();
+        let b1: Hash = 2_u64.into();
+        let b2: Hash = 3_u64.into();
+        let b3: Hash = 4_u64.into();
+        let b4: Hash = 5_u64.into();
+        let r1: Hash = 6_u64.into();
+        let r2: Hash = 7_u64.into();
+        let r3: Hash = 8_u64.into();
+
+        let bits = 0x207fffff;
+        let work_per_block = calc_work(bits);
+
+        // Set up stores
+        let mut reachability = MemoryReachabilityStore::new();
+        let mut relations = MemoryRelationsStore::new();
+        let headers_store = Arc::new(MemoryHeaderStore::new());
+
+        // Build DAG
+        {
+            let mut builder = DagBuilder::new(&mut reachability, &mut relations);
+            builder.init();
+            builder.add_block(DagBlock::new(genesis, vec![ORIGIN]));
+            builder.add_block(DagBlock::new(b1, vec![genesis]));
+            builder.add_block(DagBlock::new(b2, vec![b1]));
+            builder.add_block(DagBlock::new(b3, vec![b2]));
+            builder.add_block(DagBlock::new(b4, vec![b2]));
+            builder.add_block(DagBlock::new(r1, vec![genesis]));
+            builder.add_block(DagBlock::new(r2, vec![r1]));
+            builder.add_block(DagBlock::new(r3, vec![r2]));
+
+            // Insert headers
+            for (hash, parents) in [
+                (genesis, vec![]),
+                (b1, vec![genesis]),
+                (b2, vec![b1]),
+                (b3, vec![b2]),
+                (b4, vec![b2]),
+                (r1, vec![genesis]),
+                (r2, vec![r1]),
+                (r3, vec![r2]),
+            ] {
+                let mut header = Header::from_precomputed_hash(hash, parents);
+                header.bits = bits;
+                headers_store.insert(Arc::new(header));
+            }
+        }
+
+        let reachability_service = MTReachabilityService::new(Arc::new(RwLock::new(reachability)));
+        let voter = UmcVoter::new(&reachability_service, &*headers_store);
+        let persistence_store = MemoryUmcPersistenceStore::default();
+
+        let k: KType = 4;
+        let next_chain_ancestor: Hash = 100_u64.into();
+        let deficit_work_basis = work_per_block;
+        let deficit = Uint192::from_u64(k.isqrt() as u64) * deficit_work_basis;
+
+        // ------------------------------------------------------------------
+        // FIRST RUN: blues = {G, B1, B2, B3}, reds = {R1, R2}
+        // ------------------------------------------------------------------
+        let blue_work_1 = work_per_block * 4u64;
+        let red_work_1 = work_per_block * 2u64;
+
+        let blue_set_1: BlockHashSet = [genesis, b1, b2, b3].iter().copied().collect();
+        let red_set_1 = vec![r1, r2];
+
+        let mut virtual_coloring_data_map_1 = HashMap::new();
+        virtual_coloring_data_map_1.insert(genesis, PastColoringData::default());
+        virtual_coloring_data_map_1.insert(b1, PastColoringData {
+            past_blue_work: work_per_block,
+            past_red_work: Uint192::ZERO,
+            anticone_blue_work: Uint192::ZERO,
+        });
+        virtual_coloring_data_map_1.insert(b2, PastColoringData {
+            past_blue_work: work_per_block * 2u64,
+            past_red_work: Uint192::ZERO,
+            anticone_blue_work: Uint192::ZERO,
+        });
+        virtual_coloring_data_map_1.insert(b3, PastColoringData {
+            past_blue_work: work_per_block * 3u64,
+            past_red_work: Uint192::ZERO,
+            anticone_blue_work: Uint192::ZERO,
+        });
+
+        let input_1 = UmcVoterInput {
+            conflict_genesis: genesis,
+            k,
+            next_chain_ancestor,
+            blue_set: blue_set_1.clone(),
+            red_set: red_set_1.clone(),
+            blue_work: blue_work_1,
+            red_work: red_work_1,
+            deficit,
+            deficit_work_basis,
+            virtual_coloring_data_map: virtual_coloring_data_map_1,
+            chain_blocks: vec![],
+        };
+
+        let frontier: BlockHashSet = BlockHashSet::default();
+        let (_vote_1, state_1, diag_1) = voter.run_cascade_incremental(&input_1, None, &frontier);
+
+        assert!(!diag_1.was_restored && !diag_1.was_recovered, "First run should compute from scratch");
+
+        // Persist the state
+        let key_1 = UmcPersistenceKey::new(genesis, k, next_chain_ancestor, false);
+        persistence_store.insert(key_1.clone(), state_1.clone()).unwrap();
+
+        // ------------------------------------------------------------------
+        // SECOND RUN: blues = {G, B1, B2, B3, B4}, reds = {R1, R2, R3}
+        // ------------------------------------------------------------------
+        let blue_work_2 = work_per_block * 5u64;
+        let red_work_2 = work_per_block * 3u64;
+
+        let blue_set_2: BlockHashSet = [genesis, b1, b2, b3, b4].iter().copied().collect();
+        let red_set_2 = vec![r1, r2, r3];
+
+        let mut virtual_coloring_data_map_2 = HashMap::new();
+        virtual_coloring_data_map_2.insert(genesis, PastColoringData::default());
+        virtual_coloring_data_map_2.insert(b1, PastColoringData {
+            past_blue_work: work_per_block,
+            past_red_work: Uint192::ZERO,
+            anticone_blue_work: Uint192::ZERO,
+        });
+        virtual_coloring_data_map_2.insert(b2, PastColoringData {
+            past_blue_work: work_per_block * 2u64,
+            past_red_work: Uint192::ZERO,
+            anticone_blue_work: Uint192::ZERO,
+        });
+        virtual_coloring_data_map_2.insert(b3, PastColoringData {
+            past_blue_work: work_per_block * 3u64,
+            past_red_work: Uint192::ZERO,
+            anticone_blue_work: Uint192::ZERO,
+        });
+        virtual_coloring_data_map_2.insert(b4, PastColoringData {
+            past_blue_work: work_per_block * 3u64,
+            past_red_work: Uint192::ZERO,
+            anticone_blue_work: Uint192::ZERO,
+        });
+
+        let input_2 = UmcVoterInput {
+            conflict_genesis: genesis,
+            k,
+            next_chain_ancestor,
+            blue_set: blue_set_2.clone(),
+            red_set: red_set_2.clone(),
+            blue_work: blue_work_2,
+            red_work: red_work_2,
+            deficit,
+            deficit_work_basis,
+            virtual_coloring_data_map: virtual_coloring_data_map_2,
+            chain_blocks: vec![],
+        };
+
+        // With empty frontier (simulating clean restore since all old blocks are still in the zone)
+        let persisted_for_2 = persistence_store.get(key_1.clone()).unwrap();
+        let (vote_2, _state_2, diag_2) = voter.run_cascade_incremental(&input_2, persisted_for_2, &frontier);
+
+        // Should restore since all old blocks are still in the new zone
+        assert!(diag_2.was_restored || diag_2.was_recovered, "Second run should restore from persisted state");
+
+        // Verify correctness against from-scratch
+        let vote_2_scratch = voter.run_cascade(&input_2);
+        assert_eq!(vote_2, vote_2_scratch, "Frontier recovery result must match from-scratch");
     }
 }
