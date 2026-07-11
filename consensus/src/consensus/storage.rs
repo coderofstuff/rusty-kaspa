@@ -6,7 +6,7 @@ use crate::{
         block_transactions::DbBlockTransactionsStore,
         block_window_cache::BlockWindowCacheStore,
         daa::DbDaaStore,
-        dagknight::DbDagknightStore,
+        dagknight::{DbDagknightStore, DbUmcPersistenceStore},
         depth::DbDepthStore,
         ghostdag::{CompactGhostdagData, DbGhostdagStore},
         headers::{CompactHeaderData, DbHeadersStore},
@@ -50,6 +50,7 @@ pub struct ConsensusStorage {
     pub virtual_stores: Arc<RwLock<VirtualStores>>,
     pub selected_chain_store: Arc<RwLock<DbSelectedChainStore>>,
     pub dagknight_store: Option<Arc<DbDagknightStore>>,
+    pub umc_persistence_store: Option<Arc<DbUmcPersistenceStore>>,
 
     // Append-only stores
     pub topology_ghostdag_store: Arc<DbGhostdagStore>,
@@ -250,6 +251,13 @@ impl ConsensusStorage {
         // TODO[DK]: Use a config or ForkActivation to gate this
         let dagknight_store = Some(Arc::new(DbDagknightStore::new(db.clone(), dagknight_builder.build())));
 
+        // UMC persistence store for incremental cascade voting
+        let umc_persistence_builder = PolicyBuilder::new().bytes_budget(scaled(2_000_000)).tracked_bytes();
+        let umc_persistence_store = Some(Arc::new(DbUmcPersistenceStore::new(
+            db.clone(),
+            umc_persistence_builder.build(),
+        )));
+
         Arc::new(Self {
             _db: db,
             statuses_store,
@@ -277,6 +285,7 @@ impl ConsensusStorage {
             block_window_cache_for_past_median_time,
             lkg_virtual_state,
             dagknight_store,
+            umc_persistence_store,
         })
     }
 }

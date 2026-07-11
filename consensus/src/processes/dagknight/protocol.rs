@@ -17,7 +17,10 @@ use crate::{
     model::{
         services::reachability::{MTReachabilityService, ReachabilityService},
         stores::{
-            dagknight::{ColoringData, DagknightStore, DagknightStoreReader, PastColoringData},
+            dagknight::{
+                ColoringData, DagknightStore, DagknightStoreReader, PastColoringData, UmcPersistenceKey,
+                UmcPersistenceStore,
+            },
             headers::HeaderStoreReader,
             reachability::ReachabilityStoreReader,
             relations::RelationsStoreReader,
@@ -95,6 +98,7 @@ pub struct DagknightExecutor<
     pub headers_store: Arc<O>,
     pub relations_store: Arc<RwLock<D>>,
     pub reachability_service: MTReachabilityService<R>,
+    pub umc_persistence_store: Option<Arc<dyn UmcPersistenceStore + Send + Sync>>,
 }
 
 #[derive(Clone)]
@@ -285,6 +289,9 @@ impl<
     /// Gray reds (chain ancestors of the winning subgroup's next chain ancestor) are excluded.
     ///
     /// Delegates to [UmcVoter] in the `umc_voting` module.
+    ///
+    /// If persistence store is available, attempts to restore from persisted state and
+    /// only processes new blocks (delta computation).
     fn incremental_umc_voting(
         &self,
         conflict_genesis: Hash,
@@ -386,8 +393,8 @@ impl<
             conflict_genesis,
             k,
             next_chain_ancestor,
-            blue_set,
-            red_set,
+            blue_set: blue_set.clone(),
+            red_set: red_set.clone(),
             blue_work,
             red_work,
             deficit,
@@ -395,8 +402,29 @@ impl<
             virtual_coloring_data_map,
         };
 
+        // Try incremental voting with persistence
         let voter = UmcVoter::new(&self.reachability_service, &*self.headers_store);
-        voter.run_cascade(&input)
+
+        if let Some(store) = &self.umc_persistence_store {
+            // Attempt to load persisted state
+            let key = UmcPersistenceKey::new(conflict_genesis, k, next_chain_ancestor, false);
+            let persisted = match store.get(key.clone()) {
+                Ok(Some(state)) => Some(state),
+                Ok(None) | Err(_) => None, // Fallback to from-scratch on any error
+            };
+
+            let (result, new_state, _was_restored) = voter.run_cascade_incremental(&input, persisted);
+
+            // Persist updated state
+            if let Err(e) = store.insert(key, new_state) {
+                trace!("Failed to persist UMC state: {:?}", e);
+            }
+
+            result
+        } else {
+            // No persistence store — fall back to from-scratch
+            voter.run_cascade(&input)
+        }
     }
 
     /// Tie-breaking rule in case of multiple winning subgroups with the same rank value.
@@ -680,6 +708,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            umc_persistence_store: None,
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
@@ -883,6 +912,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            umc_persistence_store: None,
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
@@ -962,6 +992,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            umc_persistence_store: None,
         };
 
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);

@@ -1,6 +1,8 @@
 use core::fmt::{self, Display};
 use core::ops::{Add, Div, Mul, Sub};
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 #[derive(Copy, Clone, Debug)]
 pub struct SignedInteger<T> {
     abs: T,
@@ -121,6 +123,64 @@ impl<T: PartialOrd + PartialEq<u64>> PartialOrd for SignedInteger<T> {
             (true, false) => Some(std::cmp::Ordering::Less),
             (false, true) => Some(std::cmp::Ordering::Greater),
         }
+    }
+}
+
+impl<T: Serialize> Serialize for SignedInteger<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("SignedInteger", 2)?;
+        state.serialize_field("abs", &self.abs)?;
+        state.serialize_field("negative", &self.negative)?;
+        state.end()
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for SignedInteger<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, Visitor};
+        use std::fmt;
+
+        struct SignedIntegerVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for SignedIntegerVisitor<T> {
+            type Value = SignedInteger<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a struct SignedInteger")
+            }
+
+            fn visit_map<V: MapAccess<'de>>(self, mut map: V) -> Result<SignedInteger<T>, V::Error> {
+                let mut abs: Option<T> = None;
+                let mut negative: Option<bool> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "abs" => {
+                            if abs.is_some() {
+                                return Err(de::Error::duplicate_field("abs"));
+                            }
+                            abs = Some(map.next_value()?);
+                        }
+                        "negative" => {
+                            if negative.is_some() {
+                                return Err(de::Error::duplicate_field("negative"));
+                            }
+                            negative = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+
+                let abs = abs.ok_or_else(|| de::Error::missing_field("abs"))?;
+                let negative = negative.unwrap_or(false);
+                Ok(SignedInteger { abs, negative })
+            }
+        }
+
+        deserializer.deserialize_struct("SignedInteger", &["abs", "negative"], SignedIntegerVisitor(std::marker::PhantomData))
     }
 }
 

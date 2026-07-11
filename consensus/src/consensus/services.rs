@@ -144,6 +144,10 @@ impl ConsensusServices {
             headers_store: storage.headers_store.clone(),
             relations_store: Arc::new(RwLock::new(relations_service.clone())),
             reachability_service: reachability_service.clone(),
+            umc_persistence_store: storage
+                .umc_persistence_store
+                .clone()
+                .map(|s| s as Arc<dyn crate::model::stores::dagknight::UmcPersistenceStore + Send + Sync>),
         });
 
         let coinbase_manager = CoinbaseManager::new(

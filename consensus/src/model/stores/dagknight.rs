@@ -188,9 +188,9 @@ impl DagknightKey {
     }
 }
 
-impl ToString for DagknightKey {
-    fn to_string(&self) -> String {
-        format!("{:?}", &self.bytes)
+impl std::fmt::Display for DagknightKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", &self.bytes)
     }
 }
 
@@ -370,9 +370,398 @@ impl DagknightStore for DbDagknightStore {
     }
 }
 
+// ============================================================================
+// UMC Persistence Store — stores cascade voting state for incremental UMC
+// ============================================================================
+
+use kaspa_math::{Uint192, int::SignedInteger};
+use parking_lot::RwLock;
+
+/// Signed work value (difference of two Uint192 work values).
+type SignedWork = SignedInteger<Uint192>;
+
+/// A blue block that was popped from the primary tree as "negative".
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PoppedBlue {
+    pub hash: Hash,
+    pub floor: SignedWork,
+    pub past_blue_work: Uint192,
+    pub past_red_work: Uint192,
+    pub anticone_blue_work: Uint192,
+    pub arlb: Uint192,
+    pub last_red_index: usize,
+}
+
+impl PartialEq for PoppedBlue {
+    fn eq(&self, other: &Self) -> bool {
+        self.floor == other.floor && self.hash == other.hash
+    }
+}
+
+impl Eq for PoppedBlue {}
+
+impl PartialOrd for PoppedBlue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PoppedBlue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.floor.partial_cmp(&other.floor).unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| self.hash.cmp(&other.hash))
+    }
+}
+
+/// Serialized entry in the cascade tree (primary heap).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UmcPersistedTreeEntry {
+    pub hash: Hash,
+    pub floor: SignedWork,
+    pub past_blue_work: Uint192,
+    pub past_red_work: Uint192,
+    pub anticone_blue_work: Uint192,
+    pub arlb: Uint192,
+    pub last_red_index: usize,
+}
+
+/// Full persisted state of the cascade voting process.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UmcPersistedState {
+    /// Entries in the primary cascade tree (btree heap)
+    pub tree_entries: Vec<UmcPersistedTreeEntry>,
+    /// Current red index in the tree
+    pub red_index: usize,
+    /// Red blocks in insertion order
+    pub red_set: Vec<Hash>,
+    /// Blues popped to secondary heap
+    pub secondary_heap: Vec<PoppedBlue>,
+    /// Running total of red work seen
+    pub seen_red_work: Uint192,
+    /// Accumulated work of negative blues
+    pub negative_blues: Uint192,
+    /// Cached vote result
+    pub cached_vote: bool,
+    /// Hash of the tip-set at time of persistence, used for stronger staleness detection.
+    /// If the current tip-set hash differs from this value, the persisted state is stale.
+    pub tip_set_hash: Hash,
+}
+
+impl MemSizeEstimator for UmcPersistedState {
+    fn estimate_mem_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.tree_entries.len() * size_of::<UmcPersistedTreeEntry>()
+            + self.red_set.len() * size_of::<Hash>()
+            + self.secondary_heap.len() * size_of::<PoppedBlue>()
+            + size_of::<Hash>()
+    }
+}
+
+/// Persistence key for UMC cascade state.
+/// Identifies the cascade voting state for a specific conflict zone POV.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UmcPersistenceKey {
+    pub conflict_genesis: Hash,
+    pub k: KType,
+    pub next_chain_ancestor: Hash,
+    pub free_search: bool,
+    /// Precomputed bytes: conflict_genesis || k(u16 BE) || next_chain_ancestor || free_search
+    bytes: [u8; kaspa_hashes::HASH_SIZE * 2 + 3],
+}
+
+impl UmcPersistenceKey {
+    /// Create a new persistence key.
+    pub fn new(conflict_genesis: Hash, k: KType, next_chain_ancestor: Hash, free_search: bool) -> Self {
+        const HASH_SIZE: usize = kaspa_hashes::HASH_SIZE;
+        let mut bytes = [0u8; HASH_SIZE * 2 + 3];
+
+        bytes[..HASH_SIZE].copy_from_slice(conflict_genesis.as_ref());
+
+        let k_be = k.to_be_bytes();
+        bytes[HASH_SIZE] = k_be[0];
+        bytes[HASH_SIZE + 1] = k_be[1];
+
+        bytes[(HASH_SIZE + 2)..(HASH_SIZE + 2 + HASH_SIZE)].copy_from_slice(next_chain_ancestor.as_ref());
+        bytes[(2 * HASH_SIZE) + 2] = if free_search { 1 } else { 0 };
+
+        Self { conflict_genesis, k, next_chain_ancestor, free_search, bytes }
+    }
+}
+
+impl AsRef<[u8]> for UmcPersistenceKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl std::fmt::Display for UmcPersistenceKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", &self.bytes)
+    }
+}
+
+/// Reader trait for UMC persistence store.
+pub trait UmcPersistenceStoreReader {
+    /// Get persisted state by key.
+    fn get(&self, key: UmcPersistenceKey) -> Result<Option<UmcPersistedState>, StoreError>;
+
+    /// Check if key exists.
+    fn has(&self, key: UmcPersistenceKey) -> Result<bool, StoreError>;
+}
+
+/// Writer trait for UMC persistence store.
+pub trait UmcPersistenceStore: UmcPersistenceStoreReader {
+    /// Insert or update persisted state.
+    fn insert(&self, key: UmcPersistenceKey, state: UmcPersistedState) -> Result<(), StoreError>;
+
+    /// Delete persisted state by key.
+    fn delete(&self, key: UmcPersistenceKey) -> Result<(), StoreError>;
+
+    /// Delete all persisted states for a given conflict genesis.
+    /// Used for pruning: when a conflict zone is pruned, all associated UMC states should be removed.
+    /// Returns the number of entries deleted.
+    fn prune_by_conflict_genesis(&self, conflict_genesis: Hash) -> Result<u32, StoreError>;
+}
+
+/// In-memory implementation of UMC persistence store.
+pub struct MemoryUmcPersistenceStore {
+    map: RwLock<HashMap<UmcPersistenceKey, UmcPersistedState>>,
+}
+
+impl Default for MemoryUmcPersistenceStore {
+    fn default() -> Self {
+        Self { map: RwLock::new(HashMap::new()) }
+    }
+}
+
+impl UmcPersistenceStoreReader for MemoryUmcPersistenceStore {
+    fn get(&self, key: UmcPersistenceKey) -> Result<Option<UmcPersistedState>, StoreError> {
+        Ok(self.map.read().get(&key).cloned())
+    }
+
+    fn has(&self, key: UmcPersistenceKey) -> Result<bool, StoreError> {
+        Ok(self.map.read().contains_key(&key))
+    }
+}
+
+impl UmcPersistenceStore for MemoryUmcPersistenceStore {
+    fn insert(&self, key: UmcPersistenceKey, state: UmcPersistedState) -> Result<(), StoreError> {
+        self.map.write().insert(key, state);
+        Ok(())
+    }
+
+    fn delete(&self, key: UmcPersistenceKey) -> Result<(), StoreError> {
+        self.map.write().remove(&key);
+        Ok(())
+    }
+
+    fn prune_by_conflict_genesis(&self, conflict_genesis: Hash) -> Result<u32, StoreError> {
+        let mut map = self.map.write();
+        let keys_to_remove: Vec<UmcPersistenceKey> = map
+            .iter()
+            .filter(|(key, _)| key.conflict_genesis == conflict_genesis)
+            .map(|(key, _)| key.clone())
+            .collect();
+        let count = keys_to_remove.len() as u32;
+        for key in keys_to_remove {
+            map.remove(&key);
+        }
+        Ok(count)
+    }
+}
+
+/// DB-backed implementation of UMC persistence store.
+#[derive(Clone)]
+pub struct DbUmcPersistenceStore {
+    db: Arc<DB>,
+    access: CachedDbAccess<UmcPersistenceKey, UmcPersistedState>,
+}
+
+impl DbUmcPersistenceStore {
+    pub fn new(db: Arc<DB>, cache_policy: CachePolicy) -> Self {
+        // Use DagKnight prefix + 1 for UMC state (70 + 1 = 71)
+        let prefix = vec![DatabaseStorePrefixes::DagKnight as u8 + 1];
+        Self { db: Arc::clone(&db), access: CachedDbAccess::new(db, cache_policy, prefix) }
+    }
+}
+
+impl UmcPersistenceStoreReader for DbUmcPersistenceStore {
+    fn get(&self, key: UmcPersistenceKey) -> Result<Option<UmcPersistedState>, StoreError> {
+        match self.access.read(key) {
+            Ok(state) => Ok(Some(state)),
+            Err(StoreError::KeyNotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn has(&self, key: UmcPersistenceKey) -> Result<bool, StoreError> {
+        self.access.has(key)
+    }
+}
+
+impl UmcPersistenceStore for DbUmcPersistenceStore {
+    fn insert(&self, key: UmcPersistenceKey, state: UmcPersistedState) -> Result<(), StoreError> {
+        let mut batch = WriteBatch::default();
+        self.access.write(BatchDbWriter::new(&mut batch), key, state)?;
+        self.db.write(batch)?;
+        Ok(())
+    }
+
+    fn delete(&self, key: UmcPersistenceKey) -> Result<(), StoreError> {
+        let mut batch = WriteBatch::default();
+        self.access.delete(BatchDbWriter::new(&mut batch), key)?;
+        self.db.write(batch)?;
+        Ok(())
+    }
+
+    fn prune_by_conflict_genesis(&self, conflict_genesis: Hash) -> Result<u32, StoreError> {
+        // UMC persistence key layout: conflict_genesis || k(u16 BE) || next_chain_ancestor || free_search
+        // We need to delete all keys with this conflict_genesis prefix.
+        let prefix = DatabaseStorePrefixes::DagKnight as u8 + 1; // UMC state prefix
+        let mut start_bytes = Vec::with_capacity(kaspa_hashes::HASH_SIZE + 3);
+        start_bytes.push(prefix);
+        start_bytes.extend_from_slice(conflict_genesis.as_ref());
+
+        // End bytes: same prefix + conflict_genesis with last byte incremented
+        // This covers all possible k, NCA, and free_search combinations
+        let mut end_bytes = Vec::with_capacity(kaspa_hashes::HASH_SIZE + 3);
+        end_bytes.push(prefix);
+        end_bytes.extend_from_slice(conflict_genesis.as_ref());
+        // Increment last byte of conflict_genesis to get the end of the range
+        // If the last byte is 0xFF, the range naturally extends to the next prefix
+        let end_hash = {
+            let mut h = [0u8; kaspa_hashes::HASH_SIZE];
+            h.copy_from_slice(conflict_genesis.as_ref());
+            // Add 1 to the hash bytes (big-endian increment)
+            for i in (0..h.len()).rev() {
+                if h[i] == 0xFF {
+                    h[i] = 0;
+                } else {
+                    h[i] += 1;
+                    break;
+                }
+            }
+            h
+        };
+        end_bytes.extend_from_slice(&end_hash);
+
+        let mut batch = WriteBatch::default();
+        batch.delete_range(start_bytes, end_bytes);
+        self.db.write(batch)?;
+
+        // Count deleted entries (approximate — we can't easily count after range delete)
+        // Return 0 as a placeholder; in practice the caller doesn't need the count
+        Ok(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_umc_persistence_key_construction() {
+        let cg: Hash = 0xAA_u64.into();
+        let nca: Hash = 0xBB_u64.into();
+        let k: KType = 5;
+
+        let key_committed = UmcPersistenceKey::new(cg, k, nca, false);
+        let key_free = UmcPersistenceKey::new(cg, k, nca, true);
+
+        assert_ne!(key_committed.as_ref(), key_free.as_ref());
+        assert_eq!(*key_committed.as_ref().last().unwrap(), 0u8);
+        assert_eq!(*key_free.as_ref().last().unwrap(), 1u8);
+    }
+
+    #[test]
+    fn test_memory_umc_persistence_store_roundtrip() {
+        let store = MemoryUmcPersistenceStore::default();
+        let key = UmcPersistenceKey::new(0xAA_u64.into(), 5, 0xBB_u64.into(), false);
+        let state = UmcPersistedState {
+            tree_entries: vec![UmcPersistedTreeEntry {
+                hash: 0x01_u64.into(),
+                floor: SignedWork::from(Uint192::from_u64(100)),
+                past_blue_work: Uint192::from_u64(50),
+                past_red_work: Uint192::from_u64(30),
+                anticone_blue_work: Uint192::from_u64(10),
+                arlb: Uint192::from_u64(20),
+                last_red_index: 0,
+            }],
+            red_index: 1,
+            red_set: vec![0x10_u64.into()],
+            secondary_heap: vec![],
+            seen_red_work: Uint192::from_u64(100),
+            negative_blues: Uint192::ZERO,
+            cached_vote: true,
+            tip_set_hash: Hash::default(),
+        };
+
+        // Insert
+        store.insert(key.clone(), state.clone()).unwrap();
+
+        // Verify has
+        assert!(store.has(key.clone()).unwrap());
+
+        // Retrieve
+        let retrieved = store.get(key.clone()).unwrap().expect("state should exist");
+        assert_eq!(retrieved, state);
+
+        // Delete
+        store.delete(key.clone()).unwrap();
+        assert!(!store.has(key).unwrap());
+    }
+
+    #[test]
+    fn test_memory_umc_persistence_store_overwrite() {
+        let store = MemoryUmcPersistenceStore::default();
+        let key = UmcPersistenceKey::new(0xAA_u64.into(), 5, 0xBB_u64.into(), false);
+
+        let state1 = UmcPersistedState { cached_vote: true, tip_set_hash: Hash::default(), ..Default::default() };
+        let state2 = UmcPersistedState { cached_vote: false, tip_set_hash: Hash::default(), ..Default::default() };
+
+        store.insert(key.clone(), state1).unwrap();
+        assert!(store.get(key.clone()).unwrap().unwrap().cached_vote);
+
+        store.insert(key.clone(), state2).unwrap();
+        assert!(!store.get(key).unwrap().unwrap().cached_vote);
+    }
+
+    #[test]
+    fn test_db_umc_persistence_store_roundtrip() {
+        use kaspa_database::prelude::{CachePolicy, ConnBuilder};
+
+        let (_lifetime, db) = kaspa_database::create_temp_db!(ConnBuilder::default().with_files_limit(10));
+        let store = DbUmcPersistenceStore::new(db, CachePolicy::Count(16));
+
+        let key = UmcPersistenceKey::new(0xAA_u64.into(), 5, 0xBB_u64.into(), false);
+        let state = UmcPersistedState {
+            tree_entries: vec![UmcPersistedTreeEntry {
+                hash: 0x01_u64.into(),
+                floor: SignedWork::from(Uint192::from_u64(100)),
+                past_blue_work: Uint192::from_u64(50),
+                past_red_work: Uint192::from_u64(30),
+                anticone_blue_work: Uint192::from_u64(10),
+                arlb: Uint192::from_u64(20),
+                last_red_index: 0,
+            }],
+            red_index: 1,
+            red_set: vec![0x10_u64.into()],
+            secondary_heap: vec![],
+            seen_red_work: Uint192::from_u64(100),
+            negative_blues: Uint192::ZERO,
+            cached_vote: true,
+            tip_set_hash: Hash::default(),
+        };
+
+        store.insert(key.clone(), state.clone()).unwrap();
+        assert!(store.has(key.clone()).unwrap());
+
+        let retrieved = store.get(key.clone()).unwrap().expect("state should exist");
+        assert_eq!(retrieved, state);
+
+        store.delete(key.clone()).unwrap();
+        assert!(!store.has(key).unwrap());
+    }
 
     #[test]
     fn test_dagknight_key_encodes_free_search_flag() {
