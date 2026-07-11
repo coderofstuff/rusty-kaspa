@@ -236,15 +236,63 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
 
     /// Create a cascade context from persisted state.
     /// Restores the primary tree, secondary heap, and all counters.
+    ///
+    /// `virtual_coloring_data_map` provides the current anticone_blue_work for all blues.
+    /// Persisted blues whose anticone_blue_work has grown (due to new blues added to the zone)
+    /// will have their values and floors updated before processing new blocks.
     pub fn from_persisted(
         conflict_genesis: Hash,
         ctx: TraversalContext<'a, T>,
         headers_store: &'a H,
         threshold: SignedWork,
         persisted: &UmcPersistedState,
+        virtual_coloring_data_map: &HashMap<Hash, PastColoringData>,
     ) -> Self {
-        let tree = restore_tree(persisted);
-        let secondary_heap = BTreeSet::from_iter(persisted.secondary_heap.iter().cloned());
+        let mut tree = restore_tree(persisted);
+        let mut secondary_heap = BTreeSet::from_iter(persisted.secondary_heap.iter().cloned());
+
+        // Update anticone_blue_work for persisted blues in primary tree.
+        // anticone_blue_work can only grow as new blues are added to the zone.
+        // A larger anticone_blue_work means a lower floor (blue is more constrained).
+        for entry in &persisted.tree_entries {
+            if let Some(current_data) = virtual_coloring_data_map.get(&entry.hash) {
+                if current_data.anticone_blue_work > entry.anticone_blue_work {
+                    // Anticone grew — update floor
+                    tree.update_anticone_blue_work(entry.hash, current_data.anticone_blue_work);
+                }
+            }
+        }
+
+        // Also check secondary heap for blues that may have grown anticone work.
+        // Collect updates first, then apply them to avoid borrow conflicts.
+        let updates: Vec<(PoppedBlue, Uint192)> = secondary_heap
+            .iter()
+            .filter_map(|pb| {
+                virtual_coloring_data_map.get(&pb.hash).and_then(|current_data| {
+                    if current_data.anticone_blue_work > pb.anticone_blue_work {
+                        Some((pb.clone(), current_data.anticone_blue_work))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        for (pb, new_anticone_blue_work) in updates {
+            let new_floor = SignedWork::from(pb.past_red_work) + SignedWork::from(pb.arlb)
+                - SignedWork::from(pb.past_blue_work)
+                - SignedWork::from(new_anticone_blue_work);
+            secondary_heap.remove(&pb);
+            secondary_heap.insert(PoppedBlue {
+                hash: pb.hash,
+                floor: new_floor,
+                past_blue_work: pb.past_blue_work,
+                past_red_work: pb.past_red_work,
+                anticone_blue_work: new_anticone_blue_work,
+                arlb: pb.arlb,
+                last_red_index: pb.last_red_index,
+            });
+        }
 
         Self {
             conflict_genesis,
@@ -611,6 +659,7 @@ where
                 self.headers_store,
                 threshold_work,
                 persisted.as_ref().unwrap(),
+                &input.virtual_coloring_data_map,
             )
         } else {
             // No persisted state or stale — from scratch
