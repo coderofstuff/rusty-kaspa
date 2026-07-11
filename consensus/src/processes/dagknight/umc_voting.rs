@@ -697,8 +697,7 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
     }
 
     /// Extract current state for persistence.
-    /// The `tip_set_hash` is populated by the caller for staleness detection.
-    pub(super) fn extract_state(&self, tip_set_hash: Hash) -> UmcPersistedState {
+    pub(super) fn extract_state(&self) -> UmcPersistedState {
         let tree_entries: Vec<UmcPersistedTreeEntry> = self
             .dast
             .tree
@@ -725,7 +724,6 @@ impl<'a, T: ReachabilityStoreReader + ?Sized, H: HeaderStoreReader + ?Sized> Cas
             seen_red_work: self.seen_red_work,
             negative_blues: self.negative_blues,
             cached_vote: self.cached_vote,
-            tip_set_hash,
         }
     }
 }
@@ -1038,11 +1036,11 @@ where
         if diag.was_restored && !new_blocks_added {
             if cascade_ctx.cached_vote {
                 let result = cascade_ctx.cached_vote;
-                let state = cascade_ctx.extract_state(Hash::default());
+                let state = cascade_ctx.extract_state();
                 return (result, state, diag);
             }
             let result = cascade_ctx.vote();
-            let state = cascade_ctx.extract_state(Hash::default());
+            let state = cascade_ctx.extract_state();
             return (result, state, diag);
         }
 
@@ -1078,7 +1076,7 @@ where
         // for new reds, and to produce the correct final result.
         // This mirrors run_cascade() which always ends with cascade_ctx.vote().
         let result = cascade_ctx.vote();
-        let state = cascade_ctx.extract_state(Hash::default());
+        let state = cascade_ctx.extract_state();
         (result, state, diag)
     }
 }
@@ -1216,7 +1214,6 @@ mod tests {
             seen_red_work: Uint192::from_u64(100),
             negative_blues: Uint192::from_u64(30),
             cached_vote: true,
-            tip_set_hash: Hash::default(),
         };
 
         // Clone as a proxy for serialization roundtrip
@@ -1259,7 +1256,6 @@ mod tests {
             seen_red_work: Uint192::ZERO,
             negative_blues: Uint192::ZERO,
             cached_vote: true,
-            tip_set_hash: Hash::default(),
         };
 
         let tree = restore_tree(&state);
@@ -1311,7 +1307,6 @@ mod tests {
             seen_red_work: Uint192::ZERO,
             negative_blues: Uint192::ZERO,
             cached_vote: false,
-            tip_set_hash: Hash::default(),
         };
 
         let tree = restore_tree(&state);
@@ -1360,7 +1355,6 @@ mod tests {
             seen_red_work: Uint192::ZERO,
             negative_blues: Uint192::ZERO,
             cached_vote: true,
-            tip_set_hash: Hash::default(),
         };
 
         // Restore and verify equivalence

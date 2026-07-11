@@ -652,9 +652,7 @@ pub struct UmcPersistedState {
     pub negative_blues: Uint192,
     /// Cached vote result
     pub cached_vote: bool,
-    /// Hash of the tip-set at time of persistence, used for stronger staleness detection.
-    /// If the current tip-set hash differs from this value, the persisted state is stale.
-    pub tip_set_hash: Hash,
+ 
 }
 
 impl MemSizeEstimator for UmcPersistedState {
@@ -903,7 +901,6 @@ mod tests {
             seen_red_work: Uint192::from_u64(100),
             negative_blues: Uint192::ZERO,
             cached_vote: true,
-            tip_set_hash: Hash::default(),
         };
 
         // Insert
@@ -926,8 +923,8 @@ mod tests {
         let store = MemoryUmcPersistenceStore::default();
         let key = UmcPersistenceKey::new(0xAA_u64.into(), 5, 0xBB_u64.into(), false);
 
-        let state1 = UmcPersistedState { cached_vote: true, tip_set_hash: Hash::default(), ..Default::default() };
-        let state2 = UmcPersistedState { cached_vote: false, tip_set_hash: Hash::default(), ..Default::default() };
+        let state1 = UmcPersistedState { cached_vote: true, ..Default::default() };
+        let state2 = UmcPersistedState { cached_vote: false, ..Default::default() };
 
         store.insert(key.clone(), state1).unwrap();
         assert!(store.get(key.clone()).unwrap().unwrap().cached_vote);
@@ -960,7 +957,6 @@ mod tests {
             seen_red_work: Uint192::from_u64(100),
             negative_blues: Uint192::ZERO,
             cached_vote: true,
-            tip_set_hash: Hash::default(),
         };
 
         store.insert(key.clone(), state.clone()).unwrap();
