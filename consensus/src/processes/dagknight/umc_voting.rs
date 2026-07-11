@@ -563,7 +563,7 @@ where
         input: &UmcVoterInput,
         persisted: Option<UmcPersistedState>,
     ) -> (bool, UmcPersistedState, bool) {
-        info!("incremental UMC triggered | cg: {} | k: {} | nca: {}", input.conflict_genesis, input.k, input.next_chain_ancestor);
+        // info!("incremental UMC triggered | cg: {} | k: {} | nca: {}", input.conflict_genesis, input.k, input.next_chain_ancestor);
         // Deficit and threshold
         let deficit = Uint192::from_u64(input.k.isqrt() as u64) * input.deficit_work_basis;
         let threshold_work = SignedWork::from(input.red_work) - SignedWork::from(input.blue_work) - SignedWork::from(deficit);
@@ -671,10 +671,10 @@ impl MemSizeEstimator for UmcVoterInput {
 
 /// Restore a `CascadeTree` from persisted state.
 fn restore_tree(persisted: &UmcPersistedState) -> CascadeTree {
-    use kaspa_math::Uint192;
-    use kaspa_math::int::SignedInteger;
+    // use kaspa_math::Uint192;
+    // use kaspa_math::int::SignedInteger;
 
-    type SignedWork = SignedInteger<Uint192>;
+    // type SignedWork = SignedInteger<Uint192>;
 
     let mut tree = CascadeTree { red_index: persisted.red_index, ..Default::default() };
 
