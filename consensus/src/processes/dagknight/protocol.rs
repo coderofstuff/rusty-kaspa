@@ -427,28 +427,25 @@ impl<
 
             // Compute zone size for stats (before voting)
             let zone_blocks = input.blue_set.len() + input.red_set.len();
-            let persisted_blocks = persisted
-                .as_ref()
-                .map(|s| s.tree_entries.len() + s.secondary_heap.len())
-                .unwrap_or(0);
 
-            let (result, new_state, was_restored) = voter.run_cascade_incremental(&input, persisted);
+            let (result, new_state, diag) = voter.run_cascade_incremental(&input, persisted);
 
             // DEBUG: assert incremental matches full run — remove when confident
             let full_result = voter.run_cascade(&input);
             assert!(
                 result == full_result,
-                "Incremental ({}) differs from full run ({}) for conflict_genesis {} | k={} | was_restored={}",
+                "Incremental ({}) differs from full run ({}) for conflict_genesis {} | k={} | restored={} recovered={}",
                 result,
                 full_result,
                 conflict_genesis,
                 k,
-                was_restored,
+                diag.was_restored,
+                diag.was_recovered,
             );
 
             // Record stats
             if let Some(stats) = &self.umc_persistence_stats {
-                stats.record(was_restored, persisted_blocks, zone_blocks);
+                stats.record(&diag, zone_blocks);
             }
 
             // Persist updated state
