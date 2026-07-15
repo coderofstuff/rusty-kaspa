@@ -1242,27 +1242,34 @@ mod tests {
         );
     }
 
+    /// Regression test for shortcut/pure mismatch captured from test_complex_dag_shortcut.
+    /// This test loads a captured failing DAG and verifies that the assertion between
+    /// shortcut and pure results fails (before fix) or passes (after fix).
     #[test]
-    fn test_complex_dag_shortcut() {
-        let (genesis, mut blocks) = generate_complex_dag(0.1, 10.0, 50);
-        let (_, second_set) = generate_complex_dag(0.1, 10.0, 40);
+    fn test_shortcut_failure_repro() {
+        let json_filename = "test_shortcut_captured_failure.json";
+        let file = File::open(json_filename).expect("Unable to open captured failure JSON");
+        let json_data: serde_json::Value = serde_json::from_reader(file).expect("Unable to parse JSON");
 
-        let mut dag_shortcut_blocks = second_set
-            .iter()
-            .map(|(block, parents)| {
-                let block = if *block == genesis { *block } else { block + 100 };
-                let parents = parents.iter().map(|&p| if p == genesis { p } else { p + 100 }).collect_vec();
+        let genesis = json_data["genesis"].as_u64().expect("Genesis is not a number");
+        let blocks = json_data["blocks"].as_array().expect("Blocks is not an array");
 
-                (block, parents)
-            })
-            .collect_vec();
+        let dag_plan = DagPlan {
+            genesis,
+            blocks: blocks
+                .iter()
+                .map(|block| {
+                    let id = block["id"].as_u64().unwrap();
+                    let parents = block["parents"].as_array().unwrap().iter().map(|p| p.as_u64().unwrap()).collect();
+                    (id, parents)
+                })
+                .collect(),
+        };
 
-        blocks.append(&mut dag_shortcut_blocks);
+        println!("Loaded captured DAG: genesis={}, blocks={}", genesis, dag_plan.blocks.len());
 
-        blocks.append(&mut vec![(201, vec![genesis]), (202, vec![201])]);
-
-        let plan = DagPlan { genesis, blocks };
-
-        run_dagknight_test(5, plan, "dag_shortcut");
+        // This should trigger the assertion failure between shortcut and pure (before fix)
+        // or pass (after fix)
+        run_dagknight_test(5, dag_plan, "shortcut_failure_repro");
     }
 }
