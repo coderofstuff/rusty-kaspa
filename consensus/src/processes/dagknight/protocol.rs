@@ -1115,4 +1115,28 @@ mod tests {
         hex[..s.len()].copy_from_slice(s.as_bytes());
         Hash::from_str(std::str::from_utf8(&hex).unwrap()).expect("Invalid hash string")
     }
+
+    #[test]
+    fn test_complex_dag_shortcut() {
+        let (genesis, mut blocks) = generate_complex_dag(0.1, 10.0, 50);
+        let (_, second_set) = generate_complex_dag(0.1, 10.0, 40);
+
+        let mut dag_shortcut_blocks = second_set
+            .iter()
+            .map(|(block, parents)| {
+                let block = if *block == genesis { *block } else { block + 100 };
+                let parents = parents.iter().map(|&p| if p == genesis { p } else { p + 100 }).collect_vec();
+
+                (block, parents)
+            })
+            .collect_vec();
+
+        blocks.append(&mut dag_shortcut_blocks);
+
+        blocks.append(&mut vec![(201, vec![genesis]), (202, vec![201])]);
+
+        let plan = DagPlan { genesis, blocks };
+
+        run_dagknight_test(5, plan, "dag_shortcut");
+    }
 }
