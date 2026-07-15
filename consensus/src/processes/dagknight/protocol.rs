@@ -6,7 +6,7 @@ use std::{
 
 use dashmap::DashMap;
 use itertools::Itertools;
-use kaspa_consensus_core::{BlockHashMap, BlockHashSet, KType};
+use kaspa_consensus_core::{BlockHashMap, BlockHashSet, HashMapCustomHasher, KType};
 use kaspa_core::{debug, trace};
 use kaspa_hashes::Hash;
 use kaspa_math::Uint192;
@@ -209,9 +209,17 @@ impl<
                 continue;
             }
 
+            let use_shortcut = false;
+
+            // Check shortcut to identify weak groups at k=0
+            // This doesn't change conflict hierarchy - it just marks groups as weak
+            // for later processes to decide what to do with such weak groups
+            let weak_groups: BlockHashSet =
+                if use_shortcut { self.check_weak_block_shortcut(&agreement_grouping, conflict_genesis) } else { BlockHashSet::new() };
+
             // Pick a "winner" among these subgroups
             let (winning_conflict_genesis, winning_subgroup) = {
-                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup);
+                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup, &weak_groups);
 
                 let final_winner = if best_groups.len() > 1 {
                     self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups)
@@ -357,12 +365,17 @@ impl<
     /// in the caller is simply using blue_work + hash to break ties between subgroups.
     ///
     /// Returns an array of winning subgroups with their metadata
+    ///
+    /// `weak_groups` contains the conflict_genesis hashes of subgroups identified as weak by the shortcut.
+    /// These groups are skipped (return None) for all k values as a fast-path rejection.
     fn rank(
         &self,
         conflict_genesis: Hash,
         agreeing_subgroups: &HashMap<Hash, Arc<Vec<Hash>>>,
         all_tips: &[Hash],
+        weak_groups: &BlockHashSet,
     ) -> Vec<GroupMetadata> {
+        let weak_groups = weak_groups.clone();
         let mut group_map = Cell::new(agreeing_subgroups.clone());
         let best_groups_cell = Cell::new(vec![]);
         let evaluate = |k: KType| -> Option<()> {
@@ -371,7 +384,13 @@ impl<
                 .iter()
                 .filter_map(|(curr_conflict_genesis, subgroup)| {
                     // `subgroup` is an `&Arc<Vec<Hash>>` here; pass a `&[Hash]` to the colouring function
-                    self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k).map(|selected_parent| {
+                    // curr_conflict_genesis is the subgroup's own conflict_genesis (key in agreement_grouping)
+                    let selected_parent = if weak_groups.contains(curr_conflict_genesis) {
+                        None
+                    } else {
+                        self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k)
+                    };
+                    selected_parent.map(|selected_parent| {
                         (
                             (*curr_conflict_genesis, subgroup.clone()),
                             GroupMetadata { conflict_genesis: *curr_conflict_genesis, subgroup: subgroup.clone(), k, selected_parent },
@@ -392,6 +411,57 @@ impl<
         let _search_result = RankSearcher::search(evaluate);
         // let (best_k) = search_result.map(|r| (r.k, r.result)).unwrap();
         best_groups_cell.take()
+    }
+
+    fn check_weak_block_shortcut(&self, agreement_grouping: &HashMap<Hash, Arc<Vec<Hash>>>, conflict_genesis: Hash) -> BlockHashSet {
+        // First pass: compute k=0 blue_work for each subgroup
+        let subgroup_work: Vec<(Hash, Uint192)> = agreement_grouping
+            .iter()
+            .map(|(cg, subgroup)| {
+                let reachability_service = self.reachability_service.clone();
+                let relations_store = self.relations_store.read();
+                let relations_service =
+                    FutureIntersectRelations::new(relations_store.clone(), reachability_service.clone(), conflict_genesis);
+                let czm = ConflictZoneManager::new(
+                    0,
+                    conflict_genesis,
+                    self.dagknight_store.clone(),
+                    self.headers_store.clone(),
+                    relations_service,
+                    reachability_service.clone(),
+                );
+
+                czm.fill_zone_data(subgroup);
+
+                let subgroup_limited_virtual = czm.k_colouring(subgroup, 0, None);
+                debug!("cg: {} | subgroup: {} | blue_work: {}", conflict_genesis, cg, subgroup_limited_virtual.blue_work.as_u64());
+
+                (*cg, subgroup_limited_virtual.blue_work)
+            })
+            .collect_vec();
+
+        // Find max blue_work among all subgroups
+        let max_blue_work = subgroup_work.iter().map(|(_, bw)| bw).max().expect("subgroup_work should not be empty");
+        let threshold = *max_blue_work / 10;
+
+        // Collect weak subgroups (subgroups whose blue_work < threshold)
+        let mut weak_groups = BlockHashSet::new();
+        for (cg, blue_work) in &subgroup_work {
+            if *blue_work < threshold {
+                debug!(
+                    "SHORTCUT cg: {} | subgroup cg: {} | WEAK | blue_work: {} | threshold: {}",
+                    conflict_genesis,
+                    cg,
+                    blue_work.as_u64(),
+                    threshold.as_u64()
+                );
+                weak_groups.insert(*cg);
+            }
+        }
+
+        debug!("SHORTCUT cg: {} | {} weak groups out of {} total", conflict_genesis, weak_groups.len(), subgroup_work.len());
+
+        weak_groups
     }
 
     /// Applies a coloring to the conflict zone, and determines if the
