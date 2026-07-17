@@ -673,7 +673,6 @@ mod tests {
     use parking_lot::lock_api::RwLock;
 
     use super::*;
-    use crate::model::stores::dagknight::{MemoryUmcPersistenceStore, UmcPersistenceStats};
     use crate::model::stores::ghostdag::{GhostdagStore, GhostdagStoreReader};
     use crate::model::stores::headers::MemoryHeaderStore;
     use crate::processes::ghostdag::protocol::GhostdagManager;
