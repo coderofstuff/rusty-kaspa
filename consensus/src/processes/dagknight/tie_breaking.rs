@@ -56,6 +56,7 @@ pub struct DagknightTieBreaker<
     pub headers_store: Arc<O>,
     pub relations_store: Arc<RwLock<D>>,
     pub reachability_service: MTReachabilityService<R>,
+    use_new_logic: bool,
 }
 
 impl<
@@ -70,8 +71,9 @@ impl<
         headers_store: Arc<O>,
         relations_store: Arc<RwLock<D>>,
         reachability_service: MTReachabilityService<R>,
+        use_new_logic: bool,
     ) -> Self {
-        Self { dagknight_store, headers_store, relations_store, reachability_service }
+        Self { dagknight_store, headers_store, relations_store, reachability_service, use_new_logic }
     }
 
     /// Computes the free-search k-colouring reference cluster.
@@ -94,6 +96,7 @@ impl<
             relations_service,
             reachability_service.clone(),
             true, // free_search = true
+            self.use_new_logic,
         );
 
         conflict_zone_manager.fill_zone_data(all_tips);
@@ -157,6 +160,7 @@ impl<
             relations_service,
             reachability_service.clone(),
             false, // free_search = false (committed)
+            self.use_new_logic,
         );
 
         conflict_zone_manager.fill_zone_data(all_tips);
@@ -354,8 +358,13 @@ mod tests {
             }
 
             let reachability_service = MTReachabilityService::new(Arc::new(RwLock::new(reachability)));
-            let tie_breaker =
-                DagknightTieBreaker::new(dagknight_store, headers_store, Arc::new(RwLock::new(relations_store)), reachability_service);
+            let tie_breaker = DagknightTieBreaker::new(
+                dagknight_store,
+                headers_store,
+                Arc::new(RwLock::new(relations_store)),
+                reachability_service,
+                true,
+            );
 
             Self { hash_a, hash_b, hash_c, hash_d, hash_z, hash_y, hash_x, tie_breaker }
         }
@@ -490,8 +499,13 @@ mod tests {
         }
 
         let reachability_service = MTReachabilityService::new(Arc::new(RwLock::new(reachability)));
-        let tie_breaker =
-            DagknightTieBreaker::new(dagknight_store, headers_store, Arc::new(RwLock::new(relations_store)), reachability_service);
+        let tie_breaker = DagknightTieBreaker::new(
+            dagknight_store,
+            headers_store,
+            Arc::new(RwLock::new(relations_store)),
+            reachability_service,
+            true,
+        );
 
         // Chain 2: [X, Y, Z, A] (right side, towards genesis)
         let chain_right = vec![hash_x, hash_y, hash_z, hash_a];

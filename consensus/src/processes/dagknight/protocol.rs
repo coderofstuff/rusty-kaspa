@@ -161,6 +161,9 @@ impl<
 > DagknightExecutor<C, O, D, R>
 {
     pub fn dagknight(&self, parents: &[Hash]) -> DagknightData {
+        // TODO[DK]: Remove
+        let use_new_logic =
+            parents.iter().map(|parent| self.headers_store.get_daa_score(*parent).unwrap()).max().unwrap() > 125_120_000;
         /*
             input: a set of block parents
             output: the selected parent + incremental metadata
@@ -211,10 +214,10 @@ impl<
 
             // Pick a "winner" among these subgroups
             let (winning_conflict_genesis, winning_subgroup) = {
-                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup);
+                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup, use_new_logic);
 
                 let final_winner = if best_groups.len() > 1 {
-                    self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups)
+                    self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups, use_new_logic)
                 } else {
                     let single_winner = best_groups.into_iter().next().expect("best_groups should be non-empty after filtering");
                     (single_winner.conflict_genesis, single_winner.subgroup)
@@ -328,7 +331,13 @@ impl<
     }
 
     /// Tie-breaking rule in case of multiple winning subgroups with the same rank value.
-    fn tie_breaking(&self, conflict_genesis: Hash, all_tips: &[Hash], subgroups: &[GroupMetadata]) -> (Hash, Arc<Vec<Hash>>) {
+    fn tie_breaking(
+        &self,
+        conflict_genesis: Hash,
+        all_tips: &[Hash],
+        subgroups: &[GroupMetadata],
+        use_new_logic: bool,
+    ) -> (Hash, Arc<Vec<Hash>>) {
         let tie_breaking_winner = {
             // Always run this to compare stats:
             debug!("Winning groups had rank k = {}", subgroups[0].k);
@@ -339,6 +348,7 @@ impl<
                 self.headers_store.clone(),
                 self.relations_store.clone(),
                 self.reachability_service.clone(),
+                use_new_logic,
             )
             .tie_break(&TieBreakInput { conflict_genesis, all_tips, subgroups, k: mutual_k });
 
@@ -362,6 +372,7 @@ impl<
         conflict_genesis: Hash,
         agreeing_subgroups: &HashMap<Hash, Arc<Vec<Hash>>>,
         all_tips: &[Hash],
+        use_new_logic: bool,
     ) -> Vec<GroupMetadata> {
         let mut group_map = Cell::new(agreeing_subgroups.clone());
         let best_groups_cell = Cell::new(vec![]);
@@ -371,12 +382,19 @@ impl<
                 .iter()
                 .filter_map(|(curr_conflict_genesis, subgroup)| {
                     // `subgroup` is an `&Arc<Vec<Hash>>` here; pass a `&[Hash]` to the colouring function
-                    self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k).map(|selected_parent| {
-                        (
-                            (*curr_conflict_genesis, subgroup.clone()),
-                            GroupMetadata { conflict_genesis: *curr_conflict_genesis, subgroup: subgroup.clone(), k, selected_parent },
-                        )
-                    })
+                    self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k, use_new_logic).map(
+                        |selected_parent| {
+                            (
+                                (*curr_conflict_genesis, subgroup.clone()),
+                                GroupMetadata {
+                                    conflict_genesis: *curr_conflict_genesis,
+                                    subgroup: subgroup.clone(),
+                                    k,
+                                    selected_parent,
+                                },
+                            )
+                        },
+                    )
                 })
                 .unzip();
 
@@ -403,6 +421,7 @@ impl<
         subgroup: &[Hash],
         all_tips: &[Hash],
         k_to_check: KType,
+        use_new_logic: bool,
     ) -> Option<SortableBlock> {
         let reachability_service = self.reachability_service.clone();
         let relations_store = self.relations_store.read();
@@ -414,6 +433,7 @@ impl<
             self.headers_store.clone(),
             relations_service,
             reachability_service.clone(),
+            use_new_logic,
         );
 
         // Acquire a lock for this conflict_genesis to prevent concurrent writes
