@@ -1,12 +1,11 @@
 use super::*;
-use crate::constants;
 use crate::errors::{BlockProcessResult, RuleError};
 use crate::model::services::reachability::ReachabilityService;
 use crate::model::stores::statuses::StatusesStoreReader;
+use kaspa_consensus_core::BlockLevel;
 use kaspa_consensus_core::blockhash::BlockHashExtensions;
 use kaspa_consensus_core::blockstatus::BlockStatus::StatusInvalid;
 use kaspa_consensus_core::header::Header;
-use kaspa_consensus_core::BlockLevel;
 use kaspa_core::time::unix_now;
 use kaspa_database::prelude::StoreResultExt;
 use kaspa_pow::calc_level_from_pow;
@@ -28,10 +27,11 @@ impl HeaderProcessor {
         Ok(())
     }
 
-    fn check_header_version(&self, header: &Header) -> BlockProcessResult<()> {
-        if header.version != constants::BLOCK_VERSION {
-            return Err(RuleError::WrongBlockVersion(header.version));
-        }
+    fn check_header_version(&self, _header: &Header) -> BlockProcessResult<()> {
+        // TODO(post-toccata): Uncomment this and remove check_header_version_in_context.
+        // if header.version != constants::TOCCATA_BLOCK_VERSION {
+        //     return Err(RuleError::WrongBlockVersion(header.version));
+        // }
         Ok(())
     }
 
@@ -102,10 +102,6 @@ impl HeaderProcessor {
     fn check_pow_and_calc_block_level(&self, header: &Header) -> BlockProcessResult<BlockLevel> {
         let state = kaspa_pow::State::new(header);
         let (passed, pow) = state.check_pow(header.nonce);
-        if passed || self.skip_proof_of_work {
-            Ok(calc_level_from_pow(pow, self.max_block_level))
-        } else {
-            Err(RuleError::InvalidPoW)
-        }
+        if passed || self.skip_proof_of_work { Ok(calc_level_from_pow(pow, self.max_block_level)) } else { Err(RuleError::InvalidPoW) }
     }
 }

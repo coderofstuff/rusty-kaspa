@@ -1,4 +1,4 @@
-use async_channel::{unbounded, Receiver};
+use async_channel::{Receiver, unbounded};
 use async_trait::async_trait;
 use kaspa_notify::events::EVENT_TYPE_ARRAY;
 use kaspa_notify::listener::{ListenerId, ListenerLifespan};
@@ -6,8 +6,8 @@ use kaspa_notify::notifier::{Notifier, Notify};
 use kaspa_notify::scope::Scope;
 use kaspa_notify::subscription::context::SubscriptionContext;
 use kaspa_notify::subscription::{MutationPolicies, UtxosChangedMutationPolicy};
+use kaspa_rpc_core::{RpcResult, notify::connection::ChannelConnection};
 use kaspa_rpc_core::{api::connection::DynRpcConnection, api::rpc::RpcApi, *};
-use kaspa_rpc_core::{notify::connection::ChannelConnection, RpcResult};
 use std::sync::Arc;
 
 pub(super) type RpcCoreNotifier = Notifier<Notification, ChannelConnection>;
@@ -206,6 +206,14 @@ impl RpcApi for RpcCoreMock {
         Err(RpcError::NotImplemented)
     }
 
+    async fn get_seq_commit_lane_proof_call(
+        &self,
+        _connection: Option<&DynRpcConnection>,
+        _request: GetSeqCommitLaneProofRequest,
+    ) -> RpcResult<GetSeqCommitLaneProofResponse> {
+        Err(RpcError::NotImplemented)
+    }
+
     async fn get_subnetwork_call(
         &self,
         _connection: Option<&DynRpcConnection>,
@@ -235,6 +243,14 @@ impl RpcApi for RpcCoreMock {
         _connection: Option<&DynRpcConnection>,
         _request: GetCurrentBlockColorRequest,
     ) -> RpcResult<GetCurrentBlockColorResponse> {
+        Err(RpcError::NotImplemented)
+    }
+
+    async fn get_block_reward_info_call(
+        &self,
+        _connection: Option<&DynRpcConnection>,
+        _request: GetBlockRewardInfoRequest,
+    ) -> RpcResult<GetBlockRewardInfoResponse> {
         Err(RpcError::NotImplemented)
     }
 

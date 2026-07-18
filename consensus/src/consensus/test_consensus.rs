@@ -12,10 +12,12 @@ use kaspa_core::{core::Core, service::Service};
 use kaspa_database::utils::DbLifetime;
 use kaspa_hashes::Hash;
 use kaspa_notify::subscription::context::SubscriptionContext;
+use kaspa_smt::proof::OwnedSmtProof;
+use kaspa_smt_store::processor::SmtReadBounds;
 use parking_lot::RwLock;
 
-use super::services::{DbDagTraversalManager, DbGhostdagManager, DbWindowManager};
 use super::Consensus;
+use super::services::{DbDagTraversalManager, DbGhostdagManager, DbWindowManager};
 use crate::pipeline::virtual_processor::test_block_builder::TestBlockBuilder;
 use crate::processes::window::WindowManager;
 use crate::{
@@ -25,13 +27,14 @@ use crate::{
     model::{
         services::reachability::MTReachabilityService,
         stores::{
-            ghostdag::DbGhostdagStore, headers::HeaderStoreReader, reachability::DbReachabilityStore, virtual_state::VirtualStores, DB,
+            DB, ghostdag::DbGhostdagStore, headers::HeaderStoreReader, reachability::DbReachabilityStore, virtual_state::VirtualStores,
         },
     },
     params::Params,
-    pipeline::{body_processor::BlockBodyProcessor, virtual_processor::VirtualStateProcessor, ProcessingCounters},
+    pipeline::{ProcessingCounters, body_processor::BlockBodyProcessor, virtual_processor::VirtualStateProcessor},
     test_helpers::header_from_precomputed_hash,
 };
+use kaspa_consensus_core::api::SeqCommitLaneEntry;
 use kaspa_database::create_temp_db;
 use kaspa_database::prelude::ConnBuilder;
 use std::future::Future;
@@ -41,7 +44,19 @@ pub struct TestConsensus {
     params: Params,
     consensus: Arc<Consensus>,
     block_builder: TestBlockBuilder,
-    db_lifetime: DbLifetime,
+    _db_lifetime: DbLifetime,
+}
+
+pub struct TestSeqCommitLaneProof {
+    pub lanes_root: Hash,
+    pub payload_and_ctx_digest: Hash,
+    pub parent_seq_commit: Hash,
+    pub expected_seq_commit: Hash,
+    pub parent_lane_tip: Option<Hash>,
+    pub current_lane: Option<SeqCommitLaneEntry>,
+    pub smt_proof: OwnedSmtProof,
+    pub blue_score: u64,
+    pub inactivity_shortcut: Hash,
 }
 
 impl TestConsensus {
@@ -62,7 +77,7 @@ impl TestConsensus {
         ));
         let block_builder = TestBlockBuilder::new(consensus.virtual_processor.clone());
 
-        Self { params: config.params.clone(), consensus, block_builder, db_lifetime: Default::default() }
+        Self { params: config.params.clone(), consensus, block_builder, _db_lifetime: Default::default() }
     }
 
     /// Creates a test consensus instance based on `config` with a temp DB and the provided `notification_sender`
@@ -83,7 +98,7 @@ impl TestConsensus {
         ));
         let block_builder = TestBlockBuilder::new(consensus.virtual_processor.clone());
 
-        Self { consensus, block_builder, params: config.params.clone(), db_lifetime }
+        Self { consensus, block_builder, params: config.params.clone(), _db_lifetime: db_lifetime }
     }
 
     /// Creates a test consensus instance based on `config` with a temp DB and no notifier
@@ -105,7 +120,7 @@ impl TestConsensus {
         ));
         let block_builder = TestBlockBuilder::new(consensus.virtual_processor.clone());
 
-        Self { consensus, block_builder, params: config.params.clone(), db_lifetime }
+        Self { consensus, block_builder, params: config.params.clone(), _db_lifetime: db_lifetime }
     }
 
     /// Clone the inner consensus Arc. For general usage of the underlying consensus simply deref
@@ -204,6 +219,60 @@ impl TestConsensus {
 
     pub fn build_header_only_block_with_parents(&self, hash: Hash, parents: Vec<Hash>) -> MutableBlock {
         MutableBlock::from_header(self.build_header_with_parents(hash, parents))
+    }
+
+    /// Read the stored SMT block metadata (KIP-21) for a block.
+    pub fn smt_block_metadata(&self, block_hash: Hash) -> crate::model::stores::smt_metadata::SmtBlockMetadata {
+        self.consensus.storage.smt_metadata_store.get(block_hash).unwrap()
+    }
+
+    pub fn seq_commit_lane_proof(&self, block_hash: Hash, lane_key: Hash) -> TestSeqCommitLaneProof {
+        let header = self.consensus.headers_store.get_header(block_hash).unwrap();
+        let selected_parent = header.direct_parents()[0];
+        let parent_header = self.consensus.headers_store.get_header(selected_parent).unwrap();
+        let min_blue_score = header.blue_score.saturating_sub(self.params.finality_depth());
+        let parent_bounds = SmtReadBounds::new(parent_header.blue_score, min_blue_score);
+        let current_bounds = SmtReadBounds::for_pov(header.blue_score, self.params.finality_depth());
+
+        let parent_lane_tip = self
+            .consensus
+            .storage
+            .smt_stores
+            .get_lane(lane_key, parent_bounds, |bh| self.consensus.virtual_processor.is_smt_canonical(bh, selected_parent))
+            .map(|verified| *verified.data());
+        let current_lane = self
+            .consensus
+            .storage
+            .smt_stores
+            .get_lane(lane_key, current_bounds, |bh| self.consensus.virtual_processor.is_smt_canonical(bh, block_hash))
+            .map(|verified| SeqCommitLaneEntry { tip: *verified.data(), blue_score: verified.blue_score() });
+        let lanes_root = self
+            .consensus
+            .storage
+            .smt_stores
+            .get_lanes_root(current_bounds, |bh| self.consensus.virtual_processor.is_smt_canonical(bh, block_hash));
+        let smt_proof = self
+            .consensus
+            .storage
+            .smt_stores
+            .prove_lane(&lane_key, current_bounds, |bh| self.consensus.virtual_processor.is_smt_canonical(bh, block_hash))
+            .unwrap();
+        let metadata = self.consensus.storage.smt_metadata_store.get(block_hash).unwrap();
+
+        let shortcut_block = metadata.inactivity_shortcut_block();
+        let inactivity_shortcut = self.consensus.virtual_processor.inactivity_shortcut(shortcut_block);
+
+        TestSeqCommitLaneProof {
+            lanes_root,
+            payload_and_ctx_digest: metadata.payload_and_ctx_digest(),
+            parent_seq_commit: parent_header.accepted_id_merkle_root,
+            expected_seq_commit: header.accepted_id_merkle_root,
+            parent_lane_tip,
+            current_lane,
+            smt_proof,
+            blue_score: header.blue_score,
+            inactivity_shortcut,
+        }
     }
 
     pub fn init(&self) -> Vec<JoinHandle<()>> {

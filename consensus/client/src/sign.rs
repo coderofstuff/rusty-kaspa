@@ -7,7 +7,7 @@ use core::iter::once;
 use itertools::Itertools;
 use kaspa_consensus_core::{
     hashing::{
-        sighash::{calc_schnorr_signature_hash, SigHashReusedValuesUnsync},
+        sighash::{SigHashReusedValuesUnsync, calc_schnorr_signature_hash},
         sighash_type::SIG_HASH_ALL,
     },
     tx::PopulatedTransaction,
@@ -40,7 +40,7 @@ pub fn sign_with_multiple_v3<'a>(tx: &'a Transaction, privkeys: &[[u8; 32]]) -> 
     for privkey in privkeys {
         let schnorr_key = secp256k1::Keypair::from_seckey_slice(secp256k1::SECP256K1, privkey).unwrap();
         let schnorr_public_key = schnorr_key.public_key().x_only_public_key().0;
-        let script_pub_key_script = once(0x20).chain(schnorr_public_key.serialize().into_iter()).chain(once(0xac)).collect_vec();
+        let script_pub_key_script = once(0x20).chain(schnorr_public_key.serialize()).chain(once(0xac)).collect_vec();
         map.insert(script_pub_key_script, schnorr_key);
     }
 
@@ -54,7 +54,9 @@ pub fn sign_with_multiple_v3<'a>(tx: &'a Transaction, privkeys: &[[u8; 32]]) -> 
             let script_pub_key = match tx.inner().inputs[i].script_public_key() {
                 Some(script) => script,
                 None => {
-                    return Err(crate::imports::Error::Custom("expected to be called only following full UTXO population".to_string()))
+                    return Err(crate::imports::Error::Custom(
+                        "expected to be called only following full UTXO population".to_string(),
+                    ));
                 }
             };
             let script = script_pub_key.script();
@@ -69,9 +71,5 @@ pub fn sign_with_multiple_v3<'a>(tx: &'a Transaction, privkeys: &[[u8; 32]]) -> 
             }
         }
     }
-    if additional_signatures_required {
-        Ok(Signed::Partially(tx))
-    } else {
-        Ok(Signed::Fully(tx))
-    }
+    if additional_signatures_required { Ok(Signed::Partially(tx)) } else { Ok(Signed::Fully(tx)) }
 }

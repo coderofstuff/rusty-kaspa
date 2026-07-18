@@ -46,6 +46,9 @@ pub enum DatabaseStorePrefixes {
     // Stores headers with run-length encoded parents
     CompressedHeaders = 32,
 
+    // Stores a succinct pruning proof descriptor
+    PruningProofDescriptor = 33,
+
     // ---- Ghostdag Proof
     TempGhostdag = 40,
     TempGhostdagCompact = 41,
@@ -54,7 +57,8 @@ pub enum DatabaseStorePrefixes {
 
     // ---- Retention Period Root ----
     RetentionPeriodRoot = 50,
-    // ---- pruning metadata ----
+
+    // ---- Pruning metadata ----
     PruningUtxosetSyncFlag = 60,
     BodyMissingAnticone = 61,
 
@@ -70,6 +74,13 @@ pub enum DatabaseStorePrefixes {
     UtxoIndex = 192,
     UtxoIndexTips = 193,
     CirculatingSupply = 194,
+
+    // ---- SMT Versioned Store ----
+    SmtBranchVersions = 71,
+    SmtLaneVersions = 73,
+    SmtScoreIndex = 74,
+    SmtSyncFlag = 75,
+    SmtSeqCommitMeta = 76,
 
     // ---- Separator ----
     /// Reserved as a separator

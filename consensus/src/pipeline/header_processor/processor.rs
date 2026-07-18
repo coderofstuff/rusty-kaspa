@@ -10,6 +10,7 @@ use crate::{
     model::{
         services::reachability::MTReachabilityService,
         stores::{
+            DB,
             block_window_cache::{BlockWindowCacheStore, BlockWindowCacheWriter, BlockWindowHeap},
             daa::DbDaaStore,
             depth::DbDepthStore,
@@ -20,21 +21,26 @@ use crate::{
             reachability::{DbReachabilityStore, StagingReachabilityStore},
             relations::{DbRelationsStore, RelationsStoreReader},
             statuses::{DbStatusesStore, StatusesStore, StatusesStoreBatchExtensions, StatusesStoreReader},
-            DB,
         },
     },
     params::Params,
-    pipeline::deps_manager::{BlockProcessingMessage, BlockTask, BlockTaskDependencyManager, TaskId},
+    pipeline::{
+        deps_manager::{BlockProcessingMessage, BlockTask, BlockTaskDependencyManager, TaskId},
+        virtual_processor::fork_logger::ForkLogger,
+    },
     processes::{ghostdag::ordering::SortableBlock, reachability::inquirer as reachability, relations::RelationsStoreExtensions},
 };
 use crossbeam_channel::{Receiver, Sender};
 use itertools::Itertools;
 use kaspa_consensus_core::{
+    BlockHashSet, BlockLevel,
     blockhash::{BlockHashes, ORIGIN},
     blockstatus::BlockStatus::{self, StatusHeaderOnly, StatusInvalid},
-    config::genesis::GenesisBlock,
+    config::{
+        genesis::GenesisBlock,
+        params::{ForkActivation, ForkedParam},
+    },
     header::Header,
-    BlockHashSet, BlockLevel,
 };
 use kaspa_consensusmanager::SessionLock;
 use kaspa_database::prelude::{StoreResultExt, StoreResultUnitExt};
@@ -43,7 +49,7 @@ use kaspa_utils::vec::VecExtensions;
 use parking_lot::RwLock;
 use rayon::ThreadPool;
 use rocksdb::WriteBatch;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{Arc, atomic::Ordering};
 
 use super::super::ProcessingCounters;
 
@@ -108,6 +114,9 @@ pub struct HeaderProcessor {
     pub(super) mergeset_size_limit: u64,
     pub(super) skip_proof_of_work: bool,
     pub(super) max_block_level: BlockLevel,
+    pub(crate) toccata_activation: ForkActivation,
+    pub(crate) toccata_logger: ForkLogger,
+    pub(super) block_version: ForkedParam<u16>,
 
     // DB
     db: Arc<DB>,
@@ -128,11 +137,11 @@ pub struct HeaderProcessor {
 
     // Managers and services
     pub(super) ghostdag_manager: DbGhostdagManager,
-    pub(super) dag_traversal_manager: DbDagTraversalManager,
+    pub(super) _dag_traversal_manager: DbDagTraversalManager,
     pub(super) window_manager: DbWindowManager,
     pub(super) depth_manager: DbBlockDepthManager,
     pub(super) reachability_service: MTReachabilityService<DbReachabilityStore>,
-    pub(super) pruning_point_manager: DbPruningPointManager,
+    pub(super) _pruning_point_manager: DbPruningPointManager,
     pub(super) parents_manager: DbParentsManager,
 
     // Pruning lock
@@ -178,11 +187,11 @@ impl HeaderProcessor {
             block_window_cache_for_past_median_time: storage.block_window_cache_for_past_median_time.clone(),
 
             ghostdag_manager: services.ghostdag_manager.clone(),
-            dag_traversal_manager: services.dag_traversal_manager.clone(),
+            _dag_traversal_manager: services.dag_traversal_manager.clone(),
             window_manager: services.window_manager.clone(),
             reachability_service: services.reachability_service.clone(),
             depth_manager: services.depth_manager.clone(),
-            pruning_point_manager: services.pruning_point_manager.clone(),
+            _pruning_point_manager: services.pruning_point_manager.clone(),
             parents_manager: services.parents_manager.clone(),
 
             task_manager: BlockTaskDependencyManager::new(),
@@ -194,6 +203,9 @@ impl HeaderProcessor {
             mergeset_size_limit: params.mergeset_size_limit(),
             skip_proof_of_work: params.skip_proof_of_work,
             max_block_level: params.max_block_level,
+            toccata_activation: params.toccata_activation,
+            toccata_logger: ForkLogger::new("header in context validation", false),
+            block_version: params.block_version(),
         }
     }
 
@@ -287,10 +299,16 @@ impl HeaderProcessor {
         let mut ctx = self.build_processing_context(header, block_level);
         self.ghostdag(&mut ctx);
         self.pre_pow_validation(&mut ctx, header)?;
+
         if let Err(e) = self.post_pow_validation(&mut ctx, header) {
             self.statuses_store.write().set(ctx.hash, StatusInvalid).unwrap();
             return Err(e);
         }
+
+        if self.toccata_activation.is_within_range_from_activation(header.daa_score, 10_000) {
+            self.toccata_logger.report_activation();
+        }
+
         Ok(ctx)
     }
 
@@ -319,7 +337,7 @@ impl HeaderProcessor {
                 .direct_parents()
                 .iter()
                 .copied()
-                // filter out parents not part of the kept contiguous Dag - which is representd by the stored relations 
+                // filter out parents not part of the kept contiguous Dag - which is represented by the stored relations 
                 .filter(|&parent| relations_read.has(parent).unwrap())
                 .collect_vec()
                 // This kicks-in only for trusted blocks. If an ordinary block is 
@@ -476,6 +494,7 @@ impl HeaderProcessor {
         let mut batch = WriteBatch::default();
         let mut relations_write = self.relations_store.write();
         relations_write.insert_batch(&mut batch, ORIGIN, BlockHashes::new(vec![])).unwrap();
+        self.ghostdag_store.insert_batch(&mut batch, ORIGIN, &self.ghostdag_manager.origin_ghostdag_data()).unwrap();
         let mut hst_write = self.headers_selected_tip_store.write();
         hst_write.set_batch(&mut batch, SortableBlock::new(ORIGIN, 0.into())).unwrap();
         self.db.write(batch).unwrap();

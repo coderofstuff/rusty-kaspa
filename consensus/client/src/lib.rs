@@ -12,6 +12,7 @@
 //! async / threaded environments and WASM bindings.
 //!
 
+mod covenant;
 pub mod error;
 mod imports;
 mod input;
@@ -21,6 +22,7 @@ pub mod result;
 mod serializable;
 mod transaction;
 mod utxo;
+pub use covenant::*;
 pub use input::*;
 pub use outpoint::*;
 pub use output::*;
@@ -34,10 +36,15 @@ cfg_if::cfg_if! {
         mod utils;
         mod hash;
         mod sign;
+        mod parents;
+        mod optional_header;
+        mod block;
 
         pub use header::*;
         pub use utils::*;
         pub use hash::*;
         pub use sign::sign_with_multiple_v3;
+        pub use parents::*;
+        pub use optional_header::*;
     }
 }

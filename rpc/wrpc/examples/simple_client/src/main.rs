@@ -1,11 +1,11 @@
 // Example of simple client to connect with Kaspa node using wRPC connection and collect some node and network basic data
 
-use kaspa_rpc_core::{api::rpc::RpcApi, GetBlockDagInfoResponse, GetServerInfoResponse};
+use kaspa_rpc_core::{GetBlockDagInfoResponse, GetServerInfoResponse, api::rpc::RpcApi};
 use kaspa_wrpc_client::{
+    KaspaRpcClient, Resolver, WrpcEncoding,
     client::{ConnectOptions, ConnectStrategy},
     prelude::{NetworkId, NetworkType},
     result::Result,
-    KaspaRpcClient, Resolver, WrpcEncoding,
 };
 use std::process::ExitCode;
 use std::time::Duration;
@@ -94,6 +94,14 @@ async fn check_node_status() -> Result<()> {
     println!("Pruning point hash: {pruning_point_hash}");
     println!("Virtual DAA score: {virtual_daa_score}");
     println!("Sink: {sink}");
+
+    // get block reward by block hash
+    let result = client.get_block_reward_info(sink).await?;
+
+    println!(
+        "confirmation count: {:?}, reward: {:?}, color: {:?}",
+        result.confirmation_count, result.reward_amount, result.block_color
+    );
 
     // Disconnect client from Kaspa node
     client.disconnect().await?;

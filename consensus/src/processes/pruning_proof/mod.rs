@@ -4,10 +4,10 @@ mod validate;
 
 use std::{
     collections::{
-        hash_map::Entry::{self},
         VecDeque,
+        hash_map::Entry::{self},
     },
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use itertools::Itertools;
@@ -15,7 +15,9 @@ use parking_lot::{Mutex, RwLock};
 use rocksdb::WriteBatch;
 
 use kaspa_consensus_core::{
+    BlockHashMap, BlockHashSet, BlockLevel, HashMapCustomHasher, KType,
     blockhash::{self, BlockHashExtensions},
+    config::params::ForkActivation,
     errors::{
         consensus::{ConsensusError, ConsensusResult},
         pruning::{PruningImportError, PruningImportResult},
@@ -23,7 +25,6 @@ use kaspa_consensus_core::{
     header::Header,
     pruning::{PruningPointProof, PruningPointTrustedData},
     trusted::{TrustedGhostdagData, TrustedHeader},
-    BlockHashMap, BlockHashSet, BlockLevel, HashMapCustomHasher, KType,
 };
 use kaspa_core::info;
 use kaspa_database::prelude::StoreResultExt;
@@ -37,8 +38,9 @@ use crate::{
         storage::ConsensusStorage,
     },
     model::{
-        services::reachability::MTReachabilityService,
+        services::{reachability::MTReachabilityService, seq_commit_accessor::seq_commit_within_threshold},
         stores::{
+            DB,
             depth::DbDepthStore,
             ghostdag::{DbGhostdagStore, GhostdagStoreReader},
             headers::{DbHeadersStore, HeaderStore, HeaderStoreReader},
@@ -52,7 +54,6 @@ use crate::{
             selected_chain::DbSelectedChainStore,
             tips::DbTipsStore,
             virtual_state::{VirtualStateStoreReader, VirtualStores},
-            DB,
         },
     },
     processes::window::WindowType,
@@ -60,22 +61,18 @@ use crate::{
 
 use super::window::WindowManager;
 
+/// Pruning proof manager internal errors
 #[derive(Error, Debug)]
-enum PruningProofManagerInternalError {
+enum ProofInternalError {
     #[error("block at depth error: {0}")]
     BlockAtDepth(String),
-
-    #[error("find common ancestor error: {0}")]
-    FindCommonAncestor(String),
-
-    #[error("cannot find a common ancestor: {0}")]
-    NoCommonAncestor(String),
 
     #[error("missing headers to build proof: {0}")]
     NotEnoughHeadersToBuildProof(String),
 }
 
-type PruningProofManagerInternalResult<T> = std::result::Result<T, PruningProofManagerInternalError>;
+/// Pruning proof manager internal result
+type ProofInternalResult<T> = std::result::Result<T, ProofInternalError>;
 
 struct CachedPruningPointData<T: ?Sized> {
     pruning_point: Hash,
@@ -105,7 +102,7 @@ pub struct PruningProofManager {
     depth_store: Arc<DbDepthStore>,
     selected_chain_store: Arc<RwLock<DbSelectedChainStore>>,
     pruning_samples_store: Arc<DbPruningSamplesStore>,
-    pruning_meta_stores: Arc<RwLock<PruningMetaStores>>,
+    _pruning_meta_stores: Arc<RwLock<PruningMetaStores>>,
 
     ghostdag_manager: DbGhostdagManager,
     traversal_manager: DbDagTraversalManager,
@@ -119,7 +116,10 @@ pub struct PruningProofManager {
     genesis_hash: Hash,
     pruning_proof_m: u64,
     anticone_finalization_depth: u64,
+    finality_depth: u64,
     ghostdag_k: KType,
+    skip_proof_of_work: bool,
+    toccata_activation: ForkActivation,
 
     is_consensus_exiting: Arc<AtomicBool>,
 }
@@ -138,7 +138,10 @@ impl PruningProofManager {
         genesis_hash: Hash,
         pruning_proof_m: u64,
         anticone_finalization_depth: u64,
+        finality_depth: u64,
         ghostdag_k: KType,
+        skip_proof_of_work: bool,
+        toccata_activation: ForkActivation,
         is_consensus_exiting: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -150,7 +153,7 @@ impl PruningProofManager {
             ghostdag_store: storage.ghostdag_store.clone(),
             relations_store: storage.relations_store.clone(),
             pruning_point_store: storage.pruning_point_store.clone(),
-            pruning_meta_stores: storage.pruning_meta_stores.clone(),
+            _pruning_meta_stores: storage.pruning_meta_stores.clone(),
             past_pruning_points_store: storage.past_pruning_points_store.clone(),
             virtual_stores: storage.virtual_stores.clone(),
             body_tips_store: storage.body_tips_store.clone(),
@@ -159,6 +162,7 @@ impl PruningProofManager {
             depth_store: storage.depth_store.clone(),
             pruning_samples_store: storage.pruning_samples_store.clone(),
 
+            ghostdag_manager,
             traversal_manager,
             window_manager,
             parents_manager,
@@ -170,8 +174,10 @@ impl PruningProofManager {
             genesis_hash,
             pruning_proof_m,
             anticone_finalization_depth,
+            finality_depth,
             ghostdag_k,
-            ghostdag_manager,
+            skip_proof_of_work,
+            toccata_activation,
 
             is_consensus_exiting,
         }
@@ -261,6 +267,8 @@ impl PruningProofManager {
 
         let mut daa_window_blocks = BlockHashMap::new();
         let mut ghostdag_blocks = BlockHashMap::new();
+        let mut header_only_chain_segment = Vec::new();
+        let mut header_only_chain_segment_set = BlockHashSet::new();
 
         let ghostdag_k = self.ghostdag_k;
 
@@ -289,6 +297,8 @@ impl PruningProofManager {
                     // We fill `ghostdag_blocks` only for kaspad-go legacy reasons, but the real set we
                     // send is `daa_window_blocks` which represents the full trusted sub-DAG in the antifuture
                     // of the pruning point which kaspad-rust nodes expect to get when synced with headers proof
+                    //
+                    // TODO(post-toccata): remove the redundant `ghostdag_blocks` field as part of cleaning up old P2P versions
                     if let Entry::Vacant(e) = daa_window_blocks.entry(hash) {
                         e.insert(TrustedHeader {
                             header: self.headers_store.get_header(hash).unwrap(),
@@ -329,9 +339,49 @@ impl PruningProofManager {
             }
         }
 
+        if self.toccata_activation.is_active(self.headers_store.get_daa_score(pruning_point).unwrap()) {
+            let pruning_point_header = self.headers_store.get_header(pruning_point).unwrap();
+            // Post-Toccata chain qualification enforces first parent = selected parent.
+            let pruning_point_sp = pruning_point_header.direct_parents().first().copied().expect("never called for genesis");
+            // Pruning point txs use this selected parent as seqcommit context, so the syncer must provide
+            // the selected-parent chain segment that can be queried from that context.
+            let context_blue_score = self.headers_store.get_blue_score(pruning_point_sp).unwrap();
+
+            // We rely on the fact that finality depth is the interval between pruning points, so this chain segment
+            // is always accessible and valid (this function is called before pruning above the prev pruning point)
+            let threshold = self.finality_depth;
+
+            for current in self.reachability_service.default_backward_chain_iterator(pruning_point) {
+                if !daa_window_blocks.contains_key(&current) && header_only_chain_segment_set.insert(current) {
+                    // No need for full ghostdag data here; syncees only need the header for seq-commitment access.
+                    header_only_chain_segment.push(current);
+                }
+
+                let current_header = self.headers_store.get_compact_header_data(current).unwrap();
+                // This cutoff also covers the inactivity-shortcut anchor.
+                // Chain qualification gives pp.bs >= pp.sp.bs + 1, so a block failing the check
+                // satisfies `current.bs + F <= pp.sp.bs <= pp.bs - 1`, i.e. `current.bs <= pp.bs - F - 1`.
+                // pp.inactivity_shortcut is by definition the highest chain block with
+                // `bs <= pp.bs - F - 1` (see `compute_inactivity_shortcut_block`), so its bs is at
+                // least the break block's bs. The iteration walks the chain in decreasing bs and
+                // pushes before checking, so pp.inactivity_shortcut is always included in the segment.
+                if !seq_commit_within_threshold(context_blue_score, current_header.blue_score, threshold) {
+                    break;
+                }
+
+                if !self.toccata_activation.is_active(current_header.daa_score) {
+                    // We are not demanded to provide the chain segment for blocks below the Toccata activation
+                    // See the chain-qualification check in the utxo validation code for details as well as
+                    // code in SeqCommitAccessor
+                    break;
+                }
+            }
+        }
+
         PruningPointTrustedData {
             anticone,
             daa_window_blocks: daa_window_blocks.into_values().collect_vec(),
+            header_only_chain_segment,
             ghostdag_blocks: ghostdag_blocks.into_iter().map(|(hash, ghostdag)| TrustedGhostdagData { hash, ghostdag }).collect_vec(),
         }
     }
@@ -339,10 +389,10 @@ impl PruningProofManager {
     pub fn get_pruning_point_proof(&self) -> Arc<PruningPointProof> {
         let pp = self.pruning_point_store.read().pruning_point().unwrap();
         let mut cache_lock = self.cached_proof.lock();
-        if let Some(cache) = cache_lock.clone() {
-            if cache.pruning_point == pp {
-                return cache.data;
-            }
+        if let Some(cache) = cache_lock.clone()
+            && cache.pruning_point == pp
+        {
+            return cache.data;
         }
         let proof = Arc::new(self.build_pruning_point_proof(pp));
         info!(
@@ -356,11 +406,14 @@ impl PruningProofManager {
 
     pub fn get_pruning_point_anticone_and_trusted_data(&self) -> ConsensusResult<Arc<PruningPointTrustedData>> {
         let pp = self.pruning_point_store.read().pruning_point().unwrap();
+        if pp == self.genesis_hash {
+            return Err(ConsensusError::GeneralOwned(format!("local pruning point is genesis {}", pp)));
+        }
         let mut cache_lock = self.cached_anticone.lock();
-        if let Some(cache) = cache_lock.clone() {
-            if cache.pruning_point == pp {
-                return Ok(cache.data);
-            }
+        if let Some(cache) = cache_lock.clone()
+            && cache.pruning_point == pp
+        {
+            return Ok(cache.data);
         }
 
         let virtual_state = self.virtual_stores.read().state.get().unwrap();
@@ -382,10 +435,10 @@ where
     Self: GhostdagStoreReader,
 {
     /// Extension method to get the block at blue depth `depth` from `high` via this store reader. Used by build and validate.
-    fn block_at_depth(&self, high: Hash, depth: u64) -> Result<Hash, PruningProofManagerInternalError> {
+    fn block_at_depth(&self, high: Hash, depth: u64) -> Result<Hash, ProofInternalError> {
         let high_gd = self
             .get_compact_data(high)
-            .map_err(|err| PruningProofManagerInternalError::BlockAtDepth(format!("high: {high}, depth: {depth}, {err}")))?;
+            .map_err(|err| ProofInternalError::BlockAtDepth(format!("high: {high}, depth: {depth}, {err}")))?;
         let mut current_gd = high_gd;
         let mut current = high;
         while current_gd.blue_score + depth >= high_gd.blue_score {
@@ -395,7 +448,7 @@ where
             let prev = current;
             current = current_gd.selected_parent;
             current_gd = self.get_compact_data(current).map_err(|err| {
-                PruningProofManagerInternalError::BlockAtDepth(format!(
+                ProofInternalError::BlockAtDepth(format!(
                     "high: {}, depth: {}, current: {}, high blue score: {}, current blue score: {}, {}",
                     high, depth, prev, high_gd.blue_score, current_gd.blue_score, err
                 ))

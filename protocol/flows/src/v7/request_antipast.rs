@@ -3,10 +3,11 @@ use kaspa_consensus_core::errors::consensus::ConsensusError;
 use kaspa_core::debug;
 use kaspa_hashes::Hash;
 use kaspa_p2p_lib::{
-    common::ProtocolError,
-    dequeue_with_request_id, make_response,
-    pb::{kaspad_message::Payload, BlockHeadersMessage, DoneHeadersMessage},
     IncomingRoute, Router,
+    common::ProtocolError,
+    convert::header::HeaderFormat,
+    dequeue_with_request_id, make_response,
+    pb::{BlockHeadersMessage, DoneHeadersMessage, kaspad_message::Payload},
 };
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ pub struct HandleAntipastRequests {
     ctx: FlowContext,
     router: Arc<Router>,
     incoming_route: IncomingRoute,
+    header_format: HeaderFormat,
 }
 
 #[async_trait::async_trait]
@@ -28,8 +30,8 @@ impl Flow for HandleAntipastRequests {
 }
 
 impl HandleAntipastRequests {
-    pub fn new(ctx: FlowContext, router: Arc<Router>, incoming_route: IncomingRoute) -> Self {
-        Self { ctx, router, incoming_route }
+    pub fn new(ctx: FlowContext, router: Arc<Router>, incoming_route: IncomingRoute, header_format: HeaderFormat) -> Self {
+        Self { ctx, router, incoming_route, header_format }
     }
 
     async fn start_impl(&mut self) -> Result<(), ProtocolError> {
@@ -53,12 +55,14 @@ impl HandleAntipastRequests {
             debug!("got {} headers in anticone({}) cap past({}) for peer {}", headers.len(), block, context, self.router);
 
             // Sort the headers in bottom-up topological order before sending
-            headers.sort_by(|a, b| a.blue_work.cmp(&b.blue_work));
+            headers.sort_by_key(|a| a.blue_work);
 
             self.router
                 .enqueue(make_response!(
                     Payload::BlockHeaders,
-                    BlockHeadersMessage { block_headers: headers.into_iter().map(|header| header.as_ref().into()).collect() },
+                    BlockHeadersMessage {
+                        block_headers: headers.into_iter().map(|header| (self.header_format, header.as_ref()).into()).collect()
+                    },
                     request_id
                 ))
                 .await?;

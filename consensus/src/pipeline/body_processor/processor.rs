@@ -7,29 +7,32 @@ use crate::{
     model::{
         services::reachability::MTReachabilityService,
         stores::{
+            DB,
             block_transactions::DbBlockTransactionsStore,
             ghostdag::DbGhostdagStore,
             headers::DbHeadersStore,
             reachability::DbReachabilityStore,
             statuses::{DbStatusesStore, StatusesStore, StatusesStoreBatchExtensions, StatusesStoreReader},
             tips::{DbTipsStore, TipsStore},
-            DB,
         },
     },
     pipeline::{
-        deps_manager::{BlockProcessingMessage, BlockTaskDependencyManager, TaskId, VirtualStateProcessingMessage},
         ProcessingCounters,
+        deps_manager::{BlockProcessingMessage, BlockTaskDependencyManager, TaskId, VirtualStateProcessingMessage},
     },
     processes::{coinbase::CoinbaseManager, transaction_validator::TransactionValidator},
 };
 use crossbeam_channel::{Receiver, Sender};
 use kaspa_consensus_core::{
+    KType,
     block::Block,
     blockstatus::BlockStatus::{self, StatusHeaderOnly, StatusInvalid},
-    config::{genesis::GenesisBlock, params::Params},
-    mass::{Mass, MassCalculator, MassOps},
+    config::{
+        genesis::GenesisBlock,
+        params::{ForkedParam, Params},
+    },
+    mass::{BlockLaneLimits, BlockMassLimits, Mass, MassCalculator},
     tx::Transaction,
-    KType,
 };
 use kaspa_consensus_notify::{
     notification::{BlockAddedNotification, Notification},
@@ -41,7 +44,7 @@ use kaspa_notify::notifier::Notify;
 use parking_lot::RwLock;
 use rayon::ThreadPool;
 use rocksdb::WriteBatch;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{Arc, atomic::Ordering};
 
 pub struct BlockBodyProcessor {
     // Channels
@@ -55,19 +58,20 @@ pub struct BlockBodyProcessor {
     db: Arc<DB>,
 
     // Config
-    pub(super) max_block_mass: u64,
+    pub(super) block_mass_limits: ForkedParam<BlockMassLimits>,
+    pub(super) block_lane_limits: BlockLaneLimits,
     pub(super) genesis: GenesisBlock,
-    pub(super) ghostdag_k: KType,
+    pub(super) _ghostdag_k: KType,
 
     // Stores
     pub(super) statuses_store: Arc<RwLock<DbStatusesStore>>,
-    pub(super) ghostdag_store: Arc<DbGhostdagStore>,
-    pub(super) headers_store: Arc<DbHeadersStore>,
+    pub(super) _ghostdag_store: Arc<DbGhostdagStore>,
+    pub(super) _headers_store: Arc<DbHeadersStore>,
     pub(super) block_transactions_store: Arc<DbBlockTransactionsStore>,
     pub(super) body_tips_store: Arc<RwLock<DbTipsStore>>,
 
     // Managers and services
-    pub(super) reachability_service: MTReachabilityService<DbReachabilityStore>,
+    pub(super) _reachability_service: MTReachabilityService<DbReachabilityStore>,
     pub(super) coinbase_manager: CoinbaseManager,
     pub(crate) mass_calculator: MassCalculator,
     pub(super) transaction_validator: TransactionValidator,
@@ -107,17 +111,18 @@ impl BlockBodyProcessor {
             thread_pool,
             db,
 
-            max_block_mass: params.max_block_mass,
+            block_mass_limits: params.block_mass_limits(),
+            block_lane_limits: params.block_lane_limits,
             genesis: params.genesis.clone(),
-            ghostdag_k: params.ghostdag_k(),
+            _ghostdag_k: params.ghostdag_k(),
 
             statuses_store: storage.statuses_store.clone(),
-            ghostdag_store: storage.ghostdag_store.clone(),
-            headers_store: storage.headers_store.clone(),
+            _ghostdag_store: storage.ghostdag_store.clone(),
+            _headers_store: storage.headers_store.clone(),
             block_transactions_store: storage.block_transactions_store.clone(),
             body_tips_store: storage.body_tips_store.clone(),
 
-            reachability_service: services.reachability_service.clone(),
+            _reachability_service: services.reachability_service.clone(),
             coinbase_manager: services.coinbase_manager.clone(),
             mass_calculator: services.mass_calculator.clone(),
             transaction_validator: services.transaction_validator.clone(),
@@ -213,7 +218,9 @@ impl BlockBodyProcessor {
         // Report counters
         self.counters.body_counts.fetch_add(1, Ordering::Relaxed);
         self.counters.txs_counts.fetch_add(block.transactions.len() as u64, Ordering::Relaxed);
-        self.counters.mass_counts.fetch_add(mass.max(), Ordering::Relaxed);
+        self.counters.storage_mass_counts.fetch_add(mass.contextual.storage_mass, Ordering::Relaxed);
+        self.counters.compute_mass_counts.fetch_add(mass.non_contextual.compute_mass, Ordering::Relaxed);
+        self.counters.transient_mass_counts.fetch_add(mass.non_contextual.transient_mass, Ordering::Relaxed);
         Ok(BlockStatus::StatusUTXOPendingVerification)
     }
 
@@ -221,6 +228,8 @@ impl BlockBodyProcessor {
         let mass = self.validate_body_in_isolation(block)?;
         if !is_trusted {
             self.validate_body_in_context(block)?;
+        } else {
+            self.validate_trusted_body_in_context(block)?;
         }
         Ok(mass)
     }

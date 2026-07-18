@@ -1,14 +1,15 @@
-use clap::{arg, Arg, ArgAction, Command};
+use clap::{Arg, ArgAction, Command, arg};
 use kaspa_consensus_core::{
     config::Config,
     network::{NetworkId, NetworkType},
 };
 use kaspa_core::kaspad_env::version;
 use kaspa_notify::address::tracker::Tracker;
+use kaspa_p2p_flows::user_agent_rule::UserAgentRule;
 use kaspa_utils::networking::ContextualNetAddress;
 use kaspa_wrpc_server::address::WrpcNetAddress;
 use serde::Deserialize;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use std::{ffi::OsString, fs};
 use toml::from_str;
 
@@ -52,6 +53,7 @@ pub struct Args {
     pub listen: Option<ContextualNetAddress>,
     #[serde(rename = "uacomment")]
     pub user_agent_comments: Vec<String>,
+    pub ua_rule: Vec<String>,
     pub utxoindex: bool,
     pub reset_db: bool,
     #[serde(rename = "outpeers")]
@@ -93,6 +95,10 @@ pub struct Args {
     pub retention_period_days: Option<f64>,
 
     pub override_params_file: Option<String>,
+
+    pub rocksdb_preset: Option<String>,
+    pub rocksdb_wal_dir: Option<String>,
+    pub rocksdb_cache_size: Option<usize>,
 }
 
 impl Default for Args {
@@ -126,6 +132,7 @@ impl Default for Args {
             add_peers: vec![],
             listen: None,
             user_agent_comments: vec![],
+            ua_rule: vec![],
             yes: false,
             perf_metrics: false,
             perf_metrics_interval_sec: 10,
@@ -145,6 +152,9 @@ impl Default for Args {
             ram_scale: 1.0,
             retention_period_days: None,
             override_params_file: None,
+            rocksdb_preset: None,
+            rocksdb_wal_dir: None,
+            rocksdb_cache_size: None,
         }
     }
 }
@@ -160,6 +170,7 @@ impl Args {
         // TODO: change to `config.enable_sanity_checks = self.sanity` when we reach stable versions
         config.enable_sanity_checks = true;
         config.user_agent_comments.clone_from(&self.user_agent_comments);
+        config.user_agent_rules.clone_from(&self.ua_rule);
         config.block_template_cache_lifetime = self.block_template_cache_lifetime;
         config.p2p_listen_address = self.listen.unwrap_or(ContextualNetAddress::unspecified());
         config.externalip = self.externalip.map(|v| v.normalize(config.default_p2p_port()));
@@ -180,7 +191,13 @@ impl Args {
             .map(|i| {
                 (
                     TransactionOutpoint { transaction_id: i.into(), index: 0 },
-                    UtxoEntry { amount: self.prealloc_amount, script_public_key: spk.clone(), block_daa_score: 0, is_coinbase: false },
+                    UtxoEntry {
+                        amount: self.prealloc_amount,
+                        script_public_key: spk.clone(),
+                        block_daa_score: 0,
+                        is_coinbase: false,
+                        covenant_id: None,
+                    },
                 )
             })
             .collect()
@@ -363,6 +380,15 @@ Setting to 0 prevents the preallocation and sets the maximum to {}, leading to 0
                 .help("Comment to add to the user agent -- See BIP 14 for more information."),
         )
         .arg(
+            Arg::new("ua_rule")
+                .long("ua-rule")
+                .env("KASPAD_UA_RULE")
+                .value_name("RULE")
+                .action(ArgAction::Append)
+                .require_equals(true)
+                .help("User agent admission rule. Forms: allow;regex:<regex>, reject;regex:<regex>, allow;ver:<name><op><version>, reject;ver:<name><op><version>. Version operators: <, <=, >, >=, ==. Example: --ua-rule='reject;ver:kaspad<1.1.1'. Policy: if allow rules exist and none match, reject; if any reject rule matches, reject; otherwise accept."),
+        )
+        .arg(
             Arg::new("externalip")
                 .long("externalip")
                 .env("KASPAD_EXTERNALIP")
@@ -406,6 +432,33 @@ a large RAM (~64GB) can set this value to ~3.0-4.0 and gain superior performance
                 .require_equals(true)
                 .value_parser(clap::value_parser!(String))
                 .help("Path to a JSON file containing override parameters.")
+        )
+        .arg(
+            Arg::new("rocksdb-preset")
+                .long("rocksdb-preset")
+                .env("KASPAD_ROCKSDB_PRESET")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(String))
+                .help("RocksDB configuration preset: 'default' (SSD/NVMe) or 'hdd' (optimized for hard disk drives with BlobDB, compression, rate limiting). \
+                       HDD preset recommended for archival nodes on HDD storage (see docs/archival.md).")
+        )
+        .arg(
+            Arg::new("rocksdb-wal-dir")
+                .long("rocksdb-wal-dir")
+                .env("KASPAD_ROCKSDB_WAL_DIR")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(String))
+                .help("Custom WAL (Write-Ahead Log) directory for RocksDB. Useful for hybrid setups: database on HDD, WAL on fast NVMe SSD. \
+                       Example: --rocksdb-wal-dir=/mnt/nvme/kaspa-wal")
+        )
+        .arg(
+            Arg::new("rocksdb-cache-size")
+                .long("rocksdb-cache-size")
+                .env("KASPAD_ROCKSDB_CACHE_SIZE")
+                .require_equals(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("RocksDB block cache size in MB. Default: 256MB for HDD preset (scales with --ram-scale). \
+                       Increase for public RPC nodes with heavy query loads. Example: --rocksdb-cache-size=2048 for 2GB cache.")
         )
         ;
 
@@ -477,6 +530,7 @@ impl Args {
             sanity: arg_match_unwrap_or::<bool>(&m, "sanity", defaults.sanity),
             yes: arg_match_unwrap_or::<bool>(&m, "yes", defaults.yes),
             user_agent_comments: arg_match_many_unwrap_or::<String>(&m, "user_agent_comments", defaults.user_agent_comments),
+            ua_rule: arg_match_many_unwrap_or::<String>(&m, "ua_rule", defaults.ua_rule),
             externalip: m.get_one::<ContextualNetAddress>("externalip").cloned(),
             perf_metrics: arg_match_unwrap_or::<bool>(&m, "perf-metrics", defaults.perf_metrics),
             perf_metrics_interval_sec: arg_match_unwrap_or::<u64>(&m, "perf-metrics-interval-sec", defaults.perf_metrics_interval_sec),
@@ -495,11 +549,16 @@ impl Args {
             #[cfg(feature = "devnet-prealloc")]
             prealloc_amount: arg_match_unwrap_or::<u64>(&m, "prealloc-amount", defaults.prealloc_amount),
             override_params_file: m.get_one::<String>("override-params-file").cloned(),
+            rocksdb_preset: m.get_one::<String>("rocksdb-preset").cloned().or(defaults.rocksdb_preset),
+            rocksdb_wal_dir: m.get_one::<String>("rocksdb-wal-dir").cloned().or(defaults.rocksdb_wal_dir),
+            rocksdb_cache_size: m.get_one::<usize>("rocksdb-cache-size").cloned().or(defaults.rocksdb_cache_size),
         };
 
         if arg_match_unwrap_or::<bool>(&m, "enable-mainnet-mining", false) {
             println!("\nNOTE: The flag --enable-mainnet-mining is deprecated and defaults to true also w/o explicit setting\n")
         }
+
+        validate_ua_rules(&args.ua_rule)?;
 
         Ok(args)
     }
@@ -515,6 +574,34 @@ fn arg_match_many_unwrap_or<T: Clone + Send + Sync + 'static>(m: &clap::ArgMatch
     match m.get_many::<T>(arg_id) {
         Some(val_ref) => val_ref.cloned().collect(),
         None => default,
+    }
+}
+
+fn validate_ua_rules(rules: &[String]) -> Result<(), clap::Error> {
+    for rule in rules {
+        UserAgentRule::parse(rule).map_err(|err| {
+            clap::Error::raw(clap::error::ErrorKind::ValueValidation, format!("invalid --ua-rule `{}`: {}", rule, err))
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+
+    #[test]
+    fn parses_ua_rules() {
+        let args = Args::parse(["kaspad", r"--ua-rule=allow;regex:(^|/)kaspad:", r"--ua-rule=reject;ver:kaspad<1.1.1"]).unwrap();
+
+        assert_eq!(args.ua_rule, vec![r"allow;regex:(^|/)kaspad:", r"reject;ver:kaspad<1.1.1"]);
+    }
+
+    #[test]
+    fn rejects_invalid_ua_rule() {
+        let err = Args::parse(["kaspad", "--ua-rule=reject;regex:*"]).unwrap_err();
+
+        assert!(err.to_string().contains("invalid --ua-rule"));
     }
 }
 

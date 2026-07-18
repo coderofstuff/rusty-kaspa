@@ -57,21 +57,21 @@
 //!    UTXO sets will result in a browser UI freezing.
 //!
 
+use super::SignerT;
 use crate::imports::*;
 use crate::result::Result;
 use crate::tx::{
-    mass::*, Fees, GeneratorSettings, GeneratorSummary, PaymentDestination, PendingTransaction, PendingTransactionIterator,
-    PendingTransactionStream,
+    Fees, GeneratorSettings, GeneratorSummary, PaymentDestination, PendingTransaction, PendingTransactionIterator,
+    PendingTransactionStream, mass::*,
 };
 use crate::utxo::{NetworkParams, UtxoContext, UtxoEntryReference};
 use kaspa_consensus_client::UtxoEntry;
 use kaspa_consensus_core::constants::UNACCEPTED_DAA_SCORE;
 use kaspa_consensus_core::subnets::SUBNETWORK_ID_NATIVE;
 use kaspa_consensus_core::tx::{Transaction, TransactionInput, TransactionOutpoint, TransactionOutput};
+use kaspa_hashes::Hash;
 use kaspa_txscript::pay_to_address_script;
 use std::collections::VecDeque;
-
-use super::SignerT;
 
 // fee reduction - when a transactions has some storage mass
 // and the total mass is below this threshold (as well as
@@ -397,7 +397,13 @@ impl Generator {
                 (
                     outputs
                         .iter()
-                        .map(|output| TransactionOutput::new(output.amount, pay_to_address_script(&output.address)))
+                        .map(|output| {
+                            TransactionOutput::with_covenant(
+                                output.amount,
+                                pay_to_address_script(&output.address),
+                                output.covenant.clone().map(Into::into),
+                            )
+                        })
                         .collect(),
                     Some(outputs.iter().map(|output| output.amount).sum()),
                 )
@@ -568,7 +574,7 @@ impl Generator {
     /// transaction for each stream item request. NOTE: transactions
     /// are generated only when each stream item is polled.
     #[inline(always)]
-    pub fn stream(&self) -> impl Stream<Item = Result<PendingTransaction>> {
+    pub fn stream(&self) -> impl Stream<Item = Result<PendingTransaction>> + 'static {
         Box::pin(PendingTransactionStream::new(self))
     }
 
@@ -591,18 +597,20 @@ impl Generator {
             .pop_front()
             .or_else(|| stage.utxo_iterator.as_mut().and_then(|utxo_stage_iterator| utxo_stage_iterator.next()))
             .or_else(|| context.priority_utxo_entries.as_mut().and_then(|entries| entries.pop_front()))
-            .or_else(|| loop {
-                let utxo_entry = context.utxo_source_iterator.next()?;
+            .or_else(|| {
+                loop {
+                    let utxo_entry = context.utxo_source_iterator.next()?;
 
-                if let Some(filter) = context.priority_utxo_entry_filter.as_ref() {
-                    if filter.contains(&utxo_entry) {
+                    if let Some(filter) = context.priority_utxo_entry_filter.as_ref()
+                        && filter.contains(&utxo_entry)
+                    {
                         // skip the entry from the iterator intake
                         // if it has been supplied as a priority entry
                         continue;
                     }
-                }
 
-                break Some(utxo_entry);
+                    break Some(utxo_entry);
+                }
             })
     }
 
@@ -614,19 +622,31 @@ impl Generator {
 
     /// Calculate relay transaction mass for the current transaction `data`
     #[inline(always)]
-    fn calc_relay_transaction_mass(&self, data: &Data) -> u64 {
+    fn calc_relay_transaction_compute_mass(&self, data: &Data) -> u64 {
         data.aggregate_mass + self.inner.standard_change_output_compute_mass
     }
 
     /// Calculate relay transaction fees for the current transaction `data`
     #[inline(always)]
     fn calc_relay_transaction_compute_fees(&self, data: &Data) -> u64 {
-        let mass = self.calc_relay_transaction_mass(data);
-        self.inner.mass_calculator.calc_minimum_transaction_fee_from_mass(mass).max(self.calc_fee_rate(mass))
+        let compute_mass = self.calc_relay_transaction_compute_mass(data);
+        self.calc_compute_fees(compute_mass)
     }
 
-    fn calc_fees_from_mass(&self, mass: u64) -> u64 {
-        self.inner.mass_calculator.calc_minimum_transaction_fee_from_mass(mass).max(self.calc_fee_rate(mass))
+    /// Calculates fees for compute-only contexts where transaction mass equals compute mass.
+    fn calc_compute_fees(&self, compute_mass: u64) -> u64 {
+        self.calc_transaction_fees(compute_mass, compute_mass)
+    }
+
+    /// Calculates the required transaction fee from the mass dimensions.
+    /// - Mempool minimum relay policy prices compute mass.
+    /// - User-provided fee rate follows mempool prioritization by pricing full transaction mass including storage mass.
+    ///
+    /// Note: `compute_mass` is the wallet's minimum-relay mass proxy. It is mostly
+    /// compute mass, but its payload component is hardened to account for normalized
+    /// transient byte mass.
+    fn calc_transaction_fees(&self, compute_mass: u64, transaction_mass: u64) -> u64 {
+        self.inner.mass_calculator.calc_minimum_transaction_fee_from_mass(compute_mass).max(self.calc_fee_rate(transaction_mass))
     }
 
     /// Main UTXO entry processing loop. This function sources UTXOs from [`Generator::get_utxo_entry()`] and
@@ -677,15 +697,14 @@ impl Generator {
             if let Some(final_transaction) = &self.inner.final_transaction {
                 // try finish a stage or produce a final transaction with target value
                 // use basic condition checks to avoid unnecessary processing
-                if data.aggregate_mass > TRANSACTION_MASS_BOUNDARY_FOR_STAGE_INPUT_ACCUMULATION
+                if (data.aggregate_mass > TRANSACTION_MASS_BOUNDARY_FOR_STAGE_INPUT_ACCUMULATION
                     || (self.inner.final_transaction_priority_fee.sender_pays()
                         && stage.aggregate_input_value >= final_transaction.value_with_priority_fee)
                     || (self.inner.final_transaction_priority_fee.receiver_pays()
-                        && stage.aggregate_input_value >= final_transaction.value_no_fees.saturating_sub(context.aggregate_fees))
+                        && stage.aggregate_input_value >= final_transaction.value_no_fees.saturating_sub(context.aggregate_fees)))
+                    && let Some(kind) = self.try_finish_standard_stage_processing(context, stage, &mut data, final_transaction)?
                 {
-                    if let Some(kind) = self.try_finish_standard_stage_processing(context, stage, &mut data, final_transaction)? {
-                        return Ok((kind, data));
-                    }
+                    return Ok((kind, data));
                 }
             }
         }
@@ -867,7 +886,6 @@ impl Generator {
 
                 data.aggregate_mass = calc.combine_mass(compute_mass, storage_mass);
 
-                transaction_fees += change_output_value;
                 data.transaction_fees = transaction_fees;
                 stage.aggregate_fees += transaction_fees;
                 context.aggregate_fees += transaction_fees;
@@ -890,16 +908,15 @@ impl Generator {
 
         let mut absorb_change_to_fees = false;
 
-        let compute_mass_with_change = data.aggregate_mass
-            + self.inner.standard_change_output_compute_mass
-            + self.inner.final_transaction_outputs_compute_mass
-            + self.inner.final_transaction_payload_mass;
+        let compute_mass_no_change =
+            data.aggregate_mass + self.inner.final_transaction_outputs_compute_mass + self.inner.final_transaction_payload_mass;
+        let compute_mass_with_change = compute_mass_no_change + self.inner.standard_change_output_compute_mass;
 
         let storage_mass = if stage.number_of_transactions > 0 {
             // calculate for edge transaction boundaries
             // we know that stage.number_of_transactions > 0 will trigger stage generation
             let edge_compute_mass = data.aggregate_mass + self.inner.standard_change_output_compute_mass; //self.inner.final_transaction_outputs_compute_mass + self.inner.final_transaction_payload_mass;
-            let edge_fees = self.calc_fees_from_mass(edge_compute_mass);
+            let edge_fees = self.calc_compute_fees(edge_compute_mass);
             let edge_output_value = data.aggregate_input_value.saturating_sub(edge_fees);
             if edge_output_value != 0 {
                 let edge_output_harmonic = calc.calc_storage_mass_output_harmonic_single(edge_output_value);
@@ -932,8 +949,14 @@ impl Generator {
                     if storage_mass_with_change < storage_mass_no_change {
                         storage_mass_with_change
                     } else {
-                        let fees_with_change = calc.calc_fee_for_mass(storage_mass_with_change);
-                        let fees_no_change = calc.calc_fee_for_mass(storage_mass_no_change);
+                        let fees_with_change = self.calc_transaction_fees(
+                            compute_mass_with_change,
+                            calc.combine_mass(compute_mass_with_change, storage_mass_with_change),
+                        );
+                        let fees_no_change = self.calc_transaction_fees(
+                            compute_mass_no_change,
+                            calc.combine_mass(compute_mass_no_change, storage_mass_no_change),
+                        );
                         let difference = fees_with_change.saturating_sub(fees_no_change);
 
                         if difference > change_value {
@@ -950,8 +973,9 @@ impl Generator {
         if storage_mass > MAXIMUM_STANDARD_TRANSACTION_MASS {
             Err(Error::StorageMassExceedsMaximumTransactionMass { storage_mass })
         } else {
-            let transaction_mass = calc.combine_mass(compute_mass_with_change, storage_mass);
-            let transaction_fees = self.calc_fees_from_mass(transaction_mass); //calc.calc_minimum_transaction_fee_from_mass(transaction_mass) + self.calc_fee_rate(transaction_mass);
+            let compute_mass = if absorb_change_to_fees { compute_mass_no_change } else { compute_mass_with_change };
+            let transaction_mass = calc.combine_mass(compute_mass, storage_mass);
+            let transaction_fees = self.calc_transaction_fees(compute_mass, transaction_mass);
 
             Ok(MassDisposition { transaction_mass, transaction_fees, storage_mass, absorb_change_to_fees })
         }
@@ -966,7 +990,7 @@ impl Generator {
             + self.inner.standard_change_output_compute_mass
             + self.inner.network_params.additional_compound_transaction_mass();
         // let compute_fees = calc.calc_minimum_transaction_fee_from_mass(compute_mass) + self.calc_fee_rate(compute_mass);
-        let compute_fees = self.calc_fees_from_mass(compute_mass);
+        let compute_fees = self.calc_compute_fees(compute_mass);
 
         // TODO - consider removing this as calculated storage mass should produce `0` value
         let edge_output_harmonic =
@@ -985,7 +1009,7 @@ impl Generator {
             }
         } else {
             data.aggregate_mass = transaction_mass;
-            data.transaction_fees = self.calc_fees_from_mass(transaction_mass);
+            data.transaction_fees = self.calc_transaction_fees(compute_mass, transaction_mass);
             stage.aggregate_fees += data.transaction_fees;
             context.aggregate_fees += data.transaction_fees;
             Ok(Some(DataKind::Edge))
@@ -1085,7 +1109,7 @@ impl Generator {
                     // this should never occur as we should not produce transactions higher than the mass limit
                     return Err(Error::MassCalculationError);
                 }
-                tx.set_mass(transaction_mass);
+                tx.set_storage_mass(transaction_mass);
 
                 context.aggregate_mass += transaction_mass;
                 context.final_transaction_id = Some(tx.id());
@@ -1128,6 +1152,8 @@ impl Generator {
 
                 let output_value = aggregate_input_value.saturating_sub(transaction_fees);
                 let script_public_key = pay_to_address_script(&self.inner.change_address);
+
+                // todo add param to support covenants as part of output
                 let output = TransactionOutput::new(output_value, script_public_key.clone());
                 let tx = Transaction::new(0, inputs, vec![output], 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
 
@@ -1141,13 +1167,18 @@ impl Generator {
                     // this should never occur as we should not produce transactions higher than the mass limit
                     return Err(Error::MassCalculationError);
                 }
-                tx.set_mass(transaction_mass);
+                tx.set_storage_mass(transaction_mass);
 
                 context.aggregate_mass += transaction_mass;
                 context.number_of_transactions += 1;
 
-                let previous_batch_utxo_entry_reference =
-                    Self::create_batch_utxo_entry_reference(tx.id(), output_value, script_public_key, &self.inner.change_address);
+                let previous_batch_utxo_entry_reference = Self::create_batch_utxo_entry_reference(
+                    tx.id(),
+                    output_value,
+                    script_public_key,
+                    &self.inner.change_address,
+                    tx.outputs.first().as_ref().and_then(|output| output.covenant.map(|c| c.covenant_id)),
+                );
 
                 match kind {
                     DataKind::Node => {
@@ -1191,6 +1222,7 @@ impl Generator {
         amount: u64,
         script_public_key: ScriptPublicKey,
         address: &Address,
+        covenant_id: Option<Hash>,
     ) -> UtxoEntryReference {
         let outpoint = TransactionOutpoint::new(txid, 0);
         let utxo = UtxoEntry {
@@ -1200,6 +1232,7 @@ impl Generator {
             script_public_key,
             block_daa_score: UNACCEPTED_DAA_SCORE,
             is_coinbase: false, // entry
+            covenant_id,
         };
         UtxoEntryReference { utxo: Arc::new(utxo) }
     }

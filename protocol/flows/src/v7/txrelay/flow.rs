@@ -7,19 +7,19 @@ use kaspa_consensus_core::tx::{Transaction, TransactionId};
 use kaspa_consensusmanager::ConsensusProxy;
 use kaspa_core::{time::unix_now, warn};
 use kaspa_mining::{
+    P2pTxCountSample,
     errors::MiningManagerError,
     mempool::{
         errors::RuleError,
         tx::{Orphan, Priority, RbfPolicy},
     },
     model::tx_query::TransactionQuery,
-    P2pTxCountSample,
 };
 use kaspa_p2p_lib::{
-    common::{ProtocolError, DEFAULT_TIMEOUT},
-    dequeue, make_message,
-    pb::{kaspad_message::Payload, RequestTransactionsMessage, TransactionNotFoundMessage},
     IncomingRoute, Router,
+    common::{DEFAULT_TIMEOUT, ProtocolError},
+    dequeue, make_message,
+    pb::{RequestTransactionsMessage, TransactionNotFoundMessage, kaspad_message::Payload},
 };
 use std::sync::Arc;
 use tokio::time::timeout;
@@ -106,12 +106,13 @@ impl RelayTransactionsFlow {
             }
 
             // Loop over incoming block inv messages
-            let inv: Vec<TransactionId> = dequeue!(self.invs_route, Payload::InvTransactions)?.try_into()?;
-            // trace!("Receive an inv message from {} with {} transaction ids", self.router.identity(), inv.len());
+            let msg = dequeue!(self.invs_route, Payload::InvTransactions)?;
+            // trace!("Receive an inv message from {} with {} transaction ids", self.router.identity(), msg.ids.len());
 
-            if inv.len() > MAX_INV_PER_TX_INV_MSG {
+            if msg.ids.len() > MAX_INV_PER_TX_INV_MSG {
                 return Err(ProtocolError::Other("Number of invs in tx inv message is over the limit"));
             }
+            let inv: Vec<TransactionId> = msg.try_into()?;
 
             let session = self.ctx.consensus().unguarded_session();
 
@@ -231,7 +232,7 @@ impl RelayTransactionsFlow {
                 }
                 Err(MiningManagerError::MempoolError(RuleError::RejectNonStandard(..))) => {
                     self.spam_counter += 1;
-                    if self.spam_counter % 100 == 0 {
+                    if self.spam_counter.is_multiple_of(100) {
                         kaspa_core::warn!("Peer {} has shared {} spam/non-standard txs ({:?})", self.router, self.spam_counter, res);
                     }
                 }
@@ -281,6 +282,9 @@ impl RequestTransactionsFlow {
     async fn start_impl(&mut self) -> Result<(), ProtocolError> {
         loop {
             let msg = dequeue!(self.incoming_route, Payload::RequestTransactions)?;
+            if msg.ids.len() > MAX_INV_PER_TX_INV_MSG {
+                return Err(ProtocolError::Other("Number of tx ids in request transactions message is over the limit"));
+            }
             let tx_ids: Vec<_> = msg.try_into()?;
             for transaction_id in tx_ids {
                 if let Some(mutable_tx) =

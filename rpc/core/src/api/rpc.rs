@@ -7,9 +7,9 @@
 //!
 
 use crate::api::connection::DynRpcConnection;
-use crate::{model::*, notify::connection::ChannelConnection, RpcResult};
+use crate::{RpcResult, model::*, notify::connection::ChannelConnection};
 use async_trait::async_trait;
-use downcast::{downcast_sync, AnySync};
+use downcast::{AnySync, downcast_sync};
 use kaspa_notify::{listener::ListenerId, scope::Scope, subscription::Command};
 use std::sync::Arc;
 
@@ -231,6 +231,19 @@ pub trait RpcApi: Sync + Send + AnySync {
         Ok(self.get_block_call(None, GetBlockRequest::new(hash, include_transactions)).await?.block)
     }
     async fn get_block_call(&self, connection: Option<&DynRpcConnection>, request: GetBlockRequest) -> RpcResult<GetBlockResponse>;
+
+    /// Returns the witness required to prove a KIP-21 lane's state against
+    /// `block_hash`'s header `seq_commit`.
+    ///
+    /// `block_hash` must be a chain (selected-parent-chain) block.
+    async fn get_seq_commit_lane_proof(&self, block_hash: RpcHash, lane_key: RpcHash) -> RpcResult<GetSeqCommitLaneProofResponse> {
+        self.get_seq_commit_lane_proof_call(None, GetSeqCommitLaneProofRequest::new(block_hash, lane_key)).await
+    }
+    async fn get_seq_commit_lane_proof_call(
+        &self,
+        connection: Option<&DynRpcConnection>,
+        request: GetSeqCommitLaneProofRequest,
+    ) -> RpcResult<GetSeqCommitLaneProofResponse>;
 
     /// Requests information about a specific subnetwork.
     async fn get_subnetwork(&self, subnetwork_id: RpcSubnetworkId) -> RpcResult<GetSubnetworkResponse> {
@@ -481,6 +494,15 @@ pub trait RpcApi: Sync + Send + AnySync {
         connection: Option<&DynRpcConnection>,
         request: GetCurrentBlockColorRequest,
     ) -> RpcResult<GetCurrentBlockColorResponse>;
+
+    async fn get_block_reward_info(&self, hash: RpcHash) -> RpcResult<GetBlockRewardInfoResponse> {
+        self.get_block_reward_info_call(None, GetBlockRewardInfoRequest::new(hash)).await
+    }
+    async fn get_block_reward_info_call(
+        &self,
+        connection: Option<&DynRpcConnection>,
+        request: GetBlockRewardInfoRequest,
+    ) -> RpcResult<GetBlockRewardInfoResponse>;
 
     async fn get_virtual_chain_from_block_v2(
         &self,

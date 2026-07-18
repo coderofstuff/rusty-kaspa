@@ -33,20 +33,20 @@ pub struct SyncManager<
     traversal_manager: DagTraversalManager<U, T, S>,
     ghostdag_store: Arc<U>,
     selected_chain_store: Arc<RwLock<V>>,
-    header_selected_tip_store: Arc<RwLock<W>>,
+    _header_selected_tip_store: Arc<RwLock<W>>,
     pruning_point_store: Arc<RwLock<X>>,
     statuses_store: Arc<RwLock<Y>>,
 }
 
 impl<
-        S: RelationsStoreReader,
-        T: ReachabilityStoreReader,
-        U: GhostdagStoreReader,
-        V: SelectedChainStoreReader,
-        W: HeadersSelectedTipStoreReader,
-        X: PruningStoreReader,
-        Y: StatusesStoreReader,
-    > SyncManager<S, T, U, V, W, X, Y>
+    S: RelationsStoreReader,
+    T: ReachabilityStoreReader,
+    U: GhostdagStoreReader,
+    V: SelectedChainStoreReader,
+    W: HeadersSelectedTipStoreReader,
+    X: PruningStoreReader,
+    Y: StatusesStoreReader,
+> SyncManager<S, T, U, V, W, X, Y>
 {
     pub fn new(
         mergeset_size_limit: u64,
@@ -64,7 +64,7 @@ impl<
             traversal_manager,
             ghostdag_store,
             selected_chain_store,
-            header_selected_tip_store,
+            _header_selected_tip_store: header_selected_tip_store,
             pruning_point_store,
             statuses_store,
         }
@@ -165,13 +165,10 @@ impl<
         }
 
         let mut highest_with_body = None;
-        let mut forward_iterator = self.reachability_service.forward_chain_iterator(pp, high, true).tuple_windows();
+        let forward_iterator = self.reachability_service.forward_chain_iterator(pp, high, true).tuple_windows();
         let mut backward_iterator = self.reachability_service.backward_chain_iterator(high, pp, true);
-        loop {
+        for (parent, current) in forward_iterator {
             // We loop from both directions in parallel in order to use the shorter path
-            let Some((parent, current)) = forward_iterator.next() else {
-                break;
-            };
             let status = self.statuses_store.read().get(current).unwrap();
             if status.is_header_only() {
                 // Going up, the first parent which has a header-only child is our target

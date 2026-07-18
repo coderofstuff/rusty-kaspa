@@ -22,8 +22,8 @@ use crate::factory::try_load_account;
 use crate::imports::*;
 use crate::settings::{SettingsStore, WalletSettings};
 use crate::storage::interface::{OpenArgs, StorageDescriptor};
-use crate::storage::local::interface::LocalStore;
 use crate::storage::local::Storage;
+use crate::storage::local::interface::LocalStore;
 use crate::wallet::keydata::PrvKeyDataVariantKind;
 use crate::wallet::maps::ActiveAccountMap;
 use kaspa_bip32::{ExtendedKey, Language, Mnemonic, Prefix as KeyPrefix, WordCount};
@@ -371,7 +371,7 @@ impl Wallet {
                     .collect::<Vec<_>>()
             };
             Some(
-                futures::stream::iter(stored_accounts.into_iter())
+                futures::stream::iter(stored_accounts)
                     .then(|(account, meta)| try_load_account(self, account, meta))
                     .try_collect::<Vec<_>>()
                     // .try_collect::<Result<Vec<_>>>()
@@ -584,10 +584,10 @@ impl Wallet {
             self.set_network_id(&network_id).unwrap_or_else(|_| log_error!("Unable to select network type: `{}`", network_id));
         }
 
-        if let Some(url) = settings.get::<String>(WalletSettings::Server) {
-            if let Some(wrpc_client) = self.try_wrpc_client() {
-                wrpc_client.set_url(Some(url.as_str())).unwrap_or_else(|_| log_error!("Unable to set rpc url: `{}`", url));
-            }
+        if let Some(url) = settings.get::<String>(WalletSettings::Server)
+            && let Some(wrpc_client) = self.try_wrpc_client()
+        {
+            wrpc_client.set_url(Some(url.as_str())).unwrap_or_else(|_| log_error!("Unable to set rpc url: `{}`", url));
         }
 
         Ok(())
@@ -1095,14 +1095,10 @@ impl Wallet {
     }
 
     async fn handle_event(self: &Arc<Self>, event: Box<Events>) -> Result<()> {
-        match &*event {
-            Events::Pending { record } | Events::Maturity { record } | Events::Reorg { record } => {
-                if !record.is_change() {
-                    self.store().as_transaction_record_store()?.store(&[record]).await?;
-                }
-            }
-
-            _ => {}
+        if let Events::Pending { record } | Events::Maturity { record } | Events::Reorg { record } = &*event
+            && !record.is_change()
+        {
+            self.store().as_transaction_record_store()?.store(&[record]).await?;
         }
 
         Ok(())

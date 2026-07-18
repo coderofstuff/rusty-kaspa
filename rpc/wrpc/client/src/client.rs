@@ -6,7 +6,7 @@ use crate::{error::Error, node::NodeDescriptor};
 use kaspa_consensus_core::network::NetworkType;
 use kaspa_notify::{
     listener::ListenerLifespan,
-    subscription::{context::SubscriptionContext, MutationPolicies, UtxosChangedMutationPolicy},
+    subscription::{MutationPolicies, UtxosChangedMutationPolicy, context::SubscriptionContext},
 };
 use kaspa_rpc_core::{
     api::ctl::RpcCtl,
@@ -110,8 +110,8 @@ impl Inner {
             rpc_ctl,
             service_ctl: DuplexChannel::unbounded(),
             background_services_running: Arc::new(AtomicBool::new(false)),
-            connect_guard: async_std::sync::Mutex::new(()),
-            disconnect_guard: async_std::sync::Mutex::new(()),
+            connect_guard: async_lock::Mutex::new(()),
+            disconnect_guard: async_lock::Mutex::new(()),
             // ---
             ctor_url: Mutex::new(url.map(|s| s.to_string())),
             default_url: Mutex::new(None),
@@ -633,6 +633,7 @@ impl RpcApi for KaspaRpcClient {
             GetBlocks,
             GetBlockTemplate,
             GetCurrentBlockColor,
+            GetBlockRewardInfo,
             GetCoinSupply,
             GetConnectedPeerInfo,
             GetConnections,
@@ -663,6 +664,7 @@ impl RpcApi for KaspaRpcClient {
             SubmitTransaction,
             SubmitTransactionReplacement,
             Unban,
+            GetSeqCommitLaneProof,
         ]
     );
 

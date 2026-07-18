@@ -4,10 +4,10 @@ use crate::{
     model::{
         services::{reachability::MTReachabilityService, relations::MTRelationsService, statuses::MTStatusesService},
         stores::{
-            block_window_cache::BlockWindowCacheStore, daa::DbDaaStore, depth::DbDepthStore, ghostdag::DbGhostdagStore,
+            DB, block_window_cache::BlockWindowCacheStore, daa::DbDaaStore, depth::DbDepthStore, ghostdag::DbGhostdagStore,
             headers::DbHeadersStore, headers_selected_tip::DbHeadersSelectedTipStore, past_pruning_points::DbPastPruningPointsStore,
             pruning::DbPruningStore, pruning_samples::DbPruningSamplesStore, reachability::DbReachabilityStore,
-            relations::DbRelationsStore, selected_chain::DbSelectedChainStore, statuses::DbStatusesStore, DB,
+            relations::DbRelationsStore, selected_chain::DbSelectedChainStore, statuses::DbStatusesStore,
         },
     },
     processes::{
@@ -18,7 +18,7 @@ use crate::{
 };
 use kaspa_consensus_core::mass::MassCalculator;
 use kaspa_txscript::caches::TxScriptCacheCounters;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
 pub type DbGhostdagManager =
     GhostdagManager<DbGhostdagStore, MTRelationsService<DbRelationsStore>, MTReachabilityService<DbReachabilityStore>, DbHeadersStore>;
@@ -50,7 +50,7 @@ pub type DbParentsManager = ParentsManager<DbHeadersStore, DbReachabilityStore, 
 
 pub struct ConsensusServices {
     // Underlying storage
-    storage: Arc<ConsensusStorage>,
+    _storage: Arc<ConsensusStorage>,
 
     // Services and managers
     pub statuses_service: MTStatusesService<DbStatusesStore>,
@@ -127,25 +127,24 @@ impl ConsensusServices {
             params.deflationary_phase_daa_score,
             params.pre_deflationary_phase_base_subsidy,
             params.bps_history(),
+            params.toccata_activation,
         );
 
-        let mass_calculator = MassCalculator::new(
-            params.mass_per_tx_byte,
-            params.mass_per_script_pub_key_byte,
-            params.mass_per_sig_op,
-            params.storage_mass_parameter,
-        );
+        let mass_calculator =
+            MassCalculator::new(params.mass_per_tx_byte, params.mass_per_script_pub_key_byte, params.storage_mass_parameter);
 
         let transaction_validator = TransactionValidator::new(
             params.max_tx_inputs,
             params.max_tx_outputs,
-            params.max_signature_script_len,
+            params.max_signature_script_len(),
             params.max_script_public_key_len,
             params.coinbase_payload_script_public_key_max_len,
             params.coinbase_maturity(),
             params.ghostdag_k(),
             tx_script_cache_counters,
             mass_calculator.clone(),
+            params.toccata_activation,
+            params.mass_per_sig_op,
         );
 
         let pruning_point_manager = PruningPointManager::new(
@@ -180,7 +179,10 @@ impl ConsensusServices {
             params.genesis.hash,
             params.pruning_proof_m,
             params.anticone_finalization_depth(),
+            params.finality_depth(),
             params.ghostdag_k(),
+            params.skip_proof_of_work,
+            params.toccata_activation,
             is_consensus_exiting,
         ));
 
@@ -196,7 +198,7 @@ impl ConsensusServices {
         );
 
         Arc::new(Self {
-            storage,
+            _storage: storage,
             statuses_service,
             relations_service,
             reachability_service,

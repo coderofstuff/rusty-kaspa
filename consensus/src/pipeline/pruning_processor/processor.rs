@@ -27,28 +27,28 @@ use crate::{
 use crossbeam_channel::Receiver as CrossbeamReceiver;
 use itertools::Itertools;
 use kaspa_consensus_core::{
+    BlockHashMap, BlockHashSet, BlockLevel,
     blockhash::ORIGIN,
     blockstatus::BlockStatus::StatusHeaderOnly,
     config::Config,
     muhash::MuHashExtensions,
     pruning::{PruningPointProof, PruningPointTrustedData},
     trusted::ExternalGhostdagData,
-    BlockHashMap, BlockHashSet, BlockLevel,
 };
 use kaspa_consensusmanager::SessionLock;
 use kaspa_core::{debug, info, trace, warn};
-use kaspa_database::prelude::{BatchDbWriter, MemoryWriter, StoreResultExt, DB};
-use kaspa_hashes::Hash;
+use kaspa_database::prelude::{BatchDbWriter, DB, MemoryWriter, StoreResultExt};
+use kaspa_hashes::{Hash, ZERO_HASH};
 use kaspa_muhash::MuHash;
 use kaspa_utils::iter::IterExtensions;
 use parking_lot::RwLockUpgradableReadGuard;
 use rocksdb::WriteBatch;
 use std::{
-    collections::{hash_map::Entry::Vacant, VecDeque},
+    collections::{VecDeque, hash_map::Entry::Vacant},
     ops::Deref,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -135,7 +135,7 @@ impl PruningProcessor {
                 }
                 recovered = true;
             }
-            self.advance_pruning_point_and_candidate_if_possible(sink_ghostdag_data);
+            self.advance_pruning_point_if_possible(sink_ghostdag_data);
         }
     }
 
@@ -185,9 +185,7 @@ impl PruningProcessor {
         drop(pruning_meta_read);
         trace!(
             "retention_checkpoint: {:?} | retention_period_root: {} | pruning_point: {}",
-            retention_checkpoint,
-            retention_period_root,
-            pruning_point
+            retention_checkpoint, retention_period_root, pruning_point
         );
 
         // This indicates the node crashed or was forced to stop during a former data prune operation hence
@@ -198,7 +196,7 @@ impl PruningProcessor {
         true
     }
 
-    fn advance_pruning_point_and_candidate_if_possible(&self, sink_ghostdag_data: CompactGhostdagData) {
+    fn advance_pruning_point_if_possible(&self, sink_ghostdag_data: CompactGhostdagData) {
         let pruning_point_read = self.pruning_point_store.upgradable_read();
         let (current_pruning_point, current_index) = pruning_point_read.pruning_point_and_index().unwrap();
         let new_pruning_points = self.pruning_point_manager.next_pruning_points(sink_ghostdag_data, current_pruning_point);
@@ -315,12 +313,13 @@ impl PruningProcessor {
         assert_eq!(genesis, proof.last().unwrap().last().unwrap().hash);
 
         // We keep full data for pruning point and its anticone, relations for DAA/GD
-        // windows and pruning proof, and only headers for past pruning points
+        // windows, seqcommit chain segment and pruning proof, and only headers for past pruning points
         let keep_blocks: BlockHashSet = data.anticone.iter().copied().collect();
         let mut keep_relations: BlockHashMap<BlockLevel> = std::iter::empty()
             .chain(data.anticone.iter().copied())
             .chain(data.daa_window_blocks.iter().map(|th| th.header.hash))
             .chain(data.ghostdag_blocks.iter().map(|gd| gd.hash))
+            .chain(data.header_only_chain_segment.iter().copied())
             .chain(proof[0].iter().map(|h| h.hash))
             .map(|h| (h, 0)) // Mark block level 0 for all the above. Note that below we add the remaining levels
             .collect();
@@ -409,7 +408,7 @@ impl PruningProcessor {
                 .read()
                 .iter()
                 .copied()
-                .filter(|&h| !reachability_read.is_dag_ancestor_of_result(new_pruning_point, h).unwrap())
+                .filter(|&h| !reachability_read.try_is_dag_ancestor_of(new_pruning_point, h).unwrap())
                 .collect_vec();
             tips_write.prune_tips_with_writer(BatchDbWriter::new(&mut batch), &pruned_tips).unwrap();
             if !pruned_tips.is_empty() {
@@ -446,7 +445,7 @@ impl PruningProcessor {
         let (mut counter, mut traversed) = (0, 0);
         info!("Header and Block pruning: starting traversal from: {} (genesis: {})", queue.iter().reusable_format(", "), genesis);
         while let Some(current) = queue.pop_front() {
-            if reachability_read.is_dag_ancestor_of_result(retention_period_root, current).unwrap() {
+            if reachability_read.try_is_dag_ancestor_of(retention_period_root, current).unwrap() {
                 continue;
             }
             traversed += 1;
@@ -488,6 +487,7 @@ impl PruningProcessor {
                 self.utxo_diffs_store.delete_batch(&mut batch, current).unwrap();
                 self.acceptance_data_store.delete_batch(&mut batch, current).unwrap();
                 self.block_transactions_store.delete_batch(&mut batch, current).unwrap();
+                self.smt_metadata_store.delete_batch(&mut batch, current).unwrap();
 
                 if let Some(&affiliated_proof_level) = keep_relations.get(&current) {
                     if statuses_write.get(current).optional().unwrap().is_some_and(|s| s.is_valid()) {
@@ -578,6 +578,23 @@ impl PruningProcessor {
             self.assert_data_rebuilding(data, new_pruning_point);
         }
 
+        let pp_header = self.headers_store.get_compact_header_data(new_pruning_point).unwrap();
+        // Prune SMT lane/branch version stores and score index.
+        // The inclusive cutoff is `pp.blue_score − finality_depth − 1`: the
+        // score `pp.blue_score − finality_depth` is still inside the active
+        // window at the pruning point and must be preserved.
+        if self.config.toccata_activation.is_active(pp_header.daa_score) {
+            let smt_cutoff = crate::pipeline::virtual_processor::bounds::SeqCommitBounds::inclusive_prune_cutoff(
+                pp_header.blue_score,
+                self.config.params.finality_depth(),
+            );
+            info!("SMT pruning: cutoff_blue_score={}", smt_cutoff);
+            self.smt_stores.prune(&self.db, smt_cutoff);
+            if self.config.enable_sanity_checks {
+                self.assert_smt_rebuilding(new_pruning_point, pp_header.blue_score);
+            }
+        }
+
         {
             // Set the retention checkpoint to the new retention root only after we successfully pruned its past
             let mut pruning_point_write = self.pruning_point_store.write();
@@ -661,13 +678,13 @@ impl PruningProcessor {
 
     fn assert_proof_rebuilding(&self, ref_proof: Arc<PruningPointProof>, new_pruning_point: Hash) {
         info!("Rebuilding the pruning proof after pruning data (sanity test)");
-        let proof_hashes = ref_proof.iter().flatten().map(|h| h.hash).collect::<Vec<_>>();
         let built_proof = self.pruning_proof_manager.build_pruning_point_proof(new_pruning_point);
-        let built_proof_hashes = built_proof.iter().flatten().map(|h| h.hash).collect::<Vec<_>>();
-        assert_eq!(proof_hashes.len(), built_proof_hashes.len(), "Rebuilt proof does not match the expected reference");
-        for (i, (a, b)) in proof_hashes.into_iter().zip(built_proof_hashes).enumerate() {
-            if a != b {
-                panic!("Proof built following pruning does not match the previous proof: built[{}]={}, prev[{}]={}", i, b, i, a);
+        if ref_proof.len() != built_proof.len() {
+            panic!("Rebuilt proof does not match the original one ({} ref vs. {} rebuilt levels)", ref_proof.len(), built_proof.len());
+        }
+        for (i, (ref_level, built_level)) in ref_proof.iter().zip(built_proof.iter()).enumerate() {
+            if ref_level.iter().map(|h| h.hash).ne(built_level.iter().map(|h| h.hash)) {
+                panic!("Rebuilt proof for level {} does not match the original one", i);
             }
         }
         info!("Proof was rebuilt successfully following pruning");
@@ -691,6 +708,30 @@ impl PruningProcessor {
             ref_data.ghostdag_blocks.iter().map(|gd| gd.hash).collect::<BlockHashSet>(),
             built_data.ghostdag_blocks.iter().map(|gd| gd.hash).collect::<BlockHashSet>()
         );
+        assert_eq!(
+            ref_data.header_only_chain_segment.iter().copied().collect::<BlockHashSet>(),
+            built_data.header_only_chain_segment.iter().copied().collect::<BlockHashSet>()
+        );
         info!("Trusted data was rebuilt successfully following pruning");
+    }
+
+    /// Check if `block_hash` is canonical for SMT lookups at `selected_parent`.
+    /// ZERO_HASH is always canonical because it marks IBD-imported entries.
+    fn is_smt_canonical(&self, block_hash: Hash, selected_parent: Hash) -> bool {
+        block_hash == ZERO_HASH || matches!(self.reachability_service.try_is_chain_ancestor_of(block_hash, selected_parent), Ok(true))
+    }
+
+    fn assert_smt_rebuilding(&self, new_pruning_point: Hash, pruning_point_blue_score: u64) {
+        info!("Rebuilding pruning point SMT root after pruning data (sanity test)");
+        let bounds = kaspa_smt_store::processor::SmtReadBounds::for_pov(pruning_point_blue_score, self.config.params.finality_depth());
+        let expected_root = self.smt_stores.get_lanes_root(bounds, |bh| self.is_smt_canonical(bh, new_pruning_point));
+        let expected_count = self.smt_metadata_store.get(new_pruning_point).unwrap().active_lanes_count();
+        let (root, count) = self
+            .smt_stores
+            .recompute_lanes_root_from_leaf_stream(bounds, expected_count, |bh| self.is_smt_canonical(bh, new_pruning_point))
+            .unwrap();
+        assert_eq!(count, expected_count, "SMT pruning sanity: active lane count mismatch");
+        assert_eq!(root, expected_root, "SMT pruning sanity: lanes root mismatch after pruning");
+        info!("SMT root was rebuilt successfully following pruning");
     }
 }

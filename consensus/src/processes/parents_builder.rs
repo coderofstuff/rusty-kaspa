@@ -1,12 +1,12 @@
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use kaspa_consensus_core::{
+    BlockHasher, BlockLevel,
     blockhash::ORIGIN,
     header::{CompressedParents, Header},
-    BlockHashMap, BlockHasher, BlockLevel,
 };
 use kaspa_hashes::Hash;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
 use crate::model::{
@@ -60,13 +60,14 @@ impl<T: HeaderStoreReader, U: ReachabilityStoreReader, V: RelationsStoreReader> 
         for block_level in 0..=self.max_block_level {
             // Direct parents are guaranteed to be in one another's anticones so add them all to
             // all the block levels they occupy.
+            // IndexMap is important here to preserve the original order of direct parents (level 0).
             let mut level_candidates_to_reference_blocks = direct_parent_headers
                 .iter()
                 .filter(|h| block_level <= h.block_level)
                 .map(|h| (h.header.hash, smallvec![h.header.hash]))
                 // We use smallvec with size 1 in order to optimize for the common case
                 // where the block itself is the only reference block
-                .collect::<BlockHashMap<SmallVec<[Hash; 1]>>>();
+                .collect::<IndexMap<Hash, SmallVec<[Hash; 1]>, BlockHasher>>();
 
             let mut first_parent_marker = 0;
             let grandparents = if level_candidates_to_reference_blocks.is_empty() {
@@ -213,9 +214,9 @@ mod tests {
     use super::ParentsManager;
     use itertools::Itertools;
     use kaspa_consensus_core::{
+        BlockHashMap, BlockHashSet, HashMapCustomHasher,
         blockhash::{BlockHashes, ORIGIN},
         header::Header,
-        BlockHashSet, HashMapCustomHasher,
     };
     use kaspa_database::prelude::{ReadLock, StoreError, StoreResult};
     use kaspa_hashes::Hash;

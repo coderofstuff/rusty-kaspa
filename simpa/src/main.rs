@@ -1,6 +1,6 @@
 use async_channel::unbounded;
 use clap::Parser;
-use futures::{future::try_join_all, Future};
+use futures::{Future, future::try_join_all};
 use itertools::Itertools;
 use kaspa_alloc::init_allocator_with_default_settings;
 use kaspa_consensus::{
@@ -13,11 +13,11 @@ use kaspa_consensus::{
         headers::HeaderStoreReader,
         relations::RelationsStoreReader,
     },
-    params::{ForkActivation, OverrideParams, Params, TenBps, DEVNET_PARAMS, NETWORK_DELAY_BOUND, SIMNET_PARAMS},
+    params::{DEVNET_PARAMS, ForkActivation, NETWORK_DELAY_BOUND, OverrideParams, Params, SIMNET_PARAMS, TenBps},
 };
 use kaspa_consensus_core::{
-    api::ConsensusApi, block::Block, blockstatus::BlockStatus, config::bps::calculate_ghostdag_k, errors::block::BlockProcessResult,
-    mining_rules::MiningRules, tx::TransactionType, BlockHashSet, BlockLevel, HashMapCustomHasher,
+    BlockHashSet, BlockLevel, HashMapCustomHasher, api::ConsensusApi, block::Block, blockstatus::BlockStatus,
+    config::bps::calculate_ghostdag_k, errors::block::BlockProcessResult, mining_rules::MiningRules, tx::TransactionType,
 };
 use kaspa_consensus_notify::root::ConsensusNotificationRoot;
 use kaspa_core::{
@@ -31,11 +31,10 @@ use kaspa_database::{create_temp_db, load_existing_db};
 use kaspa_hashes::Hash;
 use kaspa_perf_monitor::{builder::Builder, counters::CountersSnapshot};
 use kaspa_utils::fd_budget;
-use simulator::network::KaspaNetworkSimulator;
+use simpa::simulator::network::KaspaNetworkSimulator;
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 mod blocks_json;
-pub mod simulator;
 
 /// Kaspa Network Simulator
 #[derive(Parser, Debug)]
@@ -400,6 +399,8 @@ fn apply_args_to_consensus_params(args: &Args, params: &mut Params) {
         params.mergeset_size_limit = 32 * 2;
         params.pruning_depth = 100 * 2 * 2 + 50;
 
+        params.toccata_activation = ForkActivation::new(1000);
+
         info!("Setting pruning depth to {:?}", params.pruning_depth());
     }
 }
@@ -465,7 +466,7 @@ fn submit_chunk(
     dst_consensus: &Consensus,
     chunk: &mut impl Iterator<Item = Hash>,
     header_only: bool,
-) -> Vec<impl Future<Output = BlockProcessResult<BlockStatus>>> {
+) -> Vec<impl Future<Output = BlockProcessResult<BlockStatus>> + 'static> {
     let mut futures = Vec::new();
     for hash in chunk {
         let block = Block::from_arcs(

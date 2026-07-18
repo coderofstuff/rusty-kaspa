@@ -34,13 +34,8 @@ impl TransactionTypeExtension for TransactionKind {
             TransactionKind::External => style("-".to_string() + s).red().to_string(),
             TransactionKind::Batch => style("".to_string() + s).dim().to_string(),
             TransactionKind::Reorg => {
-                if history {
-                    style("".to_string() + s).dim()
-                } else {
-                    style("-".to_string() + s).red()
-                }
+                { if history { style("".to_string() + s).dim() } else { style("-".to_string() + s).red() } }.to_string()
             }
-            .to_string(),
             TransactionKind::Stasis => style("".to_string() + s).dim().to_string(),
             _ => style(s).dim().to_string(),
         }
@@ -181,8 +176,9 @@ impl TransactionExtension for TransactionRecord {
 
                 if include_utxos {
                     for input in transaction.inputs.iter() {
-                        let TransactionInput { previous_outpoint, signature_script: _, sequence, sig_op_count } = input;
+                        let TransactionInput { previous_outpoint, signature_script: _, sequence, .. } = input;
                         let TransactionOutpoint { transaction_id, index } = previous_outpoint;
+                        let sig_op_count = input.compute_commit.sig_op_count().unwrap_or(0);
 
                         lines.push(format!("{:>4}{sequence:>2}: {transaction_id}:{index} SigOps: {sig_op_count}", ""));
                     }

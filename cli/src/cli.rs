@@ -787,6 +787,13 @@ impl KaspaCli {
                 SyncState::UtxoSync { total, .. } => {
                     Some([style("SYNC UTXO").red().to_string(), style(total.separated_string()).dim().to_string()].join(" "))
                 }
+                SyncState::SmtSync { processed, total } => Some(
+                    [
+                        style("SYNC SMT").red().to_string(),
+                        style(format!("{} of {}", processed.separated_string(), total.separated_string())).dim().to_string(),
+                    ]
+                    .join(" "),
+                ),
                 SyncState::UtxoResync => Some([style("SYNC").red().to_string(), style("UTXO").black().to_string()].join(" ")),
                 SyncState::NotSynced => Some([style("SYNC").red().to_string(), style("...").black().to_string()].join(" ")),
                 SyncState::Synced => None,
@@ -846,10 +853,11 @@ impl Cli for KaspaCli {
 
         if (self.wallet.is_open() && !self.wallet.is_connected()) || (node_running && !self.wallet.is_connected()) {
             prompt.push(style("N/C").red().to_string());
-        } else if self.wallet.is_connected() && !self.wallet.is_synced() {
-            if let Some(state) = self.sync_state() {
-                prompt.push(state);
-            }
+        } else if self.wallet.is_connected()
+            && !self.wallet.is_synced()
+            && let Some(state) = self.sync_state()
+        {
+            prompt.push(state);
         }
 
         if let Some(descriptor) = self.wallet.descriptor() {

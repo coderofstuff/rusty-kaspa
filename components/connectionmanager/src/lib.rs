@@ -11,17 +11,17 @@ use futures_util::future::{join_all, try_join_all};
 use itertools::Itertools;
 use kaspa_addressmanager::{AddressManager, NetAddress};
 use kaspa_core::{debug, info, warn};
-use kaspa_p2p_lib::{common::ProtocolError, ConnectionError, Peer};
+use kaspa_p2p_lib::{ConnectionError, Peer, common::ProtocolError};
 use kaspa_utils::triggers::SingleTrigger;
 use parking_lot::Mutex as ParkingLotMutex;
 use rand::{seq::SliceRandom, thread_rng};
 use tokio::{
     select,
     sync::{
-        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
         Mutex as TokioMutex,
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     },
-    time::{interval, MissedTickBehavior},
+    time::{MissedTickBehavior, interval},
 };
 
 pub struct ConnectionManager {
@@ -71,7 +71,9 @@ impl ConnectionManager {
             default_port,
         });
         manager.clone().start_event_loop(rx);
-        manager.force_next_iteration.send(()).unwrap();
+        // Fire-and-forget wakeup: if the event loop is already gone the wakeup is moot, so ignore
+        // a send error rather than panicking (the receiver is dropped on shutdown).
+        let _ = manager.force_next_iteration.send(());
         manager
     }
 
@@ -106,7 +108,11 @@ impl ConnectionManager {
     pub async fn add_connection_request(&self, address: SocketAddr, is_permanent: bool) {
         // If the request already exists, it resets the attempts count and overrides the `is_permanent` setting.
         self.connection_requests.lock().await.insert(address, ConnectionRequest::new(is_permanent));
-        self.force_next_iteration.send(()).unwrap(); // We force the next iteration of the connection loop.
+        // Force the next iteration of the connection loop. This is a fire-and-forget wakeup, so if
+        // the event loop receiver was already dropped (e.g. during shutdown) the send is a no-op
+        // rather than a panic. add_connection_request is reachable from the AddPeer RPC handler,
+        // which can race with shutdown.
+        let _ = self.force_next_iteration.send(());
     }
 
     pub async fn stop(&self) {
@@ -168,7 +174,6 @@ impl ConnectionManager {
 
         let mut missing_connections = self.outbound_target - active_outbound.len();
         let mut addr_iter = self.address_manager.lock().iterate_prioritized_random_addresses(active_outbound);
-
         let mut progressing = true;
         let mut connecting = true;
         while connecting && missing_connections > 0 {
@@ -206,7 +211,6 @@ impl ConnectionManager {
                     addr_iter.len(),
                 );
             }
-
             for (res, net_addr) in (join_all(jobs).await).into_iter().zip(addrs_to_connect) {
                 match res {
                     Ok(_) => {

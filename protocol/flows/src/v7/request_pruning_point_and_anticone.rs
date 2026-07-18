@@ -4,14 +4,16 @@
 //!
 
 use itertools::Itertools;
+use kaspa_consensus_core::block::Block;
 use kaspa_p2p_lib::{
+    IncomingRoute, Router,
     common::ProtocolError,
+    convert::header::HeaderFormat,
     dequeue, dequeue_with_request_id, make_response,
     pb::{
-        self, kaspad_message::Payload, BlockWithTrustedDataV4Message, DoneBlocksWithTrustedDataMessage, PruningPointsMessage,
-        TrustedDataMessage,
+        BlockWithTrustedDataV4Message, DoneBlocksWithTrustedDataMessage, PruningPointsMessage, TrustedDataMessage,
+        kaspad_message::Payload,
     },
-    IncomingRoute, Router,
 };
 use log::debug;
 use std::sync::Arc;
@@ -22,6 +24,7 @@ pub struct PruningPointAndItsAnticoneRequestsFlow {
     ctx: FlowContext,
     router: Arc<Router>,
     incoming_route: IncomingRoute,
+    header_format: HeaderFormat,
 }
 
 #[async_trait::async_trait]
@@ -36,8 +39,8 @@ impl Flow for PruningPointAndItsAnticoneRequestsFlow {
 }
 
 impl PruningPointAndItsAnticoneRequestsFlow {
-    pub fn new(ctx: FlowContext, router: Arc<Router>, incoming_route: IncomingRoute) -> Self {
-        Self { ctx, router, incoming_route }
+    pub fn new(ctx: FlowContext, router: Arc<Router>, incoming_route: IncomingRoute, header_format: HeaderFormat) -> Self {
+        Self { ctx, router, incoming_route, header_format }
     }
 
     async fn start_impl(&mut self) -> Result<(), ProtocolError> {
@@ -52,7 +55,9 @@ impl PruningPointAndItsAnticoneRequestsFlow {
             self.router
                 .enqueue(make_response!(
                     Payload::PruningPoints,
-                    PruningPointsMessage { headers: pp_headers.into_iter().map(|header| <pb::BlockHeader>::from(&*header)).collect() },
+                    PruningPointsMessage {
+                        headers: pp_headers.into_iter().map(|header| (self.header_format, &*header).into()).collect()
+                    },
                     request_id
                 ))
                 .await?;
@@ -62,27 +67,44 @@ impl PruningPointAndItsAnticoneRequestsFlow {
                 .enqueue(make_response!(
                     Payload::TrustedData,
                     TrustedDataMessage {
-                        daa_window: trusted_data.daa_window_blocks.iter().map(|daa_block| daa_block.into()).collect_vec(),
+                        daa_window: trusted_data
+                            .daa_window_blocks
+                            .iter()
+                            .map(|daa_block| (self.header_format, daa_block).into())
+                            .collect_vec(),
                         ghostdag_data: trusted_data.ghostdag_blocks.iter().map(|gd| gd.into()).collect_vec()
                     },
                     request_id
                 ))
                 .await?;
 
-            for hashes in trusted_data.anticone.chunks(IBD_BATCH_SIZE) {
-                for &hash in hashes {
-                    let block = session.async_get_block(hash).await?;
-                    self.router
-                        .enqueue(make_response!(
-                            Payload::BlockWithTrustedDataV4,
-                            // No need to send window indices in v6
-                            BlockWithTrustedDataV4Message { block: Some((&block).into()), ..Default::default() },
-                            request_id
-                        ))
-                        .await?;
-                }
+            //
+            // TODO(relaxed): consider refactoring GRPC to properly include the header-only chain segment and cleanup old fields
+            //
 
-                if hashes.len() == IBD_BATCH_SIZE {
+            let blocks_iter = trusted_data
+                .anticone
+                .iter()
+                .copied()
+                .map(|hash| (hash, false))
+                .chain(trusted_data.header_only_chain_segment.iter().copied().map(|hash| (hash, true)));
+            for (i, (hash, send_header_only)) in blocks_iter.enumerate() {
+                let block = if send_header_only {
+                    let header = session.async_get_header(hash).await?;
+                    Block::from_header_arc(header)
+                } else {
+                    session.async_get_block(hash).await?
+                };
+                self.router
+                    .enqueue(make_response!(
+                        Payload::BlockWithTrustedDataV4,
+                        // No need to send window indices since v6
+                        BlockWithTrustedDataV4Message { block: Some((self.header_format, &block).into()), ..Default::default() },
+                        request_id
+                    ))
+                    .await?;
+                let sent = i + 1;
+                if sent.is_multiple_of(IBD_BATCH_SIZE) {
                     // No timeout here, as we don't care if the syncee takes its time computing,
                     // since it only blocks this dedicated flow
                     drop(session); // Avoid holding the session through dequeue calls

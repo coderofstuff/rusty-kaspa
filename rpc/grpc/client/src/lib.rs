@@ -1,6 +1,6 @@
 use self::{
     error::{Error, Result},
-    resolver::{id::IdResolver, queue::QueueResolver, DynResolver},
+    resolver::{DynResolver, id::IdResolver, queue::QueueResolver},
 };
 use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
@@ -9,48 +9,48 @@ use connection_event::ConnectionEvent;
 use futures::{future::FutureExt, pin_mut, select};
 use kaspa_core::{debug, error, trace};
 use kaspa_grpc_core::{
+    RPC_MAX_MESSAGE_SIZE,
     channel::NotificationChannel,
     ops::KaspadPayloadOps,
-    protowire::{kaspad_request, rpc_client::RpcClient, GetInfoRequestMessage, KaspadRequest, KaspadResponse},
-    RPC_MAX_MESSAGE_SIZE,
+    protowire::{GetInfoRequestMessage, KaspadRequest, KaspadResponse, kaspad_request, rpc_client::RpcClient},
 };
 use kaspa_notify::{
     collector::{Collector, CollectorFrom},
     error::{Error as NotifyError, Result as NotifyResult},
-    events::{EventArray, EventType, EVENT_TYPE_ARRAY},
+    events::{EVENT_TYPE_ARRAY, EventArray, EventType},
     listener::{ListenerId, ListenerLifespan},
     notifier::{DynNotify, Notifier},
     scope::Scope,
     subscriber::{Subscriber, SubscriptionManager},
     subscription::{
-        array::ArrayBuilder, context::SubscriptionContext, Command, DynSubscription, MutateSingle, Mutation, MutationPolicies,
-        UtxosChangedMutationPolicy,
+        Command, DynSubscription, MutateSingle, Mutation, MutationPolicies, UtxosChangedMutationPolicy, array::ArrayBuilder,
+        context::SubscriptionContext,
     },
 };
 use kaspa_rpc_core::{
+    Notification,
     api::rpc::RpcApi,
     error::RpcError,
     error::RpcResult,
     model::message::*,
     notify::{collector::RpcCoreConverter, connection::ChannelConnection, mode::NotificationMode},
-    Notification,
 };
 use kaspa_utils::{channel::Channel, triggers::DuplexTrigger};
 use kaspa_utils_tower::{
     counters::TowerConnectionCounters,
-    middleware::{BodyExt, CountBytesBody, MapRequestBodyLayer, MapResponseBodyLayer, ServiceBuilder},
+    middleware::{CountBytesBody, MapRequestBodyLayer, MapResponseBodyLayer, ServiceBuilder},
 };
 use regex::Regex;
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 use tokio::sync::Mutex;
-use tonic::codec::CompressionEncoding;
 use tonic::Streaming;
+use tonic::codec::CompressionEncoding;
 
 mod connection_event;
 pub mod error;
@@ -276,8 +276,10 @@ impl RpcApi for GrpcClient {
     route!(get_fee_estimate_call, GetFeeEstimate);
     route!(get_fee_estimate_experimental_call, GetFeeEstimateExperimental);
     route!(get_current_block_color_call, GetCurrentBlockColor);
+    route!(get_block_reward_info_call, GetBlockRewardInfo);
     route!(get_utxo_return_address_call, GetUtxoReturnAddress);
     route!(get_virtual_chain_from_block_v2_call, GetVirtualChainFromBlockV2);
+    route!(get_seq_commit_lane_proof_call, GetSeqCommitLaneProof);
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // Notification API
@@ -544,8 +546,8 @@ impl Inner {
         let bytes_rx = &counters.bytes_rx;
         let bytes_tx = &counters.bytes_tx;
         let channel = ServiceBuilder::new()
-            .layer(MapResponseBodyLayer::new(move |body| CountBytesBody::new(body, bytes_rx.clone())))
-            .layer(MapRequestBodyLayer::new(move |body| CountBytesBody::new(body, bytes_tx.clone()).boxed_unsync()))
+            .layer(MapResponseBodyLayer::new(move |body| tonic::body::Body::new(CountBytesBody::new(body, bytes_rx.clone()))))
+            .layer(MapRequestBodyLayer::new(move |body| tonic::body::Body::new(CountBytesBody::new(body, bytes_tx.clone()))))
             .service(channel);
 
         // Build the gRPC client with an interceptor setting the request timeout
@@ -647,10 +649,10 @@ impl Inner {
     }
 
     fn send_connection_event(&self, event: ConnectionEvent) {
-        if let Some(ref connection_event_sender) = self.connection_event_sender {
-            if let Err(err) = connection_event_sender.try_send(event) {
-                debug!("Send connection event error: {err}");
-            }
+        if let Some(ref connection_event_sender) = self.connection_event_sender
+            && let Err(err) = connection_event_sender.try_send(event)
+        {
+            debug!("Send connection event error: {err}");
         }
     }
 
@@ -670,11 +672,7 @@ impl Inner {
     #[inline(always)]
     fn handle_stop_notify(&self) -> bool {
         // TODO - remove this
-        if self.override_handle_stop_notify {
-            true
-        } else {
-            self.server_features.handle_stop_notify
-        }
+        if self.override_handle_stop_notify { true } else { self.server_features.handle_stop_notify }
     }
 
     #[inline(always)]

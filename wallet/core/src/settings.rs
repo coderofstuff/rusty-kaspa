@@ -6,7 +6,7 @@ use crate::imports::*;
 use crate::result::Result;
 use crate::storage::local::Storage;
 use serde::de::DeserializeOwned;
-use serde_json::{from_value, to_value, Map, Value};
+use serde_json::{Map, Value, from_value, to_value};
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::path::PathBuf;
@@ -130,7 +130,7 @@ where
     }
 
     pub async fn try_store(&self) -> Result<()> {
-        let map = Map::from_iter(self.map.clone().into_iter());
+        let map = Map::from_iter(self.map.clone());
         self.storage.ensure_dir().await?;
         workflow_store::fs::write_json(self.storage.filename(), &Value::Object(map)).await?;
         Ok(())

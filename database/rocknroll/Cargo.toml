@@ -1,4 +1,27 @@
 [package]
+name = "kaspa-rocknroll"
+description = "Kaspa RocksDB developer scanning tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+include.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kaspa-consensus = { workspace = true, features = ["test-smt-pruning-diagnostics"] }
+kaspa-consensus-core.workspace = true
+kaspa-database.workspace = true
+kaspa-hashes.workspace = true
+kaspa-smt-store = { workspace = true, features = ["test-smt-pruning-diagnostics"] }
+kaspad.workspace = true
+
+clap = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+
+[lints]
+workspace = true
+[package]
 name = "rocknroll"
 description = "Kaspa Rocks DB exploration tool"
 version.workspace = true

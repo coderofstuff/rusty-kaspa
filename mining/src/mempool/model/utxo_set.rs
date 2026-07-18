@@ -40,7 +40,13 @@ impl MempoolUtxoSet {
 
         for (i, output) in transaction.tx.outputs.iter().enumerate() {
             let outpoint = TransactionOutpoint::new(transaction_id, i as u32);
-            let entry = UtxoEntry::new(output.value, output.script_public_key.clone(), UNACCEPTED_DAA_SCORE, false);
+            let entry = UtxoEntry::new(
+                output.value,
+                output.script_public_key.clone(),
+                UNACCEPTED_DAA_SCORE,
+                false,
+                output.covenant.map(|x| x.covenant_id),
+            );
             self.pool_unspent_outputs.insert(outpoint, entry);
         }
     }
@@ -81,10 +87,10 @@ impl MempoolUtxoSet {
     pub(crate) fn get_first_double_spend(&self, transaction: &MutableTransaction) -> Option<DoubleSpend> {
         let transaction_id = transaction.id();
         for input in transaction.tx.inputs.iter() {
-            if let Some(existing_transaction_id) = self.get_outpoint_owner_id(&input.previous_outpoint) {
-                if *existing_transaction_id != transaction_id {
-                    return Some(DoubleSpend::new(input.previous_outpoint, *existing_transaction_id));
-                }
+            if let Some(existing_transaction_id) = self.get_outpoint_owner_id(&input.previous_outpoint)
+                && *existing_transaction_id != transaction_id
+            {
+                return Some(DoubleSpend::new(input.previous_outpoint, *existing_transaction_id));
             }
         }
         None
@@ -96,10 +102,11 @@ impl MempoolUtxoSet {
         let mut double_spends = vec![];
         let mut visited = HashSet::new();
         for input in transaction.tx.inputs.iter() {
-            if let Some(existing_transaction_id) = self.get_outpoint_owner_id(&input.previous_outpoint) {
-                if *existing_transaction_id != transaction_id && visited.insert(*existing_transaction_id) {
-                    double_spends.push(DoubleSpend::new(input.previous_outpoint, *existing_transaction_id));
-                }
+            if let Some(existing_transaction_id) = self.get_outpoint_owner_id(&input.previous_outpoint)
+                && *existing_transaction_id != transaction_id
+                && visited.insert(*existing_transaction_id)
+            {
+                double_spends.push(DoubleSpend::new(input.previous_outpoint, *existing_transaction_id));
             }
         }
         double_spends

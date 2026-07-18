@@ -1,13 +1,13 @@
 use kaspa_consensus_core::config::params::TESTNET_PARAMS;
 use kaspa_consensus_core::{
-    hashing::sighash::{calc_schnorr_signature_hash, SigHashReusedValuesUnsync},
+    hashing::sighash::{SigHashReusedValuesUnsync, calc_schnorr_signature_hash},
     tx::{TransactionId, TransactionOutpoint, UtxoEntry},
 };
 use kaspa_txscript::{multisig_redeem_script, opcodes::codes::OpData65, pay_to_script_hash_script, script_builder::ScriptBuilder};
 use kaspa_wallet_pskt::prelude::{
-    Combiner, Creator, Extractor, Finalizer, Inner, InputBuilder, SignInputOk, Signature, Signer, Updater, PSKT,
+    Combiner, Creator, Extractor, Finalizer, Inner, InputBuilder, PSKT, SignInputOk, Signature, Signer, Updater,
 };
-use secp256k1::{rand::thread_rng, Keypair};
+use secp256k1::{Keypair, rand::thread_rng};
 use std::{iter, str::FromStr};
 
 fn main() {
@@ -27,6 +27,7 @@ fn main() {
             script_public_key: pay_to_script_hash_script(&redeem_script),
             block_daa_score: 36151168,
             is_coinbase: false,
+            covenant_id: Default::default(),
         })
         .previous_outpoint(TransactionOutpoint {
             transaction_id: TransactionId::from_str("63020db736215f8b1105a9281f7bcbb6473d965ecc45bb2fb5da59bd35e6ff84").unwrap(),
