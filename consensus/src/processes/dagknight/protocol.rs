@@ -161,6 +161,26 @@ impl<
 > DagknightExecutor<C, O, D, R>
 {
     pub fn dagknight(&self, parents: &[Hash]) -> DagknightData {
+        let pure_result = self.dagknight_pure(parents, false);
+        let shortcut_result = self.dagknight_pure(parents, true);
+
+        assert_eq!(
+            shortcut_result.selected_parent, pure_result.selected_parent,
+            "Shortcut result and pure result should have the same selected parent | shortcut: {} | pure: {} | parents: {:?}",
+            shortcut_result.selected_parent, pure_result.selected_parent, parents
+        );
+        assert_eq!(
+            BlockHashSet::from_iter(shortcut_result.conflict_ordered_parents.clone()),
+            BlockHashSet::from_iter(pure_result.conflict_ordered_parents.clone()),
+            "Shortcut result and pure result should have the same conflict-ordered parents | shortcut: {:?} | pure: {:?} | parents: {:?}",
+            shortcut_result.conflict_ordered_parents,
+            pure_result.conflict_ordered_parents,
+            parents
+        );
+        shortcut_result
+    }
+
+    pub fn dagknight_pure(&self, parents: &[Hash], use_shortcut: bool) -> DagknightData {
         /*
             input: a set of block parents
             output: the selected parent + incremental metadata
@@ -208,8 +228,6 @@ impl<
                 conflict_genesis = next_conflict_genesis;
                 continue;
             }
-
-            let use_shortcut = false;
 
             // Check shortcut to identify weak groups at k=0
             // This doesn't change conflict hierarchy - it just marks groups as weak
