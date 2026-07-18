@@ -50,7 +50,6 @@ pub struct ConflictZoneManager<
     headers_store: Arc<O>,
     relations_store: FutureIntersectRelations<D, MTReachabilityService<R>>,
     reachability_service: MTReachabilityService<R>,
-    use_new_logic: bool,
 }
 
 impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: RelationsStoreReader, R: ReachabilityStoreReader + Clone>
@@ -63,9 +62,8 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
         headers_store: Arc<O>,
         relations_store: FutureIntersectRelations<D, MTReachabilityService<R>>,
         reachability_service: MTReachabilityService<R>,
-        use_new_logic: bool,
     ) -> Self {
-        Self { k, root, free_search: false, dagknight_store, headers_store, reachability_service, relations_store, use_new_logic }
+        Self { k, root, free_search: false, dagknight_store, headers_store, reachability_service, relations_store }
     }
 
     pub fn with_free_search(
@@ -76,9 +74,8 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
         relations_store: FutureIntersectRelations<D, MTReachabilityService<R>>,
         reachability_service: MTReachabilityService<R>,
         free_search: bool,
-        use_new_logic: bool,
     ) -> Self {
-        Self { k, root, free_search, dagknight_store, headers_store, reachability_service, relations_store, use_new_logic }
+        Self { k, root, free_search, dagknight_store, headers_store, reachability_service, relations_store }
     }
 
     pub fn has(&self, pov_hash: Hash) -> bool {
@@ -285,13 +282,11 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
 
     fn sort_blocks(&self, blocks: impl IntoIterator<Item = Hash>) -> Vec<Hash> {
         let mut sorted_blocks: Vec<Hash> = blocks.into_iter().collect();
-        sorted_blocks.sort_by_cached_key(|block| {
-            let blue_work = if self.use_new_logic {
-                self.headers_store.get_header(*block).unwrap().blue_work
-            } else {
-                self.get_blue_work(*block).unwrap_or(self.headers_store.get_header(*block).unwrap().blue_work)
-            };
-            SortableBlock { hash: *block, blue_work }
+        sorted_blocks.sort_by_cached_key(|block| SortableBlock {
+            hash: *block,
+            // Sort by blue work as calculated within the zone. For blocks not within the zone (or not in agreement), we prefer them to be added later.
+            // Using the header blue work will tend to order these blocks later.
+            blue_work: self.get_blue_work(*block).unwrap_or(self.headers_store.get_header(*block).unwrap().blue_work),
         });
         sorted_blocks
     }
@@ -571,7 +566,6 @@ mod tests {
             headers_store.clone(),
             relations_service.clone(),
             reachability_service.clone(),
-            true,
         );
 
         let manager_free = ConflictZoneManager::with_free_search(
@@ -581,7 +575,6 @@ mod tests {
             headers_store.clone(),
             relations_service,
             reachability_service,
-            true,
             true,
         );
 
@@ -703,7 +696,6 @@ mod tests {
             headers_store.clone(),
             relations_service.clone(),
             reachability_service.clone(),
-            true,
         );
 
         // Create free search manager (free_search = true)
@@ -714,7 +706,6 @@ mod tests {
             headers_store,
             relations_service,
             reachability_service,
-            true,
             true,
         );
         assert!(manager_free.is_free_search(), "Manager should have free_search=true");
