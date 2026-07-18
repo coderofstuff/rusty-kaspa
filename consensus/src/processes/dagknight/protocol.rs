@@ -681,6 +681,10 @@ mod tests {
         test_helpers::generate_dot_with_chain,
     };
 
+    struct DagKnightTestResult {
+        virtual_gd_data: Arc<GhostdagData>,
+    }
+
     #[test]
     fn test_cascade() {
         let mut reachability = MemoryReachabilityStore::new();
@@ -719,7 +723,7 @@ mod tests {
     /// 4. Generates a DOT file over that GD store showing the SPC and blocks colored
     ///    according to the global GD store
     #[allow(clippy::arc_with_non_send_sync)]
-    fn run_dagknight_test(k_max: KType, plan: DagPlan, base_name: &str) {
+    fn run_dagknight_test(k_max: KType, plan: DagPlan, base_name: &str) -> DagKnightTestResult {
         let genesis_hash = plan.genesis.into();
 
         let dk_map = RefCell::new(HashMap::new());
@@ -818,7 +822,8 @@ mod tests {
         let gd_data = coloring_gd_manager.incremental_coloring(&tip_hashes, selected_parent);
         println!("virtual_block: {} | sp: {}", virtual_block.hash, selected_parent);
         builder.add_block_with_selected_parent(virtual_block, selected_parent);
-        coloring_ghostdag_store.insert(virtual_hash, Arc::new(gd_data)).unwrap();
+        let virtual_gd_data = Arc::new(gd_data);
+        coloring_ghostdag_store.insert(virtual_hash, virtual_gd_data.clone()).unwrap();
 
         // let blues = BlockHashSet::new();
         let mut reds = BlockHashSet::new();
@@ -845,6 +850,8 @@ mod tests {
         all_blocks.extend(plan.blocks.clone());
         all_blocks.push((virtual_hash.to_le_u64()[3], tips.iter().map(|h| h.to_le_u64()[3]).collect_vec()));
         generate_dot_with_chain(&all_blocks, &chain_nodes, reds, base_name).expect("Failed to generate DOT file");
+
+        DagKnightTestResult { virtual_gd_data }
     }
 
     #[test]
@@ -1116,12 +1123,12 @@ mod tests {
         Hash::from_str(std::str::from_utf8(&hex).unwrap()).expect("Invalid hash string")
     }
 
-    /// Regression test for shortcut/pure mismatch captured from test_complex_dag_shortcut.
-    /// This test loads a captured failing DAG and verifies that the assertion between
-    /// shortcut and pure results fails (before fix) or passes (after fix).
+    /// This test verifies that the shortcut works in scenarios where there are 3+ subgroups, only
+    /// a single one is considered "weak". Mainly it ensures that the semantic behavior of trying to
+    /// determine which of the remaining "strong" subgroups win in a full DK run is intact.
     #[test]
-    fn test_shortcut_failure_repro() {
-        let json_filename = "test_shortcut_captured_failure.json";
+    fn test_multi_strong_single_weak_scenario() {
+        let json_filename = "test_multi_strong_single_weak_scenario.json";
         let file = File::open(&json_filename).expect("Unable to open captured failure JSON");
         let json_data: serde_json::Value = serde_json::from_reader(file).expect("Unable to parse JSON");
 
@@ -1144,6 +1151,8 @@ mod tests {
 
         // This should trigger the assertion failure between shortcut and pure (before fix)
         // or pass (after fix)
-        run_dagknight_test(5, dag_plan, "shortcut_failure_repro");
+        let test_result = run_dagknight_test(5, dag_plan, "shortcut_failure_repro");
+
+        assert_eq!(test_result.virtual_gd_data.selected_parent, 1001.into(), "Virtual selected parent should be 1001 for this test");
     }
 }
