@@ -3585,14 +3585,29 @@ dependencies = [
 name = "kaspa-rocknroll"
 version = "2.0.1"
 dependencies = [
+ "async-channel 2.3.1",
+ "chrono",
  "clap",
+ "faster-hex 0.9.0",
+ "itertools 0.13.0",
+ "kaspa-addresses",
  "kaspa-consensus",
  "kaspa-consensus-core",
+ "kaspa-core",
  "kaspa-database",
+ "kaspa-grpc-client",
  "kaspa-hashes",
+ "kaspa-rpc-core",
  "kaspa-smt-store",
+ "kaspa-txscript",
+ "kaspa-utils",
  "kaspad",
+ "log",
+ "parking_lot",
+ "rayon",
+ "secp256k1",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -5998,32 +6013,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7043b63bd0cd1aaa628e476b80e6d4023a3b50eb32789f2728908107bd0c793a"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "rocknroll"
-version = "1.0.1"
-dependencies = [
- "async-channel 2.3.1",
- "chrono",
- "clap 4.5.51",
- "faster-hex",
- "itertools 0.13.0",
- "kaspa-addresses",
- "kaspa-consensus",
- "kaspa-consensus-core",
- "kaspa-core",
- "kaspa-database",
- "kaspa-grpc-client",
- "kaspa-rpc-core",
- "kaspa-txscript",
- "kaspa-utils",
- "kaspad",
- "log",
- "parking_lot",
- "rayon",
- "secp256k1",
- "tokio",
 ]
 
 [[package]]
