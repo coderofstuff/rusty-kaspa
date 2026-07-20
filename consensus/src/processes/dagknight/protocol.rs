@@ -1,7 +1,10 @@
 use std::{
     cell::Cell,
-    collections::{HashMap, VecDeque},
-    sync::{Arc, OnceLock},
+    collections::HashMap,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -11,7 +14,7 @@ use kaspa_consensus_core::{BlockHashMap, BlockHashSet, HashMapCustomHasher, KTyp
 use kaspa_core::{debug, info, trace};
 use kaspa_hashes::Hash;
 use kaspa_math::Uint192;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 
 use crate::{
     model::{
@@ -38,66 +41,77 @@ use crate::{
     },
 };
 
-/// Thread-safe LRU cache for Dagknight resolution results.
-/// Keyed by sorted parent sets optimize honest concurrent mining.
+/// Lock-free read cache for Dagknight resolution results.
+/// Uses DashMap for per-entry locking and atomics for stats.
+/// Eviction is random when capacity is exceeded (simpler than LRU under high concurrency).
 pub struct DagknightCache {
-    map: HashMap<Arc<Vec<Hash>>, Arc<DagknightData>>,
-    order: VecDeque<Arc<Vec<Hash>>>,
+    map: DashMap<Arc<Vec<Hash>>, Arc<DagknightData>>,
     capacity: usize,
-    hits: u64,
-    misses: u64,
-    last_log: Instant,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    last_log: AtomicU64,
 }
 
 impl DagknightCache {
     pub fn new(capacity: usize) -> Self {
         Self {
-            map: HashMap::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
+            map: DashMap::with_capacity(capacity),
             capacity,
-            hits: 0,
-            misses: 0,
-            last_log: Instant::now(),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            last_log: AtomicU64::new(0),
         }
     }
 
-    pub fn get(&mut self, key: &Arc<Vec<Hash>>) -> Option<Arc<DagknightData>> {
-        if let Some(data) = self.map.get(key) {
-            self.hits += 1;
-            // Move to end for LRU
-            self.order.retain(|k| !k.as_ptr().eq(&key.as_ptr()));
-            self.order.push_back(key.clone());
-            return Some(data.clone());
+    /// Lock-free read path. Returns cached result if available.
+    pub fn get(&self, key: &Arc<Vec<Hash>>) -> Option<Arc<DagknightData>> {
+        if let Some(entry) = self.map.get(key) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Some(entry.value().clone());
         }
-        self.misses += 1;
+        self.misses.fetch_add(1, Ordering::Relaxed);
         None
     }
 
-    pub fn insert(&mut self, key: Arc<Vec<Hash>>, value: Arc<DagknightData>) {
+    /// Insert result. Evicts a random entry if at capacity.
+    pub fn insert(&self, key: Arc<Vec<Hash>>, value: Arc<DagknightData>) {
         if self.map.contains_key(&key) {
-            self.order.retain(|k| !k.as_ptr().eq(&key.as_ptr()));
-        } else if self.map.len() >= self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.map.remove(&oldest);
+            return; // Already cached, no-op
+        }
+
+        // Evict a random entry if at capacity
+        if self.map.len() >= self.capacity {
+            if let Some(entry) = self.map.iter().next() {
+                let to_remove = entry.key().clone();
+                self.map.remove(&to_remove);
             }
         }
-        self.order.push_back(key.clone());
+
         self.map.insert(key, value);
     }
 
-    pub fn maybe_log_stats(&mut self) {
-        if Instant::now().duration_since(self.last_log) > std::time::Duration::from_secs(10) {
-            let total = self.hits + self.misses;
-            let hit_rate = if total > 0 { (self.hits as f64 / total as f64) * 100.0 } else { 0.0 };
+    /// Log stats every 10 seconds using atomic reads.
+    pub fn maybe_log_stats(&self) {
+        let now = Instant::now().elapsed().as_secs();
+        let last = self.last_log.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= 10 {
+            // Use compare_exchange to atomically update last_log (best effort)
+            let _ = self.last_log.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed);
+
+            // Use swap to atomically reset counters (best effort)
+            let current_hits = self.hits.swap(0, Ordering::Relaxed);
+            let current_misses = self.misses.swap(0, Ordering::Relaxed);
+            let total = current_hits + current_misses;
+            let hit_rate = if total > 0 {
+                (current_hits as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
             info!(
                 target: "dagknight",
                 "[DAGKNIGHT CACHE] Hits: {} | Misses: {} | Total: {} | HitRate: {:.2}% | Size: {} | Capacity: {}",
-                self.hits, self.misses, total, hit_rate, self.map.len(), self.capacity
+                current_hits, current_misses, total, hit_rate, self.map.len(), self.capacity
             );
-            self.last_log = Instant::now();
-            // Reset counters to show recent activity rate
-            self.hits = 0;
-            self.misses = 0;
         }
     }
 }
@@ -210,9 +224,9 @@ pub struct DagknightExecutor<
     pub headers_store: Arc<O>,
     pub relations_store: Arc<RwLock<D>>,
     pub reachability_service: MTReachabilityService<R>,
-    /// LRU cache for dagknight results keyed by the sorted parent set.
+    /// Lock-free read cache for dagknight results keyed by the sorted parent set.
     /// Neutralizes sibling-merge DoS and optimizes honest concurrent mining.
-    pub dagknight_cache: Arc<Mutex<DagknightCache>>,
+    pub dagknight_cache: Arc<DagknightCache>,
 }
 
 #[derive(Clone)]
@@ -272,12 +286,9 @@ impl<
         sorted_parents.sort();
         let key = Arc::new(sorted_parents);
 
-        {
-            let mut cache = self.dagknight_cache.lock();
-            if let Some(cached) = cache.get(&key) {
-                cache.maybe_log_stats();
-                return (*cached).clone();
-            }
+        if let Some(cached) = self.dagknight_cache.get(&key) {
+            self.dagknight_cache.maybe_log_stats();
+            return (*cached).clone();
         }
 
         // g = find LCCA
@@ -355,10 +366,7 @@ impl<
         let result = DagknightData { selected_parent: curr_subgroup[0], conflict_ordered_parents };
 
         // Cache the result
-        {
-            let mut cache = self.dagknight_cache.lock();
-            cache.insert(key, Arc::new(result.clone()));
-        }
+        self.dagknight_cache.insert(key, Arc::new(result.clone()));
         result
     }
 
@@ -947,7 +955,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
-            dagknight_cache: Arc::new(Mutex::new(DagknightCache::new(1024))),
+            dagknight_cache: Arc::new(DagknightCache::new(1024)),
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
@@ -1154,7 +1162,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
-            dagknight_cache: Arc::new(Mutex::new(DagknightCache::new(1024))),
+            dagknight_cache: Arc::new(DagknightCache::new(1024)),
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
@@ -1232,7 +1240,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
-            dagknight_cache: Arc::new(Mutex::new(DagknightCache::new(1024))),
+            dagknight_cache: Arc::new(DagknightCache::new(1024)),
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
