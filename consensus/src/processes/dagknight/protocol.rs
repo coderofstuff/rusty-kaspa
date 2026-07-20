@@ -79,12 +79,18 @@ impl DagknightCache {
             return; // Already cached, no-op
         }
 
-        // Evict a random entry if at capacity
-        if self.map.len() >= self.capacity {
-            if let Some(entry) = self.map.iter().next() {
-                let to_remove = entry.key().clone();
-                self.map.remove(&to_remove);
+        // Evict a random entry if at capacity.
+        // Must drop the iterator entry before calling remove to avoid holding a read lock
+        // while acquiring a write lock (deadlock).
+        let to_remove = {
+            if self.map.len() >= self.capacity {
+                self.map.iter().next().map(|entry| entry.key().clone())
+            } else {
+                None
             }
+        };
+        if let Some(k) = to_remove {
+            self.map.remove(&k);
         }
 
         self.map.insert(key, value);
