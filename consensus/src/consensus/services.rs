@@ -12,7 +12,7 @@ use crate::{
         },
     },
     processes::{
-        block_depth::BlockDepthManager, coinbase::CoinbaseManager, dagknight::protocol::DagknightExecutor,
+        block_depth::BlockDepthManager, coinbase::CoinbaseManager, dagknight::protocol::{DagknightCache, DagknightExecutor},
         ghostdag::protocol::GhostdagManager, parents_builder::ParentsManager, pruning::PruningPointManager,
         pruning_proof::PruningProofManager, sync::SyncManager, transaction_validator::TransactionValidator,
         traversal_manager::DagTraversalManager, window::SampledWindowManager,
@@ -20,7 +20,7 @@ use crate::{
 };
 use kaspa_consensus_core::mass::MassCalculator;
 use kaspa_txscript::caches::TxScriptCacheCounters;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, atomic::AtomicBool};
 
 pub type DbGhostdagManager =
@@ -144,6 +144,7 @@ impl ConsensusServices {
             headers_store: storage.headers_store.clone(),
             relations_store: Arc::new(RwLock::new(relations_service.clone())),
             reachability_service: reachability_service.clone(),
+            dagknight_cache: Arc::new(Mutex::new(DagknightCache::new(1024))),
         });
 
         let coinbase_manager = CoinbaseManager::new(

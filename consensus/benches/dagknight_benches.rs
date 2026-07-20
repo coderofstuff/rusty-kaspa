@@ -8,7 +8,7 @@ use criterion::{Criterion, SamplingMode, black_box, criterion_group, criterion_m
 use kaspa_consensus_core::{KType, blockhash::ORIGIN, header::Header};
 use kaspa_hashes::Hash;
 use kaspa_math::Uint192;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use kaspa_consensus::{
     model::{
@@ -19,7 +19,7 @@ use kaspa_consensus::{
         },
     },
     processes::{
-        dagknight::protocol::DagknightExecutor,
+        dagknight::protocol::{DagknightCache, DagknightExecutor},
         reachability::tests::{DagBlock, DagBuilder},
     },
 };
@@ -91,6 +91,7 @@ fn run_tie_breaking_at_k(k: KType) -> (Hash, usize) {
         headers_store: headers_store.clone(),
         reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
         relations_store: Arc::new(RwLock::new(relations.clone())),
+        dagknight_cache: Arc::new(Mutex::new(DagknightCache::new(1024))),
     };
 
     // Build DAG: sort blocks by blue_work, insert into stores

@@ -1,16 +1,17 @@
 use std::{
     cell::Cell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, OnceLock},
+    time::Instant,
 };
 
 use dashmap::DashMap;
 use itertools::Itertools;
 use kaspa_consensus_core::{BlockHashMap, BlockHashSet, HashMapCustomHasher, KType};
-use kaspa_core::{debug, trace};
+use kaspa_core::{debug, info, trace};
 use kaspa_hashes::Hash;
 use kaspa_math::Uint192;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::{
     model::{
@@ -36,6 +37,70 @@ use crate::{
         reachability::relations::FutureIntersectRelations,
     },
 };
+
+/// Thread-safe LRU cache for Dagknight resolution results.
+/// Keyed by sorted parent sets optimize honest concurrent mining.
+pub struct DagknightCache {
+    map: HashMap<Arc<Vec<Hash>>, Arc<DagknightData>>,
+    order: VecDeque<Arc<Vec<Hash>>>,
+    capacity: usize,
+    hits: u64,
+    misses: u64,
+    last_log: Instant,
+}
+
+impl DagknightCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            map: HashMap::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+            capacity,
+            hits: 0,
+            misses: 0,
+            last_log: Instant::now(),
+        }
+    }
+
+    pub fn get(&mut self, key: &Arc<Vec<Hash>>) -> Option<Arc<DagknightData>> {
+        if let Some(data) = self.map.get(key) {
+            self.hits += 1;
+            // Move to end for LRU
+            self.order.retain(|k| !k.as_ptr().eq(&key.as_ptr()));
+            self.order.push_back(key.clone());
+            return Some(data.clone());
+        }
+        self.misses += 1;
+        None
+    }
+
+    pub fn insert(&mut self, key: Arc<Vec<Hash>>, value: Arc<DagknightData>) {
+        if self.map.contains_key(&key) {
+            self.order.retain(|k| !k.as_ptr().eq(&key.as_ptr()));
+        } else if self.map.len() >= self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(&oldest);
+            }
+        }
+        self.order.push_back(key.clone());
+        self.map.insert(key, value);
+    }
+
+    pub fn maybe_log_stats(&mut self) {
+        if Instant::now().duration_since(self.last_log) > std::time::Duration::from_secs(10) {
+            let total = self.hits + self.misses;
+            let hit_rate = if total > 0 { (self.hits as f64 / total as f64) * 100.0 } else { 0.0 };
+            info!(
+                target: "dagknight",
+                "[DAGKNIGHT CACHE] Hits: {} | Misses: {} | Total: {} | HitRate: {:.2}% | Size: {} | Capacity: {}",
+                self.hits, self.misses, total, hit_rate, self.map.len(), self.capacity
+            );
+            self.last_log = Instant::now();
+            // Reset counters to show recent activity rate
+            self.hits = 0;
+            self.misses = 0;
+        }
+    }
+}
 
 /*
     Task 0:
@@ -145,6 +210,9 @@ pub struct DagknightExecutor<
     pub headers_store: Arc<O>,
     pub relations_store: Arc<RwLock<D>>,
     pub reachability_service: MTReachabilityService<R>,
+    /// LRU cache for dagknight results keyed by the sorted parent set.
+    /// Neutralizes sibling-merge DoS and optimizes honest concurrent mining.
+    pub dagknight_cache: Arc<Mutex<DagknightCache>>,
 }
 
 #[derive(Clone)]
@@ -198,6 +266,19 @@ impl<
                 4. Tie-breaking rule
                 5. Cascade voting -- requires most thought for making incremental
         */
+
+        // Cache lookup using sorted parents as the key
+        let mut sorted_parents = parents.to_vec();
+        sorted_parents.sort();
+        let key = Arc::new(sorted_parents);
+
+        {
+            let mut cache = self.dagknight_cache.lock();
+            if let Some(cached) = cache.get(&key) {
+                cache.maybe_log_stats();
+                return (*cached).clone();
+            }
+        }
 
         // g = find LCCA
         let mut conflict_genesis = self.common_chain_ancestor(parents);
@@ -271,7 +352,14 @@ impl<
         // Opportunistically cleanup unused locks after processing
         cleanup_conflict_locks();
 
-        DagknightData { selected_parent: curr_subgroup[0], conflict_ordered_parents }
+        let result = DagknightData { selected_parent: curr_subgroup[0], conflict_ordered_parents };
+
+        // Cache the result
+        {
+            let mut cache = self.dagknight_cache.lock();
+            cache.insert(key, Arc::new(result.clone()));
+        }
+        result
     }
 
     fn common_chain_ancestor(&self, parents: &[Hash]) -> Hash {
@@ -859,6 +947,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            dagknight_cache: Arc::new(Mutex::new(DagknightCache::new(1024))),
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
@@ -1065,14 +1154,13 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            dagknight_cache: Arc::new(Mutex::new(DagknightCache::new(1024))),
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
         let genesis = DagBlock::new(genesis_hash, vec![ORIGIN]);
         builder.add_block(genesis.clone());
 
-        // Add blocks 2 and 3 and insert headers/ghostdag entries.
-        // We'll use a small helper closure to reduce repetition when adding a block and its header.
         let mut add_block_with_header = |id: u64, parents: Vec<Hash>| {
             let current_hash = id.into();
             let DagknightData { selected_parent, .. } = dk_executor.dagknight(&parents);
@@ -1144,8 +1232,8 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            dagknight_cache: Arc::new(Mutex::new(DagknightCache::new(1024))),
         };
-
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
         let mut add_block = |hash, parents: Vec<Hash>, blue_work, bits, blue_score, daa_score, selected_parent: Hash| -> Hash {
