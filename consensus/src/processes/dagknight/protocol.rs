@@ -96,6 +96,28 @@ impl DagknightCache {
         self.map.insert(key, value);
     }
 
+    /// Force a stats log immediately (for testing/debugging).
+    pub fn log_stats(&self) {
+        let current_hits = self.hits.swap(0, Ordering::Relaxed);
+        let current_misses = self.misses.swap(0, Ordering::Relaxed);
+        let total = current_hits + current_misses;
+        let hit_rate = if total > 0 {
+            (current_hits as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+        info!(
+            target: "dagknight",
+            "[DAGKNIGHT CACHE] Hits: {} | Misses: {} | Total: {} | HitRate: {:.2}% | Size: {} | Capacity: {}",
+            current_hits, current_misses, total, hit_rate, self.map.len(), self.capacity
+        );
+        #[cfg(test)]
+        println!(
+            "[DAGKNIGHT CACHE] Hits: {} | Misses: {} | Total: {} | HitRate: {:.2}% | Size: {} | Capacity: {}",
+            current_hits, current_misses, total, hit_rate, self.map.len(), self.capacity
+        );
+    }
+
     /// Log stats every 10 seconds using atomic reads.
     pub fn maybe_log_stats(&self) {
         let now = Instant::now().elapsed().as_secs();
@@ -1046,6 +1068,9 @@ mod tests {
         all_blocks.extend(plan.blocks.clone());
         all_blocks.push((virtual_hash.to_le_u64()[3], tips.iter().map(|h| h.to_le_u64()[3]).collect_vec()));
         generate_dot_with_chain(&all_blocks, &chain_nodes, reds, base_name).expect("Failed to generate DOT file");
+
+        // Log cache stats
+        dk_executor.dagknight_cache.log_stats();
 
         DagKnightTestResult { virtual_gd_data }
     }
