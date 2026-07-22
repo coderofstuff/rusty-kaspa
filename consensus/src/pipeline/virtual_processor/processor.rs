@@ -98,6 +98,7 @@ use std::{
     cmp::min,
     collections::{BinaryHeap, HashMap, VecDeque},
     ops::Deref,
+    str::FromStr,
     sync::{Arc, atomic::Ordering},
 };
 
@@ -302,6 +303,7 @@ impl VirtualStateProcessor {
             .collect_vec();
         drop(prune_guard);
         let prev_sink = prev_state.coloring_ghostdag_data.selected_parent;
+        let prev_sink_merge_depth_root = self.depth_manager.calc_merge_depth_root(&prev_state.coloring_ghostdag_data, pruning_point);
         let mut accumulated_diff = prev_state.utxo_diff.clone().to_reversed();
 
         let (new_sink, virtual_parent_candidates) = if let Some(dk_executor) = &self.dagknight_executor {
@@ -309,7 +311,11 @@ impl VirtualStateProcessor {
                 &virtual_read,
                 &mut accumulated_diff,
                 prev_sink,
-                tips.clone(),
+                tips.clone()
+                    .iter()
+                    .cloned()
+                    .filter(|&t| self.reachability_service.is_dag_ancestor_of(prev_sink_merge_depth_root, t))
+                    .collect_vec(),
                 finality_point,
                 pruning_point,
                 dk_executor,
