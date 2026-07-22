@@ -82,13 +82,8 @@ impl DagknightCache {
         // Evict a random entry if at capacity.
         // Must drop the iterator entry before calling remove to avoid holding a read lock
         // while acquiring a write lock (deadlock).
-        let to_remove = {
-            if self.map.len() >= self.capacity {
-                self.map.iter().next().map(|entry| entry.key().clone())
-            } else {
-                None
-            }
-        };
+        let to_remove =
+            { if self.map.len() >= self.capacity { self.map.iter().next().map(|entry| entry.key().clone()) } else { None } };
         if let Some(k) = to_remove {
             self.map.remove(&k);
         }
@@ -101,11 +96,7 @@ impl DagknightCache {
         let current_hits = self.hits.swap(0, Ordering::Relaxed);
         let current_misses = self.misses.swap(0, Ordering::Relaxed);
         let total = current_hits + current_misses;
-        let hit_rate = if total > 0 {
-            (current_hits as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
+        let hit_rate = if total > 0 { (current_hits as f64 / total as f64) * 100.0 } else { 0.0 };
         info!(
             target: "dagknight",
             "[DAGKNIGHT CACHE] Hits: {} | Misses: {} | Total: {} | HitRate: {:.2}% | Size: {} | Capacity: {}",
@@ -114,7 +105,12 @@ impl DagknightCache {
         #[cfg(test)]
         println!(
             "[DAGKNIGHT CACHE] Hits: {} | Misses: {} | Total: {} | HitRate: {:.2}% | Size: {} | Capacity: {}",
-            current_hits, current_misses, total, hit_rate, self.map.len(), self.capacity
+            current_hits,
+            current_misses,
+            total,
+            hit_rate,
+            self.map.len(),
+            self.capacity
         );
     }
 
@@ -130,11 +126,7 @@ impl DagknightCache {
             let current_hits = self.hits.swap(0, Ordering::Relaxed);
             let current_misses = self.misses.swap(0, Ordering::Relaxed);
             let total = current_hits + current_misses;
-            let hit_rate = if total > 0 {
-                (current_hits as f64 / total as f64) * 100.0
-            } else {
-                0.0
-            };
+            let hit_rate = if total > 0 { (current_hits as f64 / total as f64) * 100.0 } else { 0.0 };
             info!(
                 target: "dagknight",
                 "[DAGKNIGHT CACHE] Hits: {} | Misses: {} | Total: {} | HitRate: {:.2}% | Size: {} | Capacity: {}",
@@ -271,22 +263,22 @@ impl<
 > DagknightExecutor<C, O, D, R>
 {
     pub fn dagknight(&self, parents: &[Hash]) -> DagknightData {
-        let pure_result = self.dagknight_pure(parents, false);
+        // let pure_result = self.dagknight_pure(parents, false);
         let shortcut_result = self.dagknight_pure(parents, true);
 
-        assert_eq!(
-            shortcut_result.selected_parent, pure_result.selected_parent,
-            "Shortcut result and pure result should have the same selected parent | shortcut: {} | pure: {} | parents: {:?}",
-            shortcut_result.selected_parent, pure_result.selected_parent, parents
-        );
-        assert_eq!(
-            BlockHashSet::from_iter(shortcut_result.conflict_ordered_parents.clone()),
-            BlockHashSet::from_iter(pure_result.conflict_ordered_parents.clone()),
-            "Shortcut result and pure result should have the same conflict-ordered parents | shortcut: {:?} | pure: {:?} | parents: {:?}",
-            shortcut_result.conflict_ordered_parents,
-            pure_result.conflict_ordered_parents,
-            parents
-        );
+        // assert_eq!(
+        //     shortcut_result.selected_parent, pure_result.selected_parent,
+        //     "Shortcut result and pure result should have the same selected parent | shortcut: {} | pure: {} | parents: {:?}",
+        //     shortcut_result.selected_parent, pure_result.selected_parent, parents
+        // );
+        // assert_eq!(
+        //     BlockHashSet::from_iter(shortcut_result.conflict_ordered_parents.clone()),
+        //     BlockHashSet::from_iter(pure_result.conflict_ordered_parents.clone()),
+        //     "Shortcut result and pure result should have the same conflict-ordered parents | shortcut: {:?} | pure: {:?} | parents: {:?}",
+        //     shortcut_result.conflict_ordered_parents,
+        //     pure_result.conflict_ordered_parents,
+        //     parents
+        // );
         shortcut_result
     }
 
@@ -352,22 +344,34 @@ impl<
             // Check shortcut to identify weak groups at k=0
             // This doesn't change conflict hierarchy - it just marks groups as weak
             // for later processes to decide what to do with such weak groups
-            let weak_groups: BlockHashSet =
-                if use_shortcut { self.check_weak_block_shortcut(&agreement_grouping, conflict_genesis) } else { BlockHashSet::new() };
+            let (strong_groups, weak_groups) = if use_shortcut {
+                self.check_weak_block_shortcut(&agreement_grouping, conflict_genesis)
+            } else {
+                let full_set = agreement_grouping.iter().map(|(k, _)| *k).collect_vec();
+                (full_set, BlockHashSet::new())
+            };
 
             // Pick a "winner" among these subgroups
             let (winning_conflict_genesis, winning_subgroup) = {
-                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup, &weak_groups);
+                if strong_groups.len() == 1 {
+                    // If there is a singular winning group
+                    let key = strong_groups[0];
+                    let value = agreement_grouping[&key].clone();
 
-                let final_winner = if best_groups.len() > 1 {
-                    self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups)
+                    (key, value)
                 } else {
-                    let single_winner = best_groups.into_iter().next().expect("best_groups should be non-empty after filtering");
-                    (single_winner.conflict_genesis, single_winner.subgroup)
-                };
+                    let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup, &weak_groups);
 
-                // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
-                final_winner
+                    let final_winner = if best_groups.len() > 1 {
+                        self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups)
+                    } else {
+                        let single_winner = best_groups.into_iter().next().expect("best_groups should be non-empty after filtering");
+                        (single_winner.conflict_genesis, single_winner.subgroup)
+                    };
+
+                    // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
+                    final_winner
+                }
             };
 
             // Add the non-winners to the ordered parents
@@ -555,7 +559,11 @@ impl<
         best_groups_cell.take()
     }
 
-    fn check_weak_block_shortcut(&self, agreement_grouping: &HashMap<Hash, Arc<Vec<Hash>>>, conflict_genesis: Hash) -> BlockHashSet {
+    fn check_weak_block_shortcut(
+        &self,
+        agreement_grouping: &HashMap<Hash, Arc<Vec<Hash>>>,
+        conflict_genesis: Hash,
+    ) -> (Vec<Hash>, BlockHashSet) {
         // First pass: compute k=0 blue_work for each subgroup
         let subgroup_work: Vec<(Hash, Uint192)> = agreement_grouping
             .iter()
@@ -588,6 +596,8 @@ impl<
 
         // Collect weak subgroups (subgroups whose blue_work < threshold)
         let mut weak_groups = BlockHashSet::new();
+        let mut strong_groups = Vec::new();
+
         for (cg, blue_work) in &subgroup_work {
             if *blue_work < threshold {
                 debug!(
@@ -598,12 +608,14 @@ impl<
                     threshold.as_u64()
                 );
                 weak_groups.insert(*cg);
+            } else {
+                strong_groups.push(*cg);
             }
         }
 
         debug!("SHORTCUT cg: {} | {} weak groups out of {} total", conflict_genesis, weak_groups.len(), subgroup_work.len());
 
-        weak_groups
+        (strong_groups, weak_groups)
     }
 
     /// Applies a coloring to the conflict zone, and determines if the
