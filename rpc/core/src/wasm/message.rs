@@ -541,6 +541,43 @@ try_from! ( args: GetSyncStatusResponse, IGetSyncStatusResponse, {
     Ok(to_value(&args)?.into())
 });
 
+// ---
+
+declare! {
+    IGetLibp2pStatusRequest,
+    r#"
+    /**
+     * @category Node RPC
+     */
+    export interface IGetLibp2pStatusRequest { }
+    "#,
+}
+
+try_from! ( args: IGetLibp2pStatusRequest, GetLibp2pStatusRequest, {
+    Ok(from_value(args.into())?)
+});
+
+declare! {
+    IGetLibp2pStatusResponse,
+    r#"
+    export type IRpcLibp2pMode = "off" | "full" | "helper";
+    export type IRpcLibp2pIdentity = "ephemeral" | { persisted: { path: string } };
+
+    /**
+     * @category Node RPC
+     */
+    export interface IGetLibp2pStatusResponse {
+        mode : IRpcLibp2pMode;
+        peerId?: string;
+        identity : IRpcLibp2pIdentity;
+    }
+    "#,
+}
+
+try_from! ( args: GetLibp2pStatusResponse, IGetLibp2pStatusResponse, {
+    Ok(to_value(&args)?.into())
+});
+
 /*
     Interfaces for methods with arguments
 */
