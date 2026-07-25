@@ -1,6 +1,8 @@
 use std::{
     cell::Cell,
     collections::HashMap,
+    fs::File,
+    io::Write,
     sync::{Arc, OnceLock},
 };
 
@@ -210,9 +212,9 @@ impl<
                 continue;
             }
 
-            // Pick a "winner" among these subgroups
+            // Pick a "winner" among these subgroups (original voting)
             let (winning_conflict_genesis, winning_subgroup) = {
-                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup);
+                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup, false);
 
                 let final_winner = if best_groups.len() > 1 {
                     self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups)
@@ -224,6 +226,38 @@ impl<
                 // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
                 final_winner
             };
+
+            // Pick a "winner" among these subgroups (proposed voting)
+            let (proposed_winning_conflict_genesis, proposed_winning_subgroup) = {
+                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup, true);
+
+                let final_winner = if best_groups.len() > 1 {
+                    self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups)
+                } else {
+                    let single_winner = best_groups.into_iter().next().expect("best_groups should be non-empty after filtering");
+                    (single_winner.conflict_genesis, single_winner.subgroup)
+                };
+
+                // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
+                final_winner
+            };
+
+            if winning_conflict_genesis != proposed_winning_conflict_genesis {
+                // Capture the conflict zone as a .dot file for debugging UMC voting discrepancy
+                self.capture_umc_conflict_zone(
+                    conflict_genesis,
+                    &curr_subgroup,
+                    &agreement_grouping,
+                    winning_conflict_genesis,
+                    proposed_winning_conflict_genesis,
+                );
+            }
+
+            assert_eq!(
+                winning_conflict_genesis, proposed_winning_conflict_genesis,
+                "basic: {} | proposed: {} | basic_subgroup: {:?} | proposed_subgroup: {:?}",
+                winning_conflict_genesis, proposed_winning_conflict_genesis, winning_subgroup, proposed_winning_subgroup
+            );
 
             // Add the non-winners to the ordered parents
             agreement_grouping.iter().for_each(|(&conflict_genesis, subgroup)| {
@@ -412,6 +446,7 @@ impl<
         conflict_genesis: Hash,
         agreeing_subgroups: &HashMap<Hash, Arc<Vec<Hash>>>,
         all_tips: &[Hash],
+        use_proposed: bool,
     ) -> Vec<GroupMetadata> {
         let mut group_map = Cell::new(agreeing_subgroups.clone());
         let best_groups_cell = Cell::new(vec![]);
@@ -421,7 +456,7 @@ impl<
                 .iter()
                 .filter_map(|(curr_conflict_genesis, subgroup)| {
                     // `subgroup` is an `&Arc<Vec<Hash>>` here; pass a `&[Hash]` to the colouring function
-                    self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k).map(|selected_parent| {
+                    self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k, use_proposed).map(|selected_parent| {
                         (
                             (*curr_conflict_genesis, subgroup.clone()),
                             GroupMetadata { conflict_genesis: *curr_conflict_genesis, subgroup: subgroup.clone(), k, selected_parent },
@@ -444,6 +479,104 @@ impl<
         best_groups_cell.take()
     }
 
+    /// Captures the conflict zone as a `.dot` file showing the diamond from conflict_genesis to all tips.
+    /// Used for debugging UMC voting discrepancies between original and proposed implementations.
+    fn capture_umc_conflict_zone(
+        &self,
+        conflict_genesis: Hash,
+        _curr_subgroup: &[Hash],
+        agreement_grouping: &HashMap<Hash, Arc<Vec<Hash>>>,
+        winning_conflict_genesis: Hash,
+        proposed_winning_conflict_genesis: Hash,
+    ) {
+        let dot_filename = format!(
+            "umc_conflict_disparity_{}.dot",
+            conflict_genesis.to_le_u64()[3]
+        );
+
+        let mut f = match File::create(&dot_filename) {
+            Ok(f) => f,
+            Err(e) => {
+                debug!("Failed to create .dot file '{}': {e}", dot_filename);
+                return;
+            }
+        };
+
+        writeln!(f, "digraph ConflictZone {{").unwrap();
+        writeln!(f, "    rankdir=TB;").unwrap();
+        writeln!(
+            f,
+            "    node [shape=box, style=filled, fontname=\"Helvetica\", fontsize=8];"
+        )
+        .unwrap();
+        writeln!(f, "    edge [fontname=\"Helvetica\", fontsize=6];").unwrap();
+        writeln!(f).unwrap();
+
+        // Legend
+        writeln!(
+            f,
+            "    // Legend: blue=orig_winner, red=proposed_winner, yellow=loser_tips, gray=conflict_genesis"
+        )
+        .unwrap();
+        writeln!(f).unwrap();
+
+        // Conflict genesis (bottom of diamond)
+        writeln!(
+            f,
+            "    \"g\" [label=\"conflict_genesis\\\n{:#018x}\" fillcolor=lightgray];",
+            conflict_genesis.to_le_u64()[3]
+        )
+        .unwrap();
+        writeln!(f).unwrap();
+
+        // Tips (top of diamond) grouped by agreement group
+        for (cg, subgroup) in agreement_grouping {
+            let _cg_short = format!("{:016x}", cg.to_le_u64()[3]);
+            let is_orig_winner = *cg == winning_conflict_genesis;
+            let is_prop_winner = *cg == proposed_winning_conflict_genesis;
+
+            let color = if is_orig_winner && is_prop_winner {
+                "lightgreen"
+            } else if is_orig_winner {
+                "lightskyblue"
+            } else if is_prop_winner {
+                "lightcoral"
+            } else {
+                "lightyellow"
+            };
+
+            let label = if is_orig_winner && is_prop_winner {
+                "agree"
+            } else if is_orig_winner {
+                "orig"
+            } else if is_prop_winner {
+                "prop"
+            } else {
+                "loser"
+            };
+
+            for tip in subgroup.as_ref() {
+                let tip_short = format!("{:016x}", tip.to_le_u64()[3]);
+                writeln!(
+                    f,
+                    "    \"t_{}\" [label=\"{}\\\n{}\" fillcolor={color}];",
+                    tip_short, tip_short, label
+                )
+                .unwrap();
+
+                // Edge from conflict genesis to tip
+                writeln!(f, "    \"g\" -> \"t_{}\";", tip_short).unwrap();
+            }
+        }
+
+        writeln!(f, "}}").unwrap();
+
+        debug!(
+            "Wrote conflict zone .dot file: '{}' (original winner: {winning_conflict_genesis:?}, proposed winner: {proposed_winning_conflict_genesis:?})",
+            dot_filename
+        );
+    }
+
     /// Applies a coloring to the conflict zone, and determines if the
     /// coloring represents a majority over "g" only (as opposed to full UMC)
     /// TODO[DK]: Implement full UMC cascade voting after coloring
@@ -453,6 +586,7 @@ impl<
         subgroup: &[Hash],
         all_tips: &[Hash],
         k_to_check: KType,
+        use_proposed: bool,
     ) -> Option<SortableBlock> {
         let reachability_service = self.reachability_service.clone();
         let relations_store = self.relations_store.read();
@@ -477,17 +611,12 @@ impl<
         let subgroup_virtual_sp = conflict_zone_manager.find_selected_parent(subgroup.iter().copied());
         let virtual_gd = conflict_zone_manager.k_colouring(all_tips, k_to_check, Some(subgroup_virtual_sp));
 
-        let vote_original =
-            self.umc_cascade_voting(conflict_genesis, subgroup, virtual_gd.clone(), k_to_check, &conflict_zone_manager);
-        let vote_proposed =
-            self.proposed_umc_cascade_voting(conflict_genesis, subgroup, virtual_gd, k_to_check, &conflict_zone_manager);
-        self.counters.record_vote(vote_original, vote_proposed);
-        if vote_original != vote_proposed {
-            debug!(
-                "UMC VOTE DIFFERENCE: original={vote_original}, proposed={vote_proposed}, k={k_to_check}, conflict_genesis={conflict_genesis:#?}"
-            );
-        }
-        if vote_original {
+        let vote = if use_proposed {
+            self.proposed_umc_cascade_voting(conflict_genesis, subgroup, virtual_gd, k_to_check, &conflict_zone_manager)
+        } else {
+            self.umc_cascade_voting(conflict_genesis, subgroup, virtual_gd.clone(), k_to_check, &conflict_zone_manager)
+        };
+        if vote {
             Some(SortableBlock {
                 hash: subgroup_virtual_sp,
                 blue_work: self.headers_store.get_header(subgroup_virtual_sp).unwrap().blue_work,
