@@ -8,46 +8,28 @@ type Sign = i16;
 const POSITIVE: Sign = 1;
 const NEGATIVE: Sign = -1;
 
-const INF: i64 = i64::MAX;
-const NEG_INF: i64 = i64::MIN;
+const INF: i128 = i128::MAX;
+const NEG_INF: i128 = i128::MIN;
 
 #[derive(Clone, Debug)]
 struct NodeSummary {
-    min_pos_score: i64,
+    min_pos_score: i128,
     argmin_pos: Option<Hash>,
-    max_neg_score: i64,
+    max_neg_score: i128,
     argmax_neg: Option<Hash>,
-    lazy_add: i64,
+    lazy_add: i128,
 }
 
 impl NodeSummary {
     fn empty() -> Self {
-        Self {
-            min_pos_score: INF,
-            argmin_pos: None,
-            max_neg_score: NEG_INF,
-            argmax_neg: None,
-            lazy_add: 0,
-        }
+        Self { min_pos_score: INF, argmin_pos: None, max_neg_score: NEG_INF, argmax_neg: None, lazy_add: 0 }
     }
 
-    fn leaf(vertex: Hash, score: i64, sign: Sign) -> Self {
+    fn leaf(vertex: Hash, score: i128, sign: Sign) -> Self {
         if sign == POSITIVE {
-            Self {
-                min_pos_score: score,
-                argmin_pos: Some(vertex),
-                max_neg_score: NEG_INF,
-                argmax_neg: None,
-                lazy_add: 0,
-            }
+            Self { min_pos_score: score, argmin_pos: Some(vertex), max_neg_score: NEG_INF, argmax_neg: None, lazy_add: 0 }
         } else {
-            Self {
-                min_pos_score: INF,
-                argmin_pos: None,
-                max_neg_score: score,
-                argmax_neg: Some(vertex),
-                lazy_add: 0,
-            }
+            Self { min_pos_score: INF, argmin_pos: None, max_neg_score: score, argmax_neg: Some(vertex), lazy_add: 0 }
         }
     }
 }
@@ -65,13 +47,7 @@ fn merge(left: &NodeSummary, right: &NodeSummary) -> NodeSummary {
         (right.max_neg_score, right.argmax_neg)
     };
 
-    NodeSummary {
-        min_pos_score,
-        argmin_pos,
-        max_neg_score,
-        argmax_neg,
-        lazy_add: 0,
-    }
+    NodeSummary { min_pos_score, argmin_pos, max_neg_score, argmax_neg, lazy_add: 0 }
 }
 
 pub struct AppendableChainSegmentTree {
@@ -96,7 +72,7 @@ impl AppendableChainSegmentTree {
         }
     }
 
-    pub fn append_leaf(&mut self, vertex: Hash, initial_score: i64, initial_sign: Sign) {
+    pub fn append_leaf(&mut self, vertex: Hash, initial_score: i128, initial_sign: Sign) {
         assert!(!self.index.contains_key(&vertex), "vertex already present");
 
         if self.size == self.capacity {
@@ -115,7 +91,7 @@ impl AppendableChainSegmentTree {
         self.pull_path(node);
     }
 
-    pub fn prefix_add(&mut self, p: usize, delta: i64) {
+    pub fn prefix_add(&mut self, p: usize, delta: i128) {
         if p == 0 {
             return;
         }
@@ -152,21 +128,17 @@ impl AppendableChainSegmentTree {
         self.set_sign(vertex, POSITIVE);
     }
 
-    pub fn score(&mut self, vertex: Hash) -> i64 {
+    pub fn score(&mut self, vertex: Hash) -> i128 {
         let pos = *self.index.get(&vertex).expect("vertex not in tree");
         self.point_score(1, 0, self.capacity, pos)
     }
 
-    fn point_score(&mut self, node: usize, left: usize, right: usize, target: usize) -> i64 {
+    fn point_score(&mut self, node: usize, left: usize, right: usize, target: usize) -> i128 {
         if right - left == 1 {
             let summary = &self.tree[node];
             let vertex = self.vertices[target];
             let sign = self.sign[&vertex];
-            if sign == POSITIVE {
-                summary.min_pos_score
-            } else {
-                summary.max_neg_score
-            }
+            if sign == POSITIVE { summary.min_pos_score } else { summary.max_neg_score }
         } else {
             self.push(node);
             let mid = (left + right) / 2;
@@ -187,7 +159,7 @@ impl AppendableChainSegmentTree {
         self.point_assign_leaf(1, 0, self.capacity, pos, vertex, current_score, new_sign);
     }
 
-    fn point_assign_leaf(&mut self, node: usize, left: usize, right: usize, target: usize, vertex: Hash, score: i64, sign: Sign) {
+    fn point_assign_leaf(&mut self, node: usize, left: usize, right: usize, target: usize, vertex: Hash, score: i128, sign: Sign) {
         if right - left == 1 {
             self.tree[node] = NodeSummary::leaf(vertex, score, sign);
             return;
@@ -204,7 +176,7 @@ impl AppendableChainSegmentTree {
 
     // ----- Range and point operations -----
 
-    fn range_add(&mut self, node: usize, left: usize, right: usize, q_left: usize, q_right: usize, delta: i64) {
+    fn range_add(&mut self, node: usize, left: usize, right: usize, q_left: usize, q_right: usize, delta: i128) {
         if q_right <= left || right <= q_left {
             return;
         }
@@ -235,7 +207,7 @@ impl AppendableChainSegmentTree {
         }
     }
 
-    fn materialize_records(&mut self) -> Vec<(Hash, i64, Sign)> {
+    fn materialize_records(&mut self) -> Vec<(Hash, i128, Sign)> {
         self.push_all(1, 0, self.capacity);
         self.vertices
             .iter()
@@ -243,11 +215,7 @@ impl AppendableChainSegmentTree {
                 let pos = self.index[&vertex];
                 let leaf = &self.tree[self.capacity + pos];
                 let sign = self.sign[&vertex];
-                let score = if sign == POSITIVE {
-                    leaf.min_pos_score
-                } else {
-                    leaf.max_neg_score
-                };
+                let score = if sign == POSITIVE { leaf.min_pos_score } else { leaf.max_neg_score };
                 (vertex, score, sign)
             })
             .collect()
@@ -255,7 +223,7 @@ impl AppendableChainSegmentTree {
 
     // ----- Lazy mechanics -----
 
-    fn apply_add(&mut self, node: usize, delta: i64) {
+    fn apply_add(&mut self, node: usize, delta: i128) {
         let summary = &mut self.tree[node];
         if summary.argmin_pos.is_some() {
             summary.min_pos_score += delta;
@@ -387,11 +355,11 @@ mod tests {
     fn test_grow_capacity() {
         let mut tree = AppendableChainSegmentTree::new();
         for i in 0..5u64 {
-            tree.append_leaf(i.into(), i as i64, POSITIVE);
+            tree.append_leaf(i.into(), i as i128, POSITIVE);
         }
 
         for i in 0..5u64 {
-            assert_eq!(tree.score(i.into()), i as i64);
+            assert_eq!(tree.score(i.into()), i as i128);
         }
 
         tree.prefix_add(3, -2);
@@ -444,54 +412,58 @@ mod tests {
 
 /// Maintains exact cascade scores for one fixed k using chain decomposition
 /// and lazy segment trees with event-driven sign-flip propagation.
+/// Uses work-weighted values (i128) instead of block counts.
 pub struct CascadeMaintainer {
-     chains: Vec<Vec<Hash>>,
+    chains: Vec<Vec<Hash>>,
     trees: Vec<AppendableChainSegmentTree>,
     sign: HashMap<Hash, Sign>,
     chain_id: HashMap<Hash, usize>,
-    deficit: i64,
-    blue_count: i64,
-    red_count: i64,
-    negative_count: i64,
+    /// Work value per blue block (for sign flip event calculation)
+    blue_works: HashMap<Hash, i128>,
+    deficit: i128,
+    blue_work: i128,
+    red_work: i128,
+    negative_work: i128,
 }
 
 impl CascadeMaintainer {
-    pub fn new(deficit: i64) -> Self {
+    pub fn new(deficit: i128) -> Self {
         Self {
             chains: Vec::new(),
             trees: Vec::new(),
             sign: HashMap::new(),
             chain_id: HashMap::new(),
+            blue_works: HashMap::new(),
             deficit,
-            blue_count: 0,
-            red_count: 0,
-            negative_count: 0,
+            blue_work: 0,
+            red_work: 0,
+            negative_work: 0,
         }
     }
 
     /// Insert a new blue block into the chain decomposition and stabilize cascade.
-    pub fn add_blue(&mut self, block: Hash, reachability: &impl ReachabilityService) {
+    /// `block_work` is the work value of this blue block.
+    pub fn add_blue(&mut self, block: Hash, block_work: i128, reachability: &impl ReachabilityService) {
         let initial_score = self.deficit;
         let initial_sign = if initial_score >= 0 { POSITIVE } else { NEGATIVE };
 
-        let chain_id = self.find_extendable_chain(block, reachability)
-            .unwrap_or_else(|| {
-                let id = self.chains.len();
-                self.chains.push(Vec::new());
-                self.trees.push(AppendableChainSegmentTree::new());
-                id
-            });
+        let chain_id = self.find_extendable_chain(block, reachability).unwrap_or_else(|| {
+            let id = self.chains.len();
+            self.chains.push(Vec::new());
+            self.trees.push(AppendableChainSegmentTree::new());
+            id
+        });
 
-        self.append_to_chain(chain_id, block, initial_score, initial_sign);
+        self.append_to_chain(chain_id, block, initial_score, initial_sign, block_work);
 
-        // New blue block emits an event for its own sign to ancestors
-        self.process_event(block, initial_sign as i64, reachability);
+        // New blue block emits +work event to ancestors
+        self.process_event(block, block_work, reachability);
     }
 
-    /// Add a new red block and emit -1 event to ancestors.
-    pub fn add_red(&mut self, block: Hash, reachability: &impl ReachabilityService) {
-        self.red_count += 1;
-        self.process_event(block, -1, reachability);
+    /// Add a new red block and emit -work event to ancestors.
+    pub fn add_red(&mut self, block: Hash, block_work: i128, reachability: &impl ReachabilityService) {
+        self.red_work += block_work;
+        self.process_event(block, -block_work, reachability);
     }
 
     /// Add a gray block (red block that agrees with the current side).
@@ -501,9 +473,9 @@ impl CascadeMaintainer {
         // They don't emit events, don't affect scores, and don't count toward red_count.
     }
 
-    /// Compute virtual score: |U| - |R| - 2*negative_count + deficit
-    pub fn virtual_score(&self) -> i64 {
-        self.blue_count - self.red_count - 2 * self.negative_count + self.deficit
+    /// Compute virtual score: blue_work - red_work - 2*negative_work + deficit
+    pub fn virtual_score(&self) -> i128 {
+        self.blue_work - self.red_work - 2 * self.negative_work + self.deficit
     }
 
     pub fn virtual_accepts(&self) -> bool {
@@ -523,44 +495,50 @@ impl CascadeMaintainer {
         None
     }
 
-    fn append_to_chain(&mut self, chain_id: usize, block: Hash, initial_score: i64, initial_sign: Sign) {
+    fn append_to_chain(&mut self, chain_id: usize, block: Hash, initial_score: i128, initial_sign: Sign, block_work: i128) {
         self.chains[chain_id].push(block);
         self.trees[chain_id].append_leaf(block, initial_score, initial_sign);
         self.chain_id.insert(block, chain_id);
         self.sign.insert(block, initial_sign);
-        self.blue_count += 1;
+        self.blue_works.insert(block, block_work);
+        self.blue_work += block_work;
 
         if initial_sign == NEGATIVE {
-            self.negative_count += 1;
+            self.negative_work += block_work;
         }
     }
 
     // ----- Event processing -----
 
-    fn process_event(&mut self, source: Hash, delta: i64, reachability: &impl ReachabilityService) {
+    fn process_event(&mut self, source: Hash, delta: i128, reachability: &impl ReachabilityService) {
         let mut queue = Vec::new();
 
         self.apply_event(source, delta, reachability);
 
         // Extract crossings and propagate
+        // Clone blue_works to avoid borrow conflicts during tree mutation
+        let blue_works = self.blue_works.clone();
         let mut changed = true;
         while changed {
             changed = false;
 
-            for tree in self.trees.iter_mut() {
+            for (_chain_id, tree) in self.trees.iter_mut().enumerate() {
+                // Apply flips IMMEDIATELY so tree state changes between extractions
                 while let Some(v) = tree.extract_positive_below_zero() {
+                    let v_work = *blue_works.get(&v).expect("blue block not found");
                     tree.flip_to_negative(v);
                     self.sign.insert(v, NEGATIVE);
-                    self.negative_count += 1;
-                    queue.push((v, -2));
+                    self.negative_work += v_work;
+                    queue.push((v, -2 * v_work));
                     changed = true;
                 }
 
                 while let Some(v) = tree.extract_negative_at_least_zero() {
+                    let v_work = *blue_works.get(&v).expect("blue block not found");
                     tree.flip_to_positive(v);
                     self.sign.insert(v, POSITIVE);
-                    self.negative_count -= 1;
-                    queue.push((v, 2));
+                    self.negative_work -= v_work;
+                    queue.push((v, 2 * v_work));
                     changed = true;
                 }
             }
@@ -571,7 +549,13 @@ impl CascadeMaintainer {
         }
     }
 
-    fn apply_event(&mut self, source: Hash, delta: i64, reachability: &impl ReachabilityService) {
+    /// Lookup the work of a blue block.
+    #[allow(dead_code)]
+    fn blue_work_of(&self, block: Hash) -> i128 {
+        *self.blue_works.get(&block).expect("blue block not found")
+    }
+
+    fn apply_event(&mut self, source: Hash, delta: i128, reachability: &impl ReachabilityService) {
         for (chain, tree) in self.chains.iter().zip(self.trees.iter_mut()) {
             let p = last_ancestor_index(chain, source, reachability);
             if p > 0 {
@@ -599,32 +583,73 @@ fn last_ancestor_index(chain: &[Hash], source: Hash, reachability: &impl Reachab
     lo
 }
 
- /// Run cascade voting on a set of blues, reds, and grays.
-/// Grays are red blocks that agree with the current side and don't vote.
-/// Returns true if the virtual score is >= 0 (UMC accepted).
+/// Run cascade voting with per-blue sign propagation (full cascade semantics).
+/// Blues surrounded by reds in their future flip negative and get discounted.
+/// Uses work-weighted values for all computations.
+///
+/// `blue_works` and `red_works` map each block to its work value (as i128).
 pub fn run_cascade(
     blues: &[Hash],
     reds: &[Hash],
     grays: &[Hash],
-    deficit: i64,
+    deficit: i128,
+    blue_works: &HashMap<Hash, i128>,
+    red_works: &HashMap<Hash, i128>,
     reachability: &impl ReachabilityService,
 ) -> bool {
     let mut maintainer = CascadeMaintainer::new(deficit);
 
     for &blue in blues {
-        maintainer.add_blue(blue, reachability);
+        let work = blue_works.get(&blue).copied().unwrap();
+        maintainer.add_blue(blue, work, reachability);
     }
 
     for &red in reds {
-        maintainer.add_red(red, reachability);
+        let work = red_works.get(&red).copied().unwrap();
+        maintainer.add_red(red, work, reachability);
     }
 
-    // Grays are recorded but don't vote - they don't emit events
     for &gray in grays {
         maintainer.add_gray(gray);
     }
 
     maintainer.virtual_accepts()
+}
+
+/// Run cascade voting using work-weighted totals without per-blue sign propagation.
+/// Matches original UMC semantics: `blue_work + deficit >= red_work`.
+/// The chain decomposition and segment trees are used for structure, but the
+/// acceptance check is a direct work comparison (no blue sign flips).
+///
+/// `blue_works` and `red_works` map each block to its work value (as i128).
+pub fn run_cascade_work_weighted(
+    blues: &[Hash],
+    reds: &[Hash],
+    grays: &[Hash],
+    deficit: i128,
+    blue_works: &HashMap<Hash, i128>,
+    red_works: &HashMap<Hash, i128>,
+    reachability: &impl ReachabilityService,
+) -> bool {
+    let mut maintainer = CascadeMaintainer::new(deficit);
+
+    for &blue in blues {
+        let work = blue_works.get(&blue).copied().unwrap_or(0);
+        maintainer.add_blue(blue, work, reachability);
+    }
+
+    for &red in reds {
+        let work = red_works.get(&red).copied().unwrap_or(0);
+        maintainer.add_red(red, work, reachability);
+    }
+
+    for &gray in grays {
+        maintainer.add_gray(gray);
+    }
+
+    // Accept based on total work comparison (no per-blue sign discount)
+    // This matches: blue_block_work + deficit >= red_block_work
+    maintainer.blue_work + maintainer.deficit >= maintainer.red_work
 }
 
 // Cascade maintainer testing is done through protocol integration tests.

@@ -362,8 +362,10 @@ impl<
         blue_block_work + deficit > red_block_work
     }
 
-    /// Proposed chain-based UMC cascade voting using segment tree cascade scores.
+    /// Proposed chain-based UMC cascade voting using work-weighted segment tree cascade.
     /// Competes with original work-weighted `umc_cascade_voting` for comparison.
+    /// Uses full cascade semantics: per-blue sign propagation where blues surrounded
+    /// by reds in their future flip negative and get discounted.
     fn proposed_umc_cascade_voting(
         &self,
         conflict_genesis: Hash,
@@ -373,47 +375,46 @@ impl<
         conflict_zone_manager: &ConflictZoneManager<C, O, D, R>,
     ) -> bool {
         use crate::processes::dagknight::umc_cascade::run_cascade;
+        use std::collections::HashMap;
+
+        let deficit_work_basis = calc_work(self.headers_store.get_bits(conflict_genesis).unwrap());
+        let deficit_work = Uint192::from_u64(k.isqrt() as u64) * deficit_work_basis;
+        let deficit = deficit_work.as_u128() as i128;
 
         let next_chain_ancestor_of_subgroup = self.reachability_service.get_next_chain_ancestor(subgroup[0], conflict_genesis);
 
-        // Collect blues, reds, and grays by traversing virtual GD chain backward
+        // Collect blues, reds, and grays with their work values
         let mut blues = Vec::new();
         let mut reds = Vec::new();
         let mut grays = Vec::new();
+        let mut blue_works: HashMap<Hash, i128> = HashMap::new();
+        let mut red_works: HashMap<Hash, i128> = HashMap::new();
 
         let mut curr_gd = Arc::new(virtual_gd);
 
         while curr_gd.selected_parent != conflict_genesis {
             for &blue_block in curr_gd.mergeset_blues.iter() {
+                let blue_work = calc_work(self.headers_store.get_bits(blue_block).unwrap()).as_u128() as i128;
                 blues.push(blue_block);
+                blue_works.insert(blue_block, blue_work);
             }
 
             for &red_block in curr_gd.mergeset_reds.iter() {
-                // Gray blocks agree with the current side (chain ancestors of subgroup's next chain ancestor)
-                // They don't vote - skip them in cascade
+                let red_work = calc_work(self.headers_store.get_bits(red_block).unwrap()).as_u128() as i128;
                 if self.reachability_service.is_chain_ancestor_of(next_chain_ancestor_of_subgroup, red_block) {
                     grays.push(red_block);
                 } else {
                     reds.push(red_block);
+                    red_works.insert(red_block, red_work);
                 }
             }
 
             curr_gd = conflict_zone_manager.get_data(curr_gd.selected_parent).unwrap();
         }
 
-        // Block-count deficit: sqrt(k)
-        let deficit_blocks = (k as f64).sqrt() as i64;
+        debug!("k = {} | blues = {} | reds = {} | grays = {} | deficit_work = {}", k, blues.len(), reds.len(), grays.len(), deficit);
 
-        debug!(
-            "k = {} | blues = {} | reds = {} | grays = {} | deficit_blocks = {}",
-            k,
-            blues.len(),
-            reds.len(),
-            grays.len(),
-            deficit_blocks
-        );
-
-        run_cascade(&blues, &reds, &grays, deficit_blocks, &self.reachability_service)
+        run_cascade(&blues, &reds, &grays, deficit, &blue_works, &red_works, &self.reachability_service)
     }
 
     /// Tie-breaking rule in case of multiple winning subgroups with the same rank value.
@@ -456,12 +457,19 @@ impl<
                 .iter()
                 .filter_map(|(curr_conflict_genesis, subgroup)| {
                     // `subgroup` is an `&Arc<Vec<Hash>>` here; pass a `&[Hash]` to the colouring function
-                    self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k, use_proposed).map(|selected_parent| {
-                        (
-                            (*curr_conflict_genesis, subgroup.clone()),
-                            GroupMetadata { conflict_genesis: *curr_conflict_genesis, subgroup: subgroup.clone(), k, selected_parent },
-                        )
-                    })
+                    self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k, use_proposed).map(
+                        |selected_parent| {
+                            (
+                                (*curr_conflict_genesis, subgroup.clone()),
+                                GroupMetadata {
+                                    conflict_genesis: *curr_conflict_genesis,
+                                    subgroup: subgroup.clone(),
+                                    k,
+                                    selected_parent,
+                                },
+                            )
+                        },
+                    )
                 })
                 .unzip();
 
@@ -489,10 +497,7 @@ impl<
         winning_conflict_genesis: Hash,
         proposed_winning_conflict_genesis: Hash,
     ) {
-        let dot_filename = format!(
-            "umc_conflict_disparity_{}.dot",
-            conflict_genesis.to_le_u64()[3]
-        );
+        let dot_filename = format!("umc_conflict_disparity_{}.dot", conflict_genesis.to_le_u64()[3]);
 
         let mut f = match File::create(&dot_filename) {
             Ok(f) => f,
@@ -504,29 +509,17 @@ impl<
 
         writeln!(f, "digraph ConflictZone {{").unwrap();
         writeln!(f, "    rankdir=TB;").unwrap();
-        writeln!(
-            f,
-            "    node [shape=box, style=filled, fontname=\"Helvetica\", fontsize=8];"
-        )
-        .unwrap();
+        writeln!(f, "    node [shape=box, style=filled, fontname=\"Helvetica\", fontsize=8];").unwrap();
         writeln!(f, "    edge [fontname=\"Helvetica\", fontsize=6];").unwrap();
         writeln!(f).unwrap();
 
         // Legend
-        writeln!(
-            f,
-            "    // Legend: blue=orig_winner, red=proposed_winner, yellow=loser_tips, gray=conflict_genesis"
-        )
-        .unwrap();
+        writeln!(f, "    // Legend: blue=orig_winner, red=proposed_winner, yellow=loser_tips, gray=conflict_genesis").unwrap();
         writeln!(f).unwrap();
 
         // Conflict genesis (bottom of diamond)
-        writeln!(
-            f,
-            "    \"g\" [label=\"conflict_genesis\\\n{:#018x}\" fillcolor=lightgray];",
-            conflict_genesis.to_le_u64()[3]
-        )
-        .unwrap();
+        writeln!(f, "    \"g\" [label=\"conflict_genesis\\\n{:#018x}\" fillcolor=lightgray];", conflict_genesis.to_le_u64()[3])
+            .unwrap();
         writeln!(f).unwrap();
 
         // Tips (top of diamond) grouped by agreement group
@@ -557,12 +550,7 @@ impl<
 
             for tip in subgroup.as_ref() {
                 let tip_short = format!("{:016x}", tip.to_le_u64()[3]);
-                writeln!(
-                    f,
-                    "    \"t_{}\" [label=\"{}\\\n{}\" fillcolor={color}];",
-                    tip_short, tip_short, label
-                )
-                .unwrap();
+                writeln!(f, "    \"t_{}\" [label=\"{}\\\n{}\" fillcolor={color}];", tip_short, tip_short, label).unwrap();
 
                 // Edge from conflict genesis to tip
                 writeln!(f, "    \"g\" -> \"t_{}\";", tip_short).unwrap();
