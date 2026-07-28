@@ -52,9 +52,9 @@ impl DagknightKey {
     }
 }
 
-impl ToString for DagknightKey {
-    fn to_string(&self) -> String {
-        format!("{:?}", &self.bytes)
+impl std::fmt::Display for DagknightKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.bytes)
     }
 }
 

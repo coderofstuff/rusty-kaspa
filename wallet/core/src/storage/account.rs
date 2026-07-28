@@ -108,8 +108,7 @@ impl BorshSerialize for AccountStorage {
 
 impl BorshDeserialize for AccountStorage {
     fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> IoResult<Self> {
-        let StorageHeader { version: _, .. } =
-            StorageHeader::deserialize_reader(reader)?.try_magic(Self::STORAGE_MAGIC)?.try_version(Self::STORAGE_VERSION)?;
+        StorageHeader::deserialize_reader(reader)?.try_magic(Self::STORAGE_MAGIC)?.try_version(Self::STORAGE_VERSION)?;
 
         let kind = BorshDeserialize::deserialize_reader(reader)?;
         let id = BorshDeserialize::deserialize_reader(reader)?;

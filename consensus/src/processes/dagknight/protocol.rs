@@ -383,7 +383,7 @@ impl<
                     let selected_parent = if weak_groups.contains(curr_conflict_genesis) {
                         None
                     } else {
-                        self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), &all_tips, k)
+                        self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), all_tips, k)
                     };
                     selected_parent.map(|selected_parent| {
                         (
@@ -727,6 +727,7 @@ impl DagPlan {
 }
 
 #[cfg(test)]
+#[allow(clippy::arc_with_non_send_sync)]
 mod tests {
     use std::collections::HashMap;
     use std::str::FromStr;
@@ -754,6 +755,8 @@ mod tests {
     struct DagKnightTestResult {
         virtual_gd_data: Arc<GhostdagData>,
     }
+
+    type TestBlock = (Hash, Vec<Hash>, Uint192, u32, u64, u64, Hash);
 
     #[test]
     fn test_cascade() {
@@ -1145,7 +1148,7 @@ mod tests {
 
         let blocks = json_data["blocks"].as_array().expect("Blocks is not an array");
 
-        let test_blocks: Vec<(Hash, Vec<Hash>, Uint192, u32, u64, u64, Hash)> = blocks
+        let test_blocks: Vec<TestBlock> = blocks
             .iter()
             .map(|block| {
                 let id = prefixed_hash(block["id"].as_str().unwrap());
@@ -1199,7 +1202,7 @@ mod tests {
     #[test]
     fn test_multi_strong_single_weak_scenario() {
         let json_filename = "test_multi_strong_single_weak_scenario.json";
-        let file = File::open(&json_filename).expect("Unable to open captured failure JSON");
+        let file = File::open(json_filename).expect("Unable to open captured failure JSON");
         let json_data: serde_json::Value = serde_json::from_reader(file).expect("Unable to parse JSON");
 
         let genesis = json_data["genesis"].as_u64().expect("Genesis is not a number");

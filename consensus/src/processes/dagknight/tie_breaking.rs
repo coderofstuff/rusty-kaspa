@@ -237,6 +237,7 @@ impl<
     ///
     /// If any C_i is empty (small conflict zone), falls back to SimpleTieBreaker
     /// logic (pick the subgroup with the highest selected_parent).
+    #[allow(clippy::let_and_return)]
     fn tie_break(&self, input: &TieBreakInput<'_>) -> usize {
         let TieBreakInput { conflict_genesis, all_tips, subgroups, k } = input;
 
