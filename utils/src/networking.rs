@@ -368,6 +368,24 @@ impl NetAddress {
     pub fn is_libp2p_relay(&self) -> bool {
         self.has_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY)
     }
+
+    pub fn has_relay_advertisement(&self) -> bool {
+        self.has_services(NET_ADDRESS_SERVICE_LIBP2P_RELAY)
+            || self.relay_port.is_some()
+            || self.relay_capacity.is_some()
+            || self.relay_ttl_ms.is_some()
+            || self.relay_role == Some(RelayRole::Public)
+    }
+
+    pub fn clear_relay_advertisement(&mut self) {
+        self.services &= !NET_ADDRESS_SERVICE_LIBP2P_RELAY;
+        self.relay_port = None;
+        self.relay_capacity = None;
+        self.relay_ttl_ms = None;
+        if self.relay_role == Some(RelayRole::Public) {
+            self.relay_role = None;
+        }
+    }
 }
 
 impl From<SocketAddr> for NetAddress {

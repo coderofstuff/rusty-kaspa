@@ -191,6 +191,12 @@ impl SwarmDriver {
     pub(super) fn has_direct_connection(&self, peer_id: PeerId) -> bool {
         self.connections.values().any(|conn| conn.peer_id == peer_id && matches!(conn.path, PathKind::Direct))
     }
+    pub(super) fn connected_peer_for_address_key(&self, address_key: &str) -> Option<PeerId> {
+        self.connections
+            .values()
+            .find(|conn| matches!(conn.path, PathKind::Direct) && conn.address_key.as_deref() == Some(address_key))
+            .map(|conn| conn.peer_id)
+    }
     pub(super) fn note_direct_upgrade(&mut self, peer_id: PeerId, had_pending_relay: bool) {
         self.clear_dcutr_retry(peer_id);
         if !had_pending_relay && !self.has_relay_connection(peer_id) {
@@ -212,23 +218,15 @@ impl SwarmDriver {
                 relay_id_from_multiaddr(send_back_addr).or_else(|| relay_id_from_multiaddr(local_addr))
             }
         };
+        let address_key = match endpoint {
+            libp2p::core::ConnectedPoint::Dialer { address, .. } => address_key_from_multiaddr(address),
+            libp2p::core::ConnectedPoint::Listener { send_back_addr, local_addr } => {
+                address_key_from_multiaddr(send_back_addr).or_else(|| address_key_from_multiaddr(local_addr))
+            }
+        };
         let outbound = endpoint.is_dialer();
         self.connections
-            .insert(connection_id, ConnectionEntry { peer_id, path, relay_id, outbound, since: Instant::now(), dcutr_upgraded });
-    }
-    pub(super) fn close_relay_connections_for_peer(&mut self, peer_id: PeerId, keep: StreamRequestId) {
-        let relay_ids: Vec<_> = self
-            .connections
-            .iter()
-            .filter(|(id, conn)| **id != keep && conn.peer_id == peer_id && matches!(conn.path, PathKind::Relay { .. }))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in relay_ids {
-            if self.swarm.close_connection(id) {
-                info!("libp2p: closing relay connection {id:?} to {peer_id} after direct path established");
-            }
-            self.connections.remove(&id);
-        }
+            .insert(connection_id, ConnectionEntry { peer_id, path, relay_id, address_key, outbound, since: Instant::now(), dcutr_upgraded });
     }
     pub(super) fn enforce_relay_cap(&mut self, connection_id: StreamRequestId) {
         let Some(conn) = self.connections.get(&connection_id) else {
@@ -241,10 +239,17 @@ impl SwarmDriver {
         let mut relay_peers: HashSet<PeerId> = self
             .connections
             .iter()
-            .filter(|(id, entry)| **id != connection_id && matches!(entry.path, PathKind::Relay { .. }) && entry.relay_id == relay_id)
+            .filter(|(id, entry)| {
+                **id != connection_id
+                    && matches!(entry.path, PathKind::Relay { .. })
+                    && entry.relay_id == relay_id
+                    && !self.has_direct_connection(entry.peer_id)
+            })
             .map(|(_, entry)| entry.peer_id)
             .collect();
-        relay_peers.insert(conn.peer_id);
+        if !self.has_direct_connection(conn.peer_id) {
+            relay_peers.insert(conn.peer_id);
+        }
         let unique_peers = relay_peers.len();
         if unique_peers > self.max_peers_per_relay {
             if self.swarm.close_connection(connection_id) {

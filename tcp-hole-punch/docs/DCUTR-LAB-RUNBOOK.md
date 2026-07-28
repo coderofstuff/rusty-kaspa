@@ -579,8 +579,6 @@ grep "streaming swarm peer id" /tmp/kaspa-relay2.log
 --libp2p-relay-candidates=/ip4/10.0.3.26/tcp/16112,/ip4/10.0.3.26/tcp/16212
 ```
 
-If you want to keep a single relay, you can set `--libp2p-relay-min-sources=1` as a lab‑only override.
-
 3. Wait 60–120s to allow address gossip.
 4. Check Node A logs for relay hint selection and relay dial attempts:
 
@@ -612,7 +610,7 @@ grep -E "reservation failed|probe failed|skipping .* backoff|relay auto" /tmp/ka
 
 This validates that a relay that loses public status is removed and peers move to another relay.
 
-Lab note: for practical testing with a single relay, set `--libp2p-relay-min-sources=1` on Node A/B. When the relay stops, you may not see an explicit “releasing reservation” log line; verify by checking helper peers output (empty).
+Lab note: when the relay stops, you may not see an explicit “releasing reservation” log line; verify by checking helper peers output (empty).
 Lab note: to avoid waiting on reservation TTLs, you can restart Node A after the relay goes down to force immediate re‑selection.
 
 1. Start relay in `auto` role and wait for auto‑promotion (Step 7).
@@ -708,7 +706,7 @@ grep -E "role auto-promoted to public" /tmp/kaspa-relay.log
 grep -E "role auto-demoted to private" /tmp/kaspa-relay.log
 ```
 
-4. Start a fresh client with gossip-only discovery (no `--libp2p-relay-candidates`, no `--libp2p-reservations`) and set lab override:
+4. Start a fresh client with gossip-only discovery (no `--libp2p-relay-candidates`, no `--libp2p-reservations`):
 
 ```bash
 pkill -9 kaspad
@@ -720,7 +718,6 @@ nohup ~/rusty-kaspa/target/release/kaspad \
   --rpclisten=192.168.2.10:16120 \
   --libp2p-listen-port=16122 \
   --libp2p-mode=bridge \
-  --libp2p-relay-min-sources=1 \
   --libp2p-autonat-allow-private \
   --libp2p-role=auto \
   --libp2p-identity-path=/tmp/node-c.key \
@@ -922,11 +919,11 @@ The `--libp2p-external-multiaddrs` must be the **NAT-translated IP**, not the pr
 | Node A | 192.168.1.10 | `/ip4/10.0.3.61/tcp/16112` |
 | Node B | 192.168.2.10 | `/ip4/10.0.3.62/tcp/16112` |
 
-### Relay Auto Requires Multiple Sources
+### Relay Auto Discovery
 
-Relay auto-selection requires at least two independent sources for a relay candidate.
-In the lab, use `--libp2p-relay-candidates` plus AddressManager gossip from `--connect`
-to satisfy this requirement.
+Relay auto-selection consumes relay capability gossip directly.
+In the lab, `--libp2p-relay-candidates` is still useful when you want to seed a known relay explicitly,
+but it is no longer required just to make auto-selection work.
 
 ## Stopping Nodes
 

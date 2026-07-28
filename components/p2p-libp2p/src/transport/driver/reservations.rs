@@ -16,6 +16,7 @@ impl SwarmDriver {
             relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
                 info!("libp2p inbound circuit established from {src_peer_id}");
                 self.mark_relay_path(src_peer_id);
+                self.force_identify_refresh(src_peer_id, "inbound_circuit_established");
                 self.maybe_request_dialback(src_peer_id);
             }
             _ => {}

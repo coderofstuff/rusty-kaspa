@@ -52,7 +52,7 @@ Goal: fully automatic private<->private connectivity in public with DCUtR.
 ## C. Relay selection helpers
 - [x] **Relay assignment helper:**
   - Map `target_peer_id -> relay candidate` using RelayPool scoring.
-  - Use `relay_min_sources` + prefix diversity constraints already in `RelayPool`.
+  - Use prefix diversity constraints already in `RelayPool`.
 - [x] **Circuit builder:**
   - Build `/ip4|ip6/<relay.ip>/tcp/<relay.port>/p2p/<relayPeerId>/p2p-circuit/p2p/<targetPeerId>` multiaddr.
   - If relay peer id missing, `probe_relay` then retry build.

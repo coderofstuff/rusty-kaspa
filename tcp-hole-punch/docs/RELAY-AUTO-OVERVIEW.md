@@ -15,7 +15,7 @@ Scope (this branch)
 - Relay capability gossip in P2P proto + conversions.
 - Address manager metadata merge for relay capability signals.
 - Auto relay selection + reservation worker.
-- Relay pool scoring, rotation, backoff, and multi-source filtering.
+- Relay pool scoring, rotation, and backoff.
 - Auto role promotion via AutoNAT (public vs private role).
 - Inbound caps: per-relay, unknown-relay, and private role caps.
 - Helper API metrics + relay/DCUtR metrics.
@@ -34,7 +34,7 @@ Terminology (to avoid ambiguity)
 How it works (high level)
 1) Public nodes advertise relay capability (service bit + relay port + capacity + ttl + role).
 2) Private nodes collect relay candidates (gossip + config list).
-3) Relay pool scores, filters (multi-source), and selects relays.
+3) Relay pool scores and selects relays.
 4) Auto worker reserves circuits and rotates on failures/age.
 5) Inbound peers dial reserved circuit; DCUtR can upgrade to direct.
 6) After direct is established for a peer, relay path for that peer is closed and not re-dialed while direct remains healthy; relay stays available as fallback if direct later fails.
@@ -52,8 +52,7 @@ Auto relay selection + reservation
 
 Relay pool behavior
 - Candidate sources: address gossip + relay_candidates config list.
-- Multi-source requirement (relay_min_sources) to reduce spoofing risk.
-- Scoring considers success/failure, latency, uptime, source count.
+- Scoring considers success/failure, latency, and uptime.
 - Per-relay peer cap enforced during selection.
 - In-memory only; no persistence, no extra gossip, no new data collection.
 
@@ -87,7 +86,7 @@ Config + CLI knobs (high level)
 - External multiaddrs + advertise addresses.
 - Relay advertise capacity + ttl.
 - AutoNAT allow-private + confidence threshold.
-- Relay pool knobs: max relays, max peers per relay, min sources, rng seed.
+- Relay pool knobs: max relays, max peers per relay, rng seed.
 - Inbound caps: private, per-relay, unknown-relay.
 
 Lab focus coverage

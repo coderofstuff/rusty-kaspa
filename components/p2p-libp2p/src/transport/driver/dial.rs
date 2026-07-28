@@ -122,6 +122,13 @@ impl SwarmDriver {
             }
             SwarmCommand::ProbeRelay { address, respond_to } => {
                 debug!("libp2p relay probe request to {address}");
+                if let Some(address_key) = address_key_from_multiaddr(&address)
+                    && let Some(peer_id) = self.connected_peer_for_address_key(&address_key)
+                {
+                    info!("libp2p relay probe reused existing connection to {peer_id} for {address_key}");
+                    let _ = respond_to.send(Ok(peer_id));
+                    return;
+                }
                 let dial_opts = DialOpts::unknown_peer_id().address(address).build();
                 let request_id = dial_opts.connection_id();
                 let started_at = Instant::now();
@@ -237,6 +244,16 @@ impl SwarmDriver {
             metrics.dcutr().record_dialback_success();
         }
 
+        let uses_relay = endpoint_uses_relay(&endpoint);
+        let direct_upgrade = !uses_relay && (had_pending_relay || self.has_relay_connection(peer_id));
+        self.record_connection(connection_id, peer_id, &endpoint, direct_upgrade);
+
+        if uses_relay
+            && self.active_relay.as_ref().is_none_or(|relay| relay.relay_peer != peer_id)
+        {
+            self.force_identify_refresh(peer_id, "relay_connection_established");
+        }
+
         if endpoint.is_dialer() {
             info!("libp2p initiating stream to {peer_id} (as dialer)");
             self.request_stream_bridge(peer_id, connection_id);
@@ -251,15 +268,11 @@ impl SwarmDriver {
             // initiate a bidirectional dial-back via the active relay so we become a dialer too.
             self.maybe_request_dialback(peer_id);
         }
-        let direct_upgrade = !endpoint_uses_relay(&endpoint) && (had_pending_relay || self.has_relay_connection(peer_id));
-        self.record_connection(connection_id, peer_id, &endpoint, direct_upgrade);
-        if !endpoint_uses_relay(&endpoint) {
+        if !uses_relay {
             self.note_direct_upgrade(peer_id, direct_upgrade);
         }
-        if endpoint_uses_relay(&endpoint) {
+        if uses_relay {
             self.enforce_relay_cap(connection_id);
-        } else {
-            self.close_relay_connections_for_peer(peer_id, connection_id);
         }
     }
     pub(super) fn handle_connection_closed_event(

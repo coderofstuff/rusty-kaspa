@@ -147,6 +147,12 @@ pub(super) fn relay_id_from_multiaddr(addr: &Multiaddr) -> Option<String> {
     extract_relay_peer(addr).map(|p| p.to_string())
 }
 
+pub(super) fn address_key_from_multiaddr(addr: &Multiaddr) -> Option<String> {
+    let (net, _) = multiaddr_to_metadata(addr);
+    let net = net?;
+    Some(format!("{}:{}", net.ip.0, net.port))
+}
+
 /// Extracts the target peer from a relay circuit address.
 /// For `/ip4/.../p2p/RELAY/p2p-circuit/p2p/TARGET`, returns TARGET.
 pub(super) fn extract_circuit_target_peer(addr: &Multiaddr) -> Option<PeerId> {

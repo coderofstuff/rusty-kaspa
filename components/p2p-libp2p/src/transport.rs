@@ -13,8 +13,10 @@ use libp2p::dcutr;
 use libp2p::identify;
 use libp2p::multiaddr::Multiaddr;
 use libp2p::multiaddr::Protocol;
-use libp2p::swarm::SwarmEvent;
+use libp2p::swarm::NetworkBehaviour;
+use libp2p::swarm::behaviour::FromSwarm;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
+use libp2p::swarm::{NewExternalAddrCandidate, SwarmEvent};
 use libp2p::{PeerId, relay};
 use log::{debug, info, warn};
 use serde::Serialize;
@@ -49,9 +51,10 @@ use self::driver::{
 use self::driver::{LocalCandidateSource, fallback_old_instant, is_dcutr_retry_trigger_error_text, is_retryable_dcutr_error_text};
 pub use self::identity::Libp2pIdentity;
 use self::multiaddr::{
-    addr_uses_relay, candidate_ip_addr, default_listen_addr, endpoint_uses_relay, extract_circuit_target_peer, extract_relay_peer,
-    extract_remote_dcutr_candidates, insert_relay_peer, is_tcp_dialable, parse_multiaddrs, parse_reservation_targets,
-    relay_id_from_multiaddr, relay_info_from_multiaddr, relay_probe_base, strip_peer_suffix,
+    addr_uses_relay, address_key_from_multiaddr, candidate_ip_addr, default_listen_addr, endpoint_uses_relay,
+    extract_circuit_target_peer, extract_relay_peer, extract_remote_dcutr_candidates, insert_relay_peer, is_tcp_dialable,
+    parse_multiaddrs, parse_reservation_targets, relay_id_from_multiaddr, relay_info_from_multiaddr, relay_probe_base,
+    strip_peer_suffix,
 };
 pub use self::multiaddr::{multiaddr_to_metadata, to_multiaddr};
 pub use self::provider::SwarmStreamProvider;

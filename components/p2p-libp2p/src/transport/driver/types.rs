@@ -90,6 +90,7 @@ pub(crate) struct ConnectionEntry {
     pub(crate) peer_id: PeerId,
     pub(crate) path: PathKind,
     pub(crate) relay_id: Option<String>,
+    pub(crate) address_key: Option<String>,
     pub(crate) outbound: bool,
     pub(crate) since: Instant,
     pub(crate) dcutr_upgraded: bool,

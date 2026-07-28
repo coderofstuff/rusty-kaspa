@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use kaspa_addressmanager::AddressManager;
-use kaspa_p2p_libp2p::relay_pool::{RelayCandidateSource, RelayCandidateUpdate, RelaySource, relay_update_from_netaddr};
+use kaspa_p2p_libp2p::relay_pool::{RelayCandidateSource, RelayCandidateUpdate, relay_update_from_netaddr};
 use kaspa_utils::networking::{NET_ADDRESS_SERVICE_LIBP2P_RELAY, RelayRole};
 use parking_lot::Mutex;
 use tokio::time::Duration;
@@ -32,12 +32,15 @@ impl RelayCandidateSource for AddressManagerRelaySource {
                 if matches!(addr.relay_role, Some(RelayRole::Private)) {
                     continue;
                 }
+                if !addr.ip.is_publicly_routable() {
+                    continue;
+                }
                 let Some(relay_port) = addr.relay_port else {
                     continue;
                 };
                 let ttl = addr.relay_ttl_ms.map(Duration::from_millis).unwrap_or(self.ttl);
                 let capacity = addr.relay_capacity.map(|cap| cap as usize);
-                match relay_update_from_netaddr(addr, relay_port, ttl, RelaySource::AddressGossip, capacity) {
+                match relay_update_from_netaddr(addr, relay_port, ttl, capacity) {
                     Ok(update) => updates.push(update),
                     Err(err) => log::debug!("libp2p relay source: invalid relay candidate: {err}"),
                 }

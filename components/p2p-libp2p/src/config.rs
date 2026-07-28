@@ -41,7 +41,6 @@ pub struct Config {
     pub libp2p_inbound_cap_private: usize,
     pub max_relays: usize,
     pub max_peers_per_relay: usize,
-    pub relay_min_sources: usize,
     pub relay_rng_seed: Option<u64>,
     /// Optional list of relay reservation multiaddrs.
     pub reservations: Vec<String>,
@@ -72,7 +71,6 @@ impl Default for Config {
             libp2p_inbound_cap_private: 8,
             max_relays: 1,
             max_peers_per_relay: 1,
-            relay_min_sources: 2,
             relay_rng_seed: None,
             reservations: Vec::new(),
             relay_candidates: Vec::new(),
@@ -150,11 +148,6 @@ impl ConfigBuilder {
 
     pub fn max_peers_per_relay(mut self, max_peers_per_relay: usize) -> Self {
         self.config.max_peers_per_relay = max_peers_per_relay;
-        self
-    }
-
-    pub fn relay_min_sources(mut self, relay_min_sources: usize) -> Self {
-        self.config.relay_min_sources = relay_min_sources;
         self
     }
 
