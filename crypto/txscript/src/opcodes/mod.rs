@@ -52,7 +52,7 @@ pub(crate) struct OpCode<const CODE: u8> {
 
 impl<const CODE: u8> Debug for OpCode<CODE> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Opcode<{:#2x}>{{ data:{:?} }}", CODE, self.data)
+        write!(f, "Opcode<{:#x}>{{ data:{:?} }}", CODE, self.data)
     }
 }
 

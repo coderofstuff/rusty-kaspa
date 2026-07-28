@@ -48,8 +48,7 @@ impl BorshSerialize for AccountMetadata {
 
 impl BorshDeserialize for AccountMetadata {
     fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> IoResult<Self> {
-        let StorageHeader { version: _, .. } =
-            StorageHeader::deserialize_reader(reader)?.try_magic(Self::STORAGE_MAGIC)?.try_version(Self::STORAGE_VERSION)?;
+        StorageHeader::deserialize_reader(reader)?.try_magic(Self::STORAGE_MAGIC)?.try_version(Self::STORAGE_VERSION)?;
 
         let id = BorshDeserialize::deserialize_reader(reader)?;
         let indexes = BorshDeserialize::deserialize_reader(reader)?;

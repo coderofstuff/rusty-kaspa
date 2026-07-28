@@ -369,7 +369,7 @@ NOTE: This error usually indicates an RPC conversion error between the node and 
 
         // Make sure the pay address prefix matches the config network type
         if request.pay_address.prefix != self.config.prefix() {
-            return Err(kaspa_addresses::AddressError::InvalidPrefix(request.pay_address.prefix.to_string()))?;
+            return Err(kaspa_addresses::AddressError::InvalidPrefix(request.pay_address.prefix.to_string()).into());
         }
 
         // Build block template
@@ -818,7 +818,7 @@ NOTE: This error usually indicates an RPC conversion error between the node and 
                     // "next" header is the one that we processed last iteration
                     let next_header = &headers[header_idx - 1];
                     // Unlike DAA scores which are monotonic (over the selected chain), timestamps are not strictly monotonic, so we avoid assuming so
-                    let time_between_headers = next_header.timestamp.checked_sub(header.timestamp).unwrap_or_default();
+                    let time_between_headers = next_header.timestamp.saturating_sub(header.timestamp);
                     let score_between_query_and_header = (curr_daa_score - header.daa_score) as f64;
                     let score_between_headers = (next_header.daa_score - header.daa_score) as f64;
                     // Interpolate the timestamp delta using the estimated fraction based on DAA scores

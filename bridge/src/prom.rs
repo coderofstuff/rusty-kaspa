@@ -649,7 +649,7 @@ async fn get_stats_json(instance_id: &str) -> StatsResponse {
     });
 
     // Sort workers by blocks (most blocks first)
-    stats.workers.sort_by(|a, b| b.blocks.cmp(&a.blocks));
+    stats.workers.sort_by_key(|worker| std::cmp::Reverse(worker.blocks));
 
     stats
 }

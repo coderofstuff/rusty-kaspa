@@ -481,13 +481,13 @@ impl FlowContext {
     /// Adds the rpc-submitted block to the DAG and propagates it to peers.
     pub async fn submit_rpc_block(&self, consensus: &ConsensusProxy, block: Block) -> Result<(), ProtocolError> {
         if block.transactions.is_empty() {
-            return Err(RuleError::NoTransactions)?;
+            return Err(RuleError::NoTransactions.into());
         }
         let hash = block.hash();
         let BlockValidationFutures { block_task, virtual_state_task } = consensus.validate_and_insert_block(block.clone());
         if let Err(err) = block_task.await {
             warn!("Validation failed for block {}: {}", hash, err);
-            return Err(err)?;
+            return Err(err.into());
         }
         // Broadcast as soon as the block has been validated and inserted into the DAG
         self.hub.broadcast(make_message!(Payload::InvRelayBlock, InvRelayBlockMessage { hash: Some(hash.into()) }), None).await;
@@ -538,7 +538,7 @@ impl FlowContext {
         blocks.sort_by(|a, b| a.0.header.blue_work.partial_cmp(&b.0.header.blue_work).unwrap());
         // Use a ProcessQueue so we get rid of duplicates
         let mut transactions_to_broadcast = ProcessQueue::new();
-        for (block, virtual_state_task) in ancestor_batch.zip().chain(once((block, virtual_state_task))).chain(blocks.into_iter()) {
+        for (block, virtual_state_task) in ancestor_batch.zip().chain(once((block, virtual_state_task))).chain(blocks) {
             // We only care about waiting for virtual to process the block at this point, before proceeding with post-processing
             // actions such as updating the mempool. We know this will not err since `block_task` already completed w/o error
             let _ = virtual_state_task.await;

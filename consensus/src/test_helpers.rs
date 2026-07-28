@@ -300,8 +300,11 @@ pub fn dump_conflict_zone<O: HeaderStoreReader + 'static, D: RelationsStoreReade
     let mut seen = HashSet::new();
     seen.extend(all_tips.iter().copied());
 
+    type HeaderMetadata = (Uint192, u32, u64, u64, Hash);
+    type ZoneBlock = (Vec<Hash>, HeaderMetadata);
+
     // Maps: hash -> (parents, header_data)
-    let mut zone_blocks: HashMap<Hash, (Vec<Hash>, (Uint192, u32, u64, u64, Hash))> = HashMap::new();
+    let mut zone_blocks: HashMap<Hash, ZoneBlock> = HashMap::new();
     let relations_store_guard = relations_store.read();
 
     while let Some(hash) = queue.pop_front() {
@@ -383,7 +386,7 @@ pub fn dump_conflict_zone<O: HeaderStoreReader + 'static, D: RelationsStoreReade
             reds.iter().filter(|&&h| reachability_service.is_chain_ancestor_of(next_chain_ancestor, h)).copied().collect();
 
         // Node definitions
-        for (hash, _) in &zone_blocks {
+        for hash in zone_blocks.keys() {
             let s = short(*hash);
             if chain_blocks.contains(hash) {
                 // Chain blocks get double circles (overrides genesis/tips coloring)
