@@ -26,7 +26,7 @@ use crate::{
     },
     processes::{
         dagknight::{
-            GroupMetadata,
+            DagknightCounters, GroupMetadata,
             manager::ConflictZoneManager,
             rank_search::RankSearcher,
             tie_breaking::{DagknightTieBreaker, TieBreakInput, TieBreaker},
@@ -145,6 +145,7 @@ pub struct DagknightExecutor<
     pub headers_store: Arc<O>,
     pub relations_store: Arc<RwLock<D>>,
     pub reachability_service: MTReachabilityService<R>,
+    pub counters: Arc<DagknightCounters>,
 }
 
 #[derive(Clone)]
@@ -335,6 +336,60 @@ impl<
         blue_block_work + deficit > red_block_work
     }
 
+    /// Proposed chain-based UMC cascade voting using segment tree cascade scores.
+    /// Competes with original work-weighted `umc_cascade_voting` for comparison.
+    fn proposed_umc_cascade_voting(
+        &self,
+        conflict_genesis: Hash,
+        subgroup: &[Hash],
+        virtual_gd: GhostdagData,
+        k: KType,
+        conflict_zone_manager: &ConflictZoneManager<C, O, D, R>,
+    ) -> bool {
+        use crate::processes::dagknight::umc_cascade::run_cascade;
+
+        let next_chain_ancestor_of_subgroup = self.reachability_service.get_next_chain_ancestor(subgroup[0], conflict_genesis);
+
+        // Collect blues, reds, and grays by traversing virtual GD chain backward
+        let mut blues = Vec::new();
+        let mut reds = Vec::new();
+        let mut grays = Vec::new();
+
+        let mut curr_gd = Arc::new(virtual_gd);
+
+        while curr_gd.selected_parent != conflict_genesis {
+            for &blue_block in curr_gd.mergeset_blues.iter() {
+                blues.push(blue_block);
+            }
+
+            for &red_block in curr_gd.mergeset_reds.iter() {
+                // Gray blocks agree with the current side (chain ancestors of subgroup's next chain ancestor)
+                // They don't vote - skip them in cascade
+                if self.reachability_service.is_chain_ancestor_of(next_chain_ancestor_of_subgroup, red_block) {
+                    grays.push(red_block);
+                } else {
+                    reds.push(red_block);
+                }
+            }
+
+            curr_gd = conflict_zone_manager.get_data(curr_gd.selected_parent).unwrap();
+        }
+
+        // Block-count deficit: sqrt(k)
+        let deficit_blocks = (k as f64).sqrt() as i64;
+
+        debug!(
+            "k = {} | blues = {} | reds = {} | grays = {} | deficit_blocks = {}",
+            k,
+            blues.len(),
+            reds.len(),
+            grays.len(),
+            deficit_blocks
+        );
+
+        run_cascade(&blues, &reds, &grays, deficit_blocks, &self.reachability_service)
+    }
+
     /// Tie-breaking rule in case of multiple winning subgroups with the same rank value.
     fn tie_breaking(&self, conflict_genesis: Hash, all_tips: &[Hash], subgroups: &[GroupMetadata]) -> (Hash, Arc<Vec<Hash>>) {
         debug!("Winning groups had rank k = {}", subgroups[0].k);
@@ -492,7 +547,17 @@ impl<
         let subgroup_virtual_sp = conflict_zone_manager.find_selected_parent(subgroup.iter().copied());
         let virtual_gd = conflict_zone_manager.k_colouring(all_tips, k_to_check, Some(subgroup_virtual_sp));
 
-        if self.umc_cascade_voting(conflict_genesis, subgroup, virtual_gd, k_to_check, &conflict_zone_manager) {
+        let vote_original =
+            self.umc_cascade_voting(conflict_genesis, subgroup, virtual_gd.clone(), k_to_check, &conflict_zone_manager);
+        let vote_proposed =
+            self.proposed_umc_cascade_voting(conflict_genesis, subgroup, virtual_gd, k_to_check, &conflict_zone_manager);
+        self.counters.record_vote(vote_original, vote_proposed);
+        if vote_original != vote_proposed {
+            debug!(
+                "UMC VOTE DIFFERENCE: original={vote_original}, proposed={vote_proposed}, k={k_to_check}, conflict_genesis={conflict_genesis:#?}"
+            );
+        }
+        if vote_original {
             Some(SortableBlock {
                 hash: subgroup_virtual_sp,
                 blue_work: self.headers_store.get_header(subgroup_virtual_sp).unwrap().blue_work,
@@ -750,6 +815,7 @@ mod tests {
         processes::reachability::tests::{DagBlock, DagBuilder},
         test_helpers::generate_dot_with_chain,
     };
+    use kaspa_math::Uint192;
 
     struct DagKnightTestResult {
         virtual_gd_data: Arc<GhostdagData>,
@@ -836,6 +902,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            counters: Arc::new(DagknightCounters::new()),
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
@@ -1042,6 +1109,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            counters: Arc::new(DagknightCounters::new()),
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
@@ -1121,6 +1189,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            counters: Arc::new(DagknightCounters::new()),
         };
 
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
