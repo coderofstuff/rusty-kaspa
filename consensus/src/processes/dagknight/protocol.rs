@@ -1,13 +1,17 @@
 use std::{
     cell::Cell,
     collections::HashMap,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
 };
 
 use dashmap::DashMap;
 use itertools::Itertools;
 use kaspa_consensus_core::{BlockHashMap, BlockHashSet, HashMapCustomHasher, KType};
-use kaspa_core::{debug, trace};
+use kaspa_core::{debug, info, trace};
 use kaspa_hashes::Hash;
 use kaspa_math::Uint192;
 use parking_lot::RwLock;
@@ -36,6 +40,101 @@ use crate::{
         reachability::relations::FutureIntersectRelations,
     },
 };
+
+/// Lock-free read cache for Dagknight resolution results.
+/// Uses DashMap for per-entry locking and atomics for stats.
+/// Eviction is random when capacity is exceeded (simpler than LRU under high concurrency).
+pub struct DagknightCache {
+    map: DashMap<Arc<Vec<Hash>>, Arc<DagknightData>>,
+    capacity: usize,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    last_log: AtomicU64,
+}
+
+impl DagknightCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            map: DashMap::with_capacity(capacity),
+            capacity,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            last_log: AtomicU64::new(0),
+        }
+    }
+
+    /// Lock-free read path. Returns cached result if available.
+    pub fn get(&self, key: &Arc<Vec<Hash>>) -> Option<Arc<DagknightData>> {
+        if let Some(entry) = self.map.get(key) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Some(entry.value().clone());
+        }
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        None
+    }
+
+    /// Insert result. Evicts a random entry if at capacity.
+    pub fn insert(&self, key: Arc<Vec<Hash>>, value: Arc<DagknightData>) {
+        if self.map.contains_key(&key) {
+            return; // Already cached, no-op
+        }
+
+        // Evict a random entry if at capacity.
+        // Must drop the iterator entry before calling remove to avoid holding a read lock
+        // while acquiring a write lock (deadlock).
+        let to_remove =
+            { if self.map.len() >= self.capacity { self.map.iter().next().map(|entry| entry.key().clone()) } else { None } };
+        if let Some(k) = to_remove {
+            self.map.remove(&k);
+        }
+
+        self.map.insert(key, value);
+    }
+
+    /// Force a stats log immediately (for testing/debugging).
+    pub fn log_stats(&self) {
+        let current_hits = self.hits.swap(0, Ordering::Relaxed);
+        let current_misses = self.misses.swap(0, Ordering::Relaxed);
+        let total = current_hits + current_misses;
+        let hit_rate = if total > 0 { (current_hits as f64 / total as f64) * 100.0 } else { 0.0 };
+        info!(
+            target: "dagknight",
+            "[DAGKNIGHT CACHE] Hits: {} | Misses: {} | Total: {} | HitRate: {:.2}% | Size: {} | Capacity: {}",
+            current_hits, current_misses, total, hit_rate, self.map.len(), self.capacity
+        );
+        #[cfg(test)]
+        println!(
+            "[DAGKNIGHT CACHE] Hits: {} | Misses: {} | Total: {} | HitRate: {:.2}% | Size: {} | Capacity: {}",
+            current_hits,
+            current_misses,
+            total,
+            hit_rate,
+            self.map.len(),
+            self.capacity
+        );
+    }
+
+    /// Log stats every 10 seconds using atomic reads.
+    pub fn maybe_log_stats(&self) {
+        let now = Instant::now().elapsed().as_secs();
+        let last = self.last_log.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= 10 {
+            // Use compare_exchange to atomically update last_log (best effort)
+            let _ = self.last_log.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed);
+
+            // Use swap to atomically reset counters (best effort)
+            let current_hits = self.hits.swap(0, Ordering::Relaxed);
+            let current_misses = self.misses.swap(0, Ordering::Relaxed);
+            let total = current_hits + current_misses;
+            let hit_rate = if total > 0 { (current_hits as f64 / total as f64) * 100.0 } else { 0.0 };
+            info!(
+                target: "dagknight",
+                "[DAGKNIGHT CACHE] Hits: {} | Misses: {} | Total: {} | HitRate: {:.2}% | Size: {} | Capacity: {}",
+                current_hits, current_misses, total, hit_rate, self.map.len(), self.capacity
+            );
+        }
+    }
+}
 
 /*
     Task 0:
@@ -145,6 +244,9 @@ pub struct DagknightExecutor<
     pub headers_store: Arc<O>,
     pub relations_store: Arc<RwLock<D>>,
     pub reachability_service: MTReachabilityService<R>,
+    /// Lock-free read cache for dagknight results keyed by the sorted parent set.
+    /// Neutralizes sibling-merge DoS and optimizes honest concurrent mining.
+    pub dagknight_cache: Arc<DagknightCache>,
 }
 
 #[derive(Clone)]
@@ -179,9 +281,19 @@ impl<
                 5. Cascade voting -- requires most thought for making incremental
         */
 
+        // Cache lookup using sorted parents as the key
+        let mut sorted_parents = parents.to_vec();
+        sorted_parents.sort();
+        let key = Arc::new(sorted_parents);
+
+        if let Some(cached) = self.dagknight_cache.get(&key) {
+            self.dagknight_cache.maybe_log_stats();
+            return (*cached).clone();
+        }
+
         // g = find LCCA
         let mut conflict_genesis = self.common_chain_ancestor(parents);
-        let mut curr_subgroup = Arc::new(parents.to_vec());
+        let mut curr_subgroup = Arc::new(parents.iter().unique().copied().collect_vec());
         let mut conflict_ordered_parents = vec![];
         debug!("conflict_genesis: {:#?}", conflict_genesis);
 
@@ -199,6 +311,11 @@ impl<
                 // There is exactly one group, we don't rank anymore.
                 let (_, subgroup) = agreement_grouping.iter().next().unwrap();
                 curr_subgroup = subgroup.clone();
+                // Deduplication via `.unique()` may have reduced curr_subgroup to a single
+                // element (e.g., [T1, T1] -> [T1]). In that case we're done.
+                if curr_subgroup.len() <= 1 {
+                    break;
+                }
                 let next_conflict_genesis = self.common_chain_ancestor(&curr_subgroup);
                 assert_ne!(
                     next_conflict_genesis, conflict_genesis,
@@ -258,7 +375,11 @@ impl<
         // Opportunistically cleanup unused locks after processing
         cleanup_conflict_locks();
 
-        DagknightData { selected_parent: curr_subgroup[0], conflict_ordered_parents }
+        let result = DagknightData { selected_parent: curr_subgroup[0], conflict_ordered_parents };
+
+        // Cache the result
+        self.dagknight_cache.insert(key, Arc::new(result.clone()));
+        result
     }
 
     fn common_chain_ancestor(&self, parents: &[Hash]) -> Hash {
@@ -854,6 +975,7 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            dagknight_cache: Arc::new(DagknightCache::new(1024)),
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
@@ -938,6 +1060,9 @@ mod tests {
         all_blocks.extend(plan.blocks.clone());
         all_blocks.push((virtual_hash.to_le_u64()[3], tips.iter().map(|h| h.to_le_u64()[3]).collect_vec()));
         generate_dot_with_chain(&all_blocks, &chain_nodes, reds, base_name).expect("Failed to generate DOT file");
+
+        // Log cache stats
+        dk_executor.dagknight_cache.log_stats();
 
         DagKnightTestResult { virtual_gd_data }
     }
@@ -1060,14 +1185,13 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            dagknight_cache: Arc::new(DagknightCache::new(1024)),
         };
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
         let genesis = DagBlock::new(genesis_hash, vec![ORIGIN]);
         builder.add_block(genesis.clone());
 
-        // Add blocks 2 and 3 and insert headers/ghostdag entries.
-        // We'll use a small helper closure to reduce repetition when adding a block and its header.
         let mut add_block_with_header = |id: u64, parents: Vec<Hash>| {
             let current_hash = id.into();
             let DagknightData { selected_parent, .. } = dk_executor.dagknight(&parents);
@@ -1139,8 +1263,8 @@ mod tests {
             headers_store: headers_store.clone(),
             reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability.clone()))),
             relations_store: Arc::new(RwLock::new(relations.clone())),
+            dagknight_cache: Arc::new(DagknightCache::new(1024)),
         };
-
         let mut builder = DagBuilder::new(&mut reachability, &mut relations);
         builder.init();
         let mut add_block = |hash, parents: Vec<Hash>, blue_work, bits, blue_score, daa_score, selected_parent: Hash| -> Hash {
@@ -1242,5 +1366,107 @@ mod tests {
         let test_result = run_dagknight_test(5, dag_plan, "shortcut_failure_repro");
 
         assert_eq!(test_result.virtual_gd_data.selected_parent, 1001.into(), "Virtual selected parent should be 1001 for this test");
+    }
+
+    /// Duplicate parents [T1, T1] must NOT panic the DagKnight algorithm.
+    ///
+    /// Before the fix: this panics at the `assert_ne!` in `dagknight_pure` because
+    /// `common_chain_ancestor([T1, T1])` returns the same conflict_genesis in the shortcut
+    /// path's single-group case, violating the "conflict genesis must strictly advance" invariant.
+    #[test]
+    fn test_duplicate_parents_two_same() {
+        // genesis -> T1
+        let genesis_hash = Hash::from_u64_word(1);
+        let t1_hash = Hash::from_u64_word(2);
+
+        let mut reachability = MemoryReachabilityStore::new();
+        let mut relations = MemoryRelationsStore::new();
+        let mut builder = DagBuilder::new(&mut reachability, &mut relations);
+        builder.init();
+        builder.add_block(DagBlock::new(genesis_hash, vec![ORIGIN]));
+        builder.add_block(DagBlock::new(t1_hash, vec![genesis_hash]));
+
+        let headers_store = Arc::new(MemoryHeaderStore::new());
+        let mut genesis_header = Header::from_precomputed_hash(genesis_hash, vec![]);
+        genesis_header.bits = 0x207fffff;
+        headers_store.insert(Arc::new(genesis_header));
+        let mut t1_header = Header::from_precomputed_hash(t1_hash, vec![genesis_hash]);
+        t1_header.bits = 0x207fffff;
+        t1_header.daa_score = 1;
+        headers_store.insert(Arc::new(t1_header));
+
+        let dk_map = RefCell::new(HashMap::new());
+        let dagknight_store = Arc::new(MemoryDagknightStore::new(dk_map));
+        let dk_executor = DagknightExecutor {
+            genesis_hash,
+            dagknight_store,
+            headers_store,
+            reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability))),
+            relations_store: Arc::new(RwLock::new(relations)),
+            dagknight_cache: Arc::new(DagknightCache::new(1024)),
+        };
+
+        // Two identical parents: [T1, T1]
+        let duplicate_parents: Vec<Hash> = vec![t1_hash, t1_hash];
+        let result = dk_executor.dagknight_pure(&duplicate_parents, true);
+        assert_eq!(result.selected_parent, t1_hash);
+    }
+
+    /// Duplicate parents [T1, T1, T2] must NOT panic the DagKnight algorithm.
+    ///
+    /// T1 and T2 are independent tips (both children of genesis), so they are in the anticone.
+    /// `.unique()` deduplicates [T1, T1, T2] to [T1, T2], which forms two agreement groups,
+    /// so the shortcut path is not taken.
+    #[test]
+    fn test_duplicate_parents_three_with_one_dup() {
+        // genesis -> T1, genesis -> T2 (independent tips, in anticone)
+        let genesis_hash = Hash::from_u64_word(1);
+        let t1_hash = Hash::from_u64_word(2);
+        let t2_hash = Hash::from_u64_word(3);
+
+        let mut reachability = MemoryReachabilityStore::new();
+        let mut relations = MemoryRelationsStore::new();
+        let mut builder = DagBuilder::new(&mut reachability, &mut relations);
+        builder.init();
+        builder.add_block(DagBlock::new(genesis_hash, vec![ORIGIN]));
+        builder.add_block(DagBlock::new(t1_hash, vec![genesis_hash]));
+        builder.add_block(DagBlock::new(t2_hash, vec![genesis_hash]));
+
+        let headers_store = Arc::new(MemoryHeaderStore::new());
+        let mut genesis_header = Header::from_precomputed_hash(genesis_hash, vec![]);
+        genesis_header.bits = 0x207fffff;
+        headers_store.insert(Arc::new(genesis_header));
+        let mut t1_header = Header::from_precomputed_hash(t1_hash, vec![genesis_hash]);
+        t1_header.bits = 0x207fffff;
+        t1_header.daa_score = 1;
+        headers_store.insert(Arc::new(t1_header));
+        let mut t2_header = Header::from_precomputed_hash(t2_hash, vec![genesis_hash]);
+        t2_header.bits = 0x207fffff;
+        t2_header.daa_score = 1;
+        headers_store.insert(Arc::new(t2_header));
+
+        let dk_map = RefCell::new(HashMap::new());
+        let dagknight_store = Arc::new(MemoryDagknightStore::new(dk_map));
+        let dk_executor = DagknightExecutor {
+            genesis_hash,
+            dagknight_store,
+            headers_store,
+            reachability_service: MTReachabilityService::new(Arc::new(RwLock::new(reachability))),
+            relations_store: Arc::new(RwLock::new(relations)),
+            dagknight_cache: Arc::new(DagknightCache::new(1024)),
+        };
+
+        // Three parents where first two are identical: [T1, T1, T2]
+        let duplicate_parents: Vec<Hash> = vec![t1_hash, t1_hash, t2_hash];
+        let result = dk_executor.dagknight_pure(&duplicate_parents, true);
+
+        // Selected parent should be one of the unique parents
+        assert!(
+            result.selected_parent == t1_hash || result.selected_parent == t2_hash,
+            "selected parent {:?} should be one of {:?} or {:?}",
+            result.selected_parent,
+            t1_hash,
+            t2_hash
+        );
     }
 }
