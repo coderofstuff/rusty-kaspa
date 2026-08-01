@@ -13,10 +13,10 @@ use crate::{
     },
     processes::{
         block_depth::BlockDepthManager, coinbase::CoinbaseManager, dagknight::DagknightCounters,
-        dagknight::protocol::DagknightExecutor, ghostdag::protocol::GhostdagManager,
-        parents_builder::ParentsManager, pruning::PruningPointManager, pruning_proof::PruningProofManager,
-        sync::SyncManager, transaction_validator::TransactionValidator, traversal_manager::DagTraversalManager,
-        window::SampledWindowManager,
+        dagknight::protocol::DagknightExecutor, dagknight::umc_cascade_persistence::DbUmcCascadeStore,
+        ghostdag::protocol::GhostdagManager, parents_builder::ParentsManager, pruning::PruningPointManager,
+        pruning_proof::PruningProofManager, sync::SyncManager, transaction_validator::TransactionValidator,
+        traversal_manager::DagTraversalManager, window::SampledWindowManager,
     },
 };
 use kaspa_consensus_core::mass::MassCalculator;
@@ -52,7 +52,7 @@ pub type DbPruningPointManager = PruningPointManager<
 pub type DbBlockDepthManager = BlockDepthManager<DbDepthStore, DbReachabilityStore, DbGhostdagStore, DbHeadersStore>;
 pub type DbParentsManager = ParentsManager<DbHeadersStore, DbReachabilityStore, MTRelationsService<DbRelationsStore>>;
 pub type DbDagknightExecutor =
-    DagknightExecutor<DbDagknightStore, DbHeadersStore, MTRelationsService<DbRelationsStore>, DbReachabilityStore>;
+    DagknightExecutor<DbDagknightStore, DbHeadersStore, MTRelationsService<DbRelationsStore>, DbReachabilityStore, DbUmcCascadeStore>;
 
 pub struct ConsensusServices {
     // Underlying storage
@@ -141,6 +141,7 @@ impl ConsensusServices {
 
         // TODO[DK]: Use a config or ForkActivation to gate this
         let dagknight_counters = Arc::<crate::processes::dagknight::DagknightCounters>::default();
+        let umc_persistence_store = DbUmcCascadeStore::new(db.clone(), kaspa_database::prelude::CachePolicy::Count(256));
         let dagknight_executor = storage.dagknight_store.as_ref().map(|dagknight_store| DagknightExecutor {
             genesis_hash: params.genesis.hash,
             dagknight_store: dagknight_store.clone(),
@@ -148,6 +149,7 @@ impl ConsensusServices {
             relations_store: Arc::new(RwLock::new(relations_service.clone())),
             reachability_service: reachability_service.clone(),
             counters: dagknight_counters.clone(),
+            umc_persistence_store: umc_persistence_store.clone(),
         });
 
         let coinbase_manager = CoinbaseManager::new(
