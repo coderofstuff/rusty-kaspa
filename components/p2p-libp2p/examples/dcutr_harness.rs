@@ -7,8 +7,8 @@
 //! or set `LIBP2P_TARGET_ADDR=<ip:port>` to attempt a dial. If no target is
 //! provided, the harness just prints the peer ID and listens.
 
-use kaspa_p2p_libp2p::config::{Config, ConfigBuilder, Mode};
-use kaspa_p2p_libp2p::{Libp2pIdentity, SwarmStreamProvider};
+use kaspa_p2p_libp2p::config::{ConfigBuilder, Mode};
+use kaspa_p2p_libp2p::{Libp2pIdentity, Libp2pStreamProvider, SwarmStreamProvider};
 use kaspa_utils::networking::NetAddress;
 use std::env;
 

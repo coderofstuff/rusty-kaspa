@@ -163,10 +163,10 @@ async fn dcutr_client_relay_smoke() {
                             Err(err) => panic!("DCUtR upgrade failed on src side: {err}"),
                         }
                     }
-                    SwarmEvent::OutgoingConnectionError { peer_id: Some(peer_id), .. } if peer_id == dst_id.peer_id => {
-                        if dial_attempts < 4 && src.dial(dst_relay_addr.clone()).is_ok() {
-                            dial_attempts += 1;
-                        }
+                    SwarmEvent::OutgoingConnectionError { peer_id: Some(peer_id), .. }
+                        if peer_id == dst_id.peer_id && dial_attempts < 4 && src.dial(dst_relay_addr.clone()).is_ok() =>
+                    {
+                        dial_attempts += 1;
                     }
                     SwarmEvent::Behaviour(ClientBehaviourEvent::Identify(_))
                     | SwarmEvent::Behaviour(ClientBehaviourEvent::RelayClient(_))

@@ -83,9 +83,9 @@ pub(crate) mod tests {
 
     #[test]
     fn relay_overflow_drops_expected_counts() {
-        let r1 = vec![make_relay_peer(Some("r1")), make_relay_peer(Some("r1")), make_relay_peer(Some("r1"))];
-        let r2 = vec![make_relay_peer(Some("r2")), make_relay_peer(Some("r2"))];
-        let unknown = vec![make_relay_peer(None), make_relay_peer(None)];
+        let r1 = [make_relay_peer(Some("r1")), make_relay_peer(Some("r1")), make_relay_peer(Some("r1"))];
+        let r2 = [make_relay_peer(Some("r2")), make_relay_peer(Some("r2"))];
+        let unknown = [make_relay_peer(None), make_relay_peer(None)];
 
         let mut all = Vec::new();
         all.extend(r1.iter());
@@ -111,7 +111,7 @@ pub(crate) mod tests {
     fn relay_overflow_enforces_per_relay_cap() {
         let relay_a = PathKind::Relay { relay_id: Some("relay-a".into()) };
         let relay_b = PathKind::Relay { relay_id: Some("relay-b".into()) };
-        let peers = vec![
+        let peers = [
             make_peer_with_path(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 1), Capabilities { libp2p: true }),
             make_peer_with_path(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 2), Capabilities { libp2p: true }),
             make_peer_with_path(relay_a.clone(), Ipv4Addr::new(10, 0, 0, 3), Capabilities { libp2p: true }),
@@ -126,7 +126,7 @@ pub(crate) mod tests {
     #[test]
     fn relay_overflow_enforces_unknown_bucket() {
         let relay_unknown = PathKind::Relay { relay_id: None };
-        let peers = vec![
+        let peers = [
             make_peer_with_path(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 1), Capabilities { libp2p: true }),
             make_peer_with_path(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 2), Capabilities { libp2p: true }),
             make_peer_with_path(relay_unknown.clone(), Ipv4Addr::new(10, 0, 1, 3), Capabilities { libp2p: true }),
@@ -153,7 +153,7 @@ pub(crate) mod tests {
     #[test]
     fn drop_libp2p_over_cap_limits_set() {
         let peers =
-            vec![make_relay_peer(Some("r1")), make_relay_peer(Some("r2")), make_relay_peer(Some("r3")), make_relay_peer(Some("r4"))];
+            [make_relay_peer(Some("r1")), make_relay_peer(Some("r2")), make_relay_peer(Some("r3")), make_relay_peer(Some("r4"))];
         let refs: Vec<&Peer> = peers.iter().collect();
         let to_drop = ConnectionManager::drop_libp2p_over_cap(&refs, 2);
         assert_eq!(to_drop.len(), 2);
@@ -161,7 +161,7 @@ pub(crate) mod tests {
 
     #[test]
     fn drop_libp2p_over_cap_no_drop_when_under_cap() {
-        let peers = vec![make_relay_peer(Some("r1")), make_relay_peer(Some("r2"))];
+        let peers = [make_relay_peer(Some("r1")), make_relay_peer(Some("r2"))];
         let refs: Vec<&Peer> = peers.iter().collect();
         let to_drop = ConnectionManager::drop_libp2p_over_cap(&refs, 4);
         assert!(to_drop.is_empty());
