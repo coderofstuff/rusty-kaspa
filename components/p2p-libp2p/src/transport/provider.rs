@@ -95,7 +95,7 @@ impl SwarmStreamProvider {
 
     async fn ensure_listening(&self) -> Result<(), Libp2pError> {
         let (tx, rx) = oneshot::channel();
-        info!("libp2p ensure listening on configured addresses");
+        debug!("libp2p ensure listening on configured addresses");
         self.command_tx
             .send(SwarmCommand::EnsureListening { respond_to: tx })
             .await

@@ -1,13 +1,13 @@
 impl SwarmDriver {
     pub(super) fn bootstrap(&mut self) {
-        info!("libp2p bootstrap: adding {} external addresses", self.external_addrs.len());
+        debug!("libp2p bootstrap: adding {} external addresses", self.external_addrs.len());
         for addr in self.external_addrs.clone() {
-            info!("libp2p bootstrap: registering external address: {}", addr);
+            debug!("libp2p bootstrap: registering external address: {}", addr);
             self.swarm.add_external_address(addr);
         }
         // Log the swarm's external addresses after adding
         let external_addrs: Vec<_> = self.swarm.external_addresses().collect();
-        info!("libp2p bootstrap: swarm now has {} external addresses: {:?}", external_addrs.len(), external_addrs);
+        debug!("libp2p bootstrap: swarm now has {} external addresses: {:?}", external_addrs.len(), external_addrs);
         let _ = self.start_listening();
         self.publish_relay_hint();
     }
@@ -108,9 +108,9 @@ impl SwarmDriver {
         };
         self.swarm.behaviour_mut().relay_server = relay_server.into();
         if enabled {
-            info!("libp2p relay server enabled ({reason})");
+            debug!("libp2p relay server enabled ({reason})");
         } else {
-            info!("libp2p relay server disabled ({reason})");
+            debug!("libp2p relay server disabled ({reason})");
         }
     }
     pub(super) fn apply_effective_role(&mut self, role: crate::Role, reason: &str) {
@@ -123,7 +123,7 @@ impl SwarmDriver {
         }
 
         let addrs = if self.listen_addrs.is_empty() { vec![default_listen_addr()] } else { self.listen_addrs.clone() };
-        info!("libp2p starting listen on {:?}", addrs);
+        debug!("libp2p starting listen on {:?}", addrs);
 
         for addr in addrs {
             if let Err(err) = self.swarm.listen_on(addr) {
@@ -253,7 +253,7 @@ impl SwarmDriver {
         let unique_peers = relay_peers.len();
         if unique_peers > self.max_peers_per_relay {
             if self.swarm.close_connection(connection_id) {
-                info!("libp2p: closing relay connection {connection_id:?} for relay cap");
+                debug!("libp2p: closing relay connection {connection_id:?} for relay cap");
             }
             self.connections.remove(&connection_id);
         }

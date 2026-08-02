@@ -64,11 +64,11 @@ impl AsyncService for Libp2pNodeService {
             if !self.config.mode.is_enabled() {
                 return Ok(());
             }
-            log::info!("libp2p node service starting; waiting for provider and connection handler");
+            log::debug!("libp2p node service starting; waiting for provider and connection handler");
 
             let provider = loop {
                 if let Some(provider) = self.provider_cell.get() {
-                    log::info!("libp2p provider initialised; starting node service");
+                    log::debug!("libp2p provider initialised; starting node service");
                     break provider.clone();
                 }
                 tokio::select! {
@@ -180,7 +180,7 @@ impl AsyncService for Libp2pNodeService {
 
             let handler = loop {
                 if let Some(handler) = self.flow_context.connection_handler() {
-                    log::info!("libp2p connection handler available; wiring inbound bridge");
+                    log::debug!("libp2p connection handler available; wiring inbound bridge");
                     break handler;
                 }
                 tokio::select! {

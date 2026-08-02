@@ -64,7 +64,7 @@ impl AsyncService for Libp2pInitService {
     fn start(self: Arc<Self>) -> AsyncServiceFuture {
         Box::pin(async move {
             let handle = tokio::runtime::Handle::current();
-            log::info!("libp2p init: listen addresses {:?}", self.config.listen_addresses);
+            log::debug!("libp2p init: listen addresses {:?}", self.config.listen_addresses);
             let provider = match SwarmStreamProvider::with_handle(self.config.clone(), self.identity.clone(), handle) {
                 Ok(p) => p,
                 Err(e) => {
@@ -73,7 +73,7 @@ impl AsyncService for Libp2pInitService {
                 }
             };
             let _ = self.provider_cell.set(Arc::new(provider));
-            log::info!("libp2p init: provider ready");
+            log::debug!("libp2p init: provider ready");
             self.shutdown.listener.clone().await;
             Ok(())
         })

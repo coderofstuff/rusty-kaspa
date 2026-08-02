@@ -268,7 +268,7 @@ impl ConnectionManager {
             if progressing && !jobs.is_empty() {
                 // Log only if progress was made
                 if force_private_rendezvous {
-                    info!("Connection manager: outbound target met; probing private relay rendezvous path");
+                    debug!("Connection manager: outbound target met; probing private relay rendezvous path");
                 } else {
                     info!(
                         "Connection manager: has {}/{} outgoing P2P connections, trying to obtain {} additional connection(s)...",
@@ -299,7 +299,7 @@ impl ConnectionManager {
                             self.record_relay_dial_success(relay).await;
                         }
                         if force_private_rendezvous {
-                            info!("Connection manager: established opportunistic private relay rendezvous");
+                            debug!("Connection manager: established opportunistic private relay rendezvous");
                             connecting = false;
                         }
                     }

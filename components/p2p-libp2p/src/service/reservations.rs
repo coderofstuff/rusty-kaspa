@@ -111,7 +111,7 @@ pub(super) async fn refresh_reservations(
                 state.active.insert(key, ActiveReservation { refresh_at, handle });
             }
             Err(err) => {
-                warn!("libp2p reservation attempt to {raw} failed: {err}");
+                debug!("libp2p reservation attempt to {raw} failed: {err}");
                 state.backoff.record_failure(&key, now);
             }
         }
