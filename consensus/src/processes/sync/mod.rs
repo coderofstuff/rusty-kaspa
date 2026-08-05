@@ -1,4 +1,4 @@
-use std::{cmp::min, ops::Deref, sync::Arc};
+use std::{cmp::min, sync::Arc};
 
 use itertools::Itertools;
 use kaspa_consensus_core::errors::sync::{SyncManagerError, SyncManagerResult};
@@ -7,13 +7,16 @@ use kaspa_hashes::Hash;
 use kaspa_math::uint::malachite_base::num::arithmetic::traits::CeilingLogBase2;
 use parking_lot::RwLock;
 
-use crate::model::{
-    services::reachability::{MTReachabilityService, ReachabilityService},
-    stores::{
-        ghostdag::GhostdagStoreReader, headers_selected_tip::HeadersSelectedTipStoreReader, pruning::PruningStoreReader,
-        reachability::ReachabilityStoreReader, relations::RelationsStoreReader, selected_chain::SelectedChainStoreReader,
-        statuses::StatusesStoreReader,
+use crate::{
+    model::{
+        services::reachability::{MTReachabilityService, ReachabilityService},
+        stores::{
+            ghostdag::GhostdagStoreReader, headers_selected_tip::HeadersSelectedTipStoreReader, pruning::PruningStoreReader,
+            reachability::ReachabilityStoreReader, relations::RelationsStoreReader, selected_chain::SelectedChainStoreReader,
+            statuses::StatusesStoreReader,
+        },
     },
+    processes::ghostdag::ordering::SortableBlock,
 };
 
 use super::traversal_manager::DagTraversalManager;
@@ -31,7 +34,8 @@ pub struct SyncManager<
     mergeset_size_limit: u64,
     reachability_service: MTReachabilityService<T>,
     traversal_manager: DagTraversalManager<U, T, S>,
-    ghostdag_store: Arc<U>,
+    coloring_ghostdag_store: Arc<U>,
+    topology_ghostdag_store: Arc<U>,
     selected_chain_store: Arc<RwLock<V>>,
     _header_selected_tip_store: Arc<RwLock<W>>,
     pruning_point_store: Arc<RwLock<X>>,
@@ -52,7 +56,8 @@ impl<
         mergeset_size_limit: u64,
         reachability_service: MTReachabilityService<T>,
         traversal_manager: DagTraversalManager<U, T, S>,
-        ghostdag_store: Arc<U>,
+        coloring_ghostdag_store: Arc<U>,
+        topology_ghostdag_store: Arc<U>,
         selected_chain_store: Arc<RwLock<V>>,
         header_selected_tip_store: Arc<RwLock<W>>,
         pruning_point_store: Arc<RwLock<X>>,
@@ -62,7 +67,8 @@ impl<
             mergeset_size_limit,
             reachability_service,
             traversal_manager,
-            ghostdag_store,
+            coloring_ghostdag_store,
+            topology_ghostdag_store,
             selected_chain_store,
             _header_selected_tip_store: header_selected_tip_store,
             pruning_point_store,
@@ -84,20 +90,31 @@ impl<
         let original_low = low;
         let low = self.find_highest_common_chain_block(low, high);
 
-        let low_bs = self.ghostdag_store.get_blue_score(low).unwrap();
-        let high_bs = self.ghostdag_store.get_blue_score(high).unwrap();
+        let low_bs = self.coloring_ghostdag_store.get_blue_score(low).unwrap();
+        let high_bs = self.coloring_ghostdag_store.get_blue_score(high).unwrap();
         assert!(low_bs <= high_bs);
 
         let mut highest_reached = low; // The highest chain block we reached before completing/reaching a limit
         let mut blocks = Vec::with_capacity(min(max_blocks, (high_bs - low_bs) as usize));
         for current in self.reachability_service.forward_chain_iterator(low, high, true).skip(1) {
-            let gd = self.ghostdag_store.get_data(current).unwrap();
+            let gd = self.coloring_ghostdag_store.get_data(current).unwrap();
             if blocks.len() + gd.mergeset_size() > max_blocks {
                 break;
             }
+
+            // This is equivalent to gd.consensus_ordered_mergeset but due to the difference
+            // TODO[DK]: May need to be revisited as currently the mergeset ordering in coloring_ghostdag_store
+            // is not guaranteed to be topological due to sort blocks using bw from the coloring_ghostdag_store
+            // instead of topology_ghostdag_store or the header.blue_work. Once that ordering is fixed, this can be
+            // reverted to use gd.consensus_ordered_mergeset.
+            blocks.push(gd.selected_parent);
             blocks.extend(
-                gd.consensus_ordered_mergeset(self.ghostdag_store.deref())
-                    .filter(|hash| !self.reachability_service.is_dag_ancestor_of(*hash, original_low)),
+                gd.unordered_mergeset()
+                    .filter(|&hash| hash != gd.selected_parent && !self.reachability_service.is_dag_ancestor_of(hash, original_low))
+                    .sorted_by_key(|&hash| SortableBlock {
+                        hash,
+                        blue_work: self.topology_ghostdag_store.get_blue_work(hash).unwrap(),
+                    }),
             );
             highest_reached = current;
         }
@@ -211,7 +228,7 @@ impl<
             return Err(SyncManagerError::LocatorLowHashNotInHighHashChain(low, high));
         }
 
-        let low_bs = self.ghostdag_store.get_blue_score(low).unwrap();
+        let low_bs = self.coloring_ghostdag_store.get_blue_score(low).unwrap();
         let mut current = high;
         let mut step = 1;
         let mut locator = Vec::new();
@@ -221,7 +238,7 @@ impl<
                 break;
             }
 
-            let current_gd = self.ghostdag_store.get_compact_data(current).unwrap();
+            let current_gd = self.coloring_ghostdag_store.get_compact_data(current).unwrap();
 
             // Nothing more to add once the low node has been added.
             if current_gd.blue_score <= low_bs {

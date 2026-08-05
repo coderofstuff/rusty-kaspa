@@ -216,6 +216,7 @@ impl ConsensusServices {
             reachability_service.clone(),
             dag_traversal_manager.clone(),
             storage.coloring_ghostdag_store.clone(),
+            storage.topology_ghostdag_store.clone(),
             storage.selected_chain_store.clone(),
             storage.headers_selected_tip_store.clone(),
             storage.pruning_point_store.clone(),
