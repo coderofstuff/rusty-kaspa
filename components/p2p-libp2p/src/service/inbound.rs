@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use log::{debug, error, warn};
+use log::{debug, error};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tokio_stream::wrappers::ReceiverStream;
@@ -70,20 +70,20 @@ pub(super) fn start_inbound_bridge(
                     match direction {
                         StreamDirection::Outbound => {
                             // For locally initiated streams, act as the client and connect directly.
-                            log::info!(
+                            log::debug!(
                                 "libp2p_bridge: outbound stream ready for Kaspa connect_with_stream with metadata {:?}",
                                 metadata
                             );
                             let mut close = Some(close);
                             if let Err(err) = handler_for_outbound.connect_with_stream(stream, metadata).await {
-                                log::warn!("libp2p_bridge: outbound connect_with_stream failed: {err}");
+                                log::debug!("libp2p_bridge: outbound connect_with_stream failed: {err}");
                                 if let Some(close) = close.take() {
                                     close();
                                 }
                             }
                         }
                         StreamDirection::Inbound => {
-                            log::info!("libp2p_bridge: inbound stream ready for Kaspa with metadata {:?}", metadata);
+                            log::debug!("libp2p_bridge: inbound stream ready for Kaspa with metadata {:?}", metadata);
                             let info = MetadataConnectInfo::new(None, metadata);
                             let connected = MetaConnectedStream::new(stream, info, Some(close));
                             if tx.send(Ok(connected)).await.is_err() {
@@ -95,7 +95,7 @@ pub(super) fn start_inbound_bridge(
                 Err(err) => match inbound_listen_error_action(&err, retryable_errors) {
                     InboundListenErrorAction::Retry { attempt } => {
                         retryable_errors = attempt;
-                        warn!("libp2p inbound listen error (retry {attempt}/{INBOUND_LISTEN_MAX_RETRYABLE_ERRORS}): {err}");
+                        debug!("libp2p inbound listen error (retry {attempt}/{INBOUND_LISTEN_MAX_RETRYABLE_ERRORS}): {err}");
                         if let Some(shutdown) = shutdown.as_mut() {
                             tokio::select! {
                                 _ = shutdown.clone() => {

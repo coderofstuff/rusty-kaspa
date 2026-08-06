@@ -35,6 +35,7 @@ libp2p = []
 futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 async-trait.workspace = true
+kaspa-core.workspace = true
 kaspa-utils-tower.workspace = true
 
 [lints]

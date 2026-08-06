@@ -125,7 +125,7 @@ impl SwarmDriver {
                 if let Some(address_key) = address_key_from_multiaddr(&address)
                     && let Some(peer_id) = self.connected_peer_for_address_key(&address_key)
                 {
-                    info!("libp2p relay probe reused existing connection to {peer_id} for {address_key}");
+                    debug!("libp2p relay probe reused existing connection to {peer_id} for {address_key}");
                     let _ = respond_to.send(Ok(peer_id));
                     return;
                 }
@@ -154,7 +154,7 @@ impl SwarmDriver {
                         self.reservation_listeners.insert(listener);
                         match relay_info_from_multiaddr(&target_for_info, *self.swarm.local_peer_id()) {
                             Some(relay) => {
-                                info!(
+                                debug!(
                                     "libp2p reservation request started via relay {} listener={listener:?}; waiting for acceptance",
                                     relay.relay_peer
                                 );
@@ -224,7 +224,7 @@ impl SwarmDriver {
         }
 
         if let Some(pending) = self.pending_probes.remove(&connection_id) {
-            info!("libp2p relay probe connected to {peer_id}");
+            debug!("libp2p relay probe connected to {peer_id}");
             self.record_connection(connection_id, peer_id, &endpoint, false);
             let _ = pending.respond_to.send(Ok(peer_id));
             return;
@@ -236,7 +236,7 @@ impl SwarmDriver {
         if !endpoint_uses_relay(&endpoint)
             && let Some((_old_req, pending)) = self.take_pending_relay_by_peer(&peer_id)
         {
-            info!("libp2p DCUtR success: direct connection to {peer_id} resolves pending relay dial");
+            debug!("libp2p DCUtR direct connection to {peer_id} resolves pending relay dial");
             self.pending_dials.insert(connection_id, pending);
             had_pending_relay = true;
         }
@@ -247,6 +247,9 @@ impl SwarmDriver {
         let uses_relay = endpoint_uses_relay(&endpoint);
         let direct_upgrade = !uses_relay && (had_pending_relay || self.has_relay_connection(peer_id));
         self.record_connection(connection_id, peer_id, &endpoint, direct_upgrade);
+        if direct_upgrade {
+            info!("P2P TCP hole punch succeeded with peer {peer_id}");
+        }
 
         if uses_relay
             && self.active_relay.as_ref().is_none_or(|relay| relay.relay_peer != peer_id)
@@ -255,12 +258,12 @@ impl SwarmDriver {
         }
 
         if endpoint.is_dialer() {
-            info!("libp2p initiating stream to {peer_id} (as dialer)");
+            debug!("libp2p initiating stream to {peer_id} (as dialer)");
             self.request_stream_bridge(peer_id, connection_id);
         } else if had_pending_relay {
             // DCUtR succeeded but we're the listener - still need to initiate stream
             // because we had a pending outbound dial that needs to be resolved
-            info!("libp2p DCUtR: initiating stream to {peer_id} (as listener with pending dial)");
+            debug!("libp2p DCUtR: initiating stream to {peer_id} (as listener with pending dial)");
             self.request_stream_bridge(peer_id, connection_id);
         } else {
             debug!("libp2p waiting for stream from {peer_id} (as listener)");
@@ -288,7 +291,7 @@ impl SwarmDriver {
         let active_relay_closed =
             self.active_relay.as_ref().is_some_and(|relay| relay.relay_peer == peer_id) && !self.has_direct_connection(peer_id);
         if active_relay_closed {
-            info!("libp2p active relay connection to {peer_id} closed");
+            debug!("libp2p active relay connection to {peer_id} closed");
             self.clear_active_relay();
         }
     }
@@ -308,9 +311,9 @@ impl SwarmDriver {
                         debug!("libp2p_bridge: skipping inbound stream on dialed connection to {peer_id} (no role_override)");
                         return;
                     }
-                    info!("libp2p_bridge: accepting inbound stream on DCUtR connection (role_override=Listener) from {peer_id}");
+                    debug!("libp2p_bridge: accepting inbound stream on DCUtR connection (role_override=Listener) from {peer_id}");
                 }
-                info!("libp2p_bridge: StreamEvent::Inbound peer={} endpoint={:?}", peer_id, endpoint);
+                debug!("libp2p_bridge: StreamEvent::Inbound peer={} endpoint={:?}", peer_id, endpoint);
                 let mut metadata = metadata_from_endpoint(&peer_id, &endpoint);
                 // If endpoint-based path detection returned Unknown, fall back to our
                 // connection records which track whether a connection uses a relay circuit.
@@ -321,7 +324,7 @@ impl SwarmDriver {
                 {
                     metadata.path = conn.path.clone();
                 }
-                info!("libp2p_bridge: inbound stream from {peer_id} over {:?}, handing to Kaspa", metadata.path);
+                debug!("libp2p_bridge: inbound stream from {peer_id} over {:?}, handing to Kaspa", metadata.path);
                 let incoming = IncomingStream { metadata, direction: StreamDirection::Inbound, stream: Box::new(stream.compat()) };
                 self.enqueue_incoming(incoming);
             }
@@ -329,21 +332,21 @@ impl SwarmDriver {
                 let metadata = metadata_from_endpoint(&peer_id, &endpoint);
                 let direction = match &endpoint {
                     libp2p::core::ConnectedPoint::Dialer { role_override: libp2p::core::Endpoint::Listener, .. } => {
-                        info!(
+                        debug!(
                             "libp2p_bridge: DCUtR role_override detected, treating outbound stream as inbound (h2 server) for {peer_id}"
                         );
                         StreamDirection::Inbound
                     }
                     _ => StreamDirection::Outbound,
                 };
-                info!(
+                debug!(
                     "libp2p_bridge: StreamEvent::Outbound peer={} req_id={:?} endpoint={:?} direction={:?}",
                     peer_id, request_id, endpoint, direction
                 );
                 if let Some(pending) = self.pending_dials.remove(&request_id) {
                     let _ = pending.respond_to.send(Ok((metadata, direction, Box::new(stream.compat()))));
                 } else {
-                    info!(
+                    debug!(
                         "libp2p_bridge: outbound stream with no pending dial (req {request_id:?}) from {peer_id}; handing to Kaspa (direction={:?})",
                         direction
                     );
@@ -361,7 +364,7 @@ impl SwarmDriver {
             self.swarm.behaviour_mut().streams.request_stream(peer_id, connection_id, connection_id);
             return;
         }
-        info!("libp2p_bridge: request_stream_bridge peer={} conn_id={:?} (requesting substream)", peer_id, connection_id);
+        debug!("libp2p_bridge: request_stream_bridge peer={} conn_id={:?} (requesting substream)", peer_id, connection_id);
 
         let (respond_to, rx) = oneshot::channel();
         self.pending_dials.insert(connection_id, DialRequest { respond_to, started_at: Instant::now(), via: DialVia::Direct });
@@ -370,7 +373,7 @@ impl SwarmDriver {
         let tx = self.incoming_tx.clone();
         spawn(async move {
             if let Ok(Ok((metadata, direction, stream))) = rx.await {
-                info!(
+                debug!(
                     "libp2p_bridge: established stream with {peer_id} (req {connection_id:?}); handing to Kaspa (direction={:?})",
                     direction
                 );

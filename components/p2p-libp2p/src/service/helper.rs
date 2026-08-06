@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use log::{debug, warn};
+use log::debug;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::{Duration, sleep, timeout};
 
@@ -19,7 +19,7 @@ pub(super) async fn start_helper_listener(
     mut shutdown: Option<Listener>,
 ) -> Result<(), Libp2pError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| Libp2pError::ListenFailed(e.to_string()))?;
-    log::info!("libp2p helper API listening on {addr}");
+    log::debug!("libp2p helper API listening on {addr}");
 
     tokio::spawn(async move {
         loop {
@@ -37,7 +37,7 @@ pub(super) async fn start_helper_listener(
                             });
                         }
                         Err(err) => {
-                            warn!("libp2p helper accept error: {err}");
+                            debug!("libp2p helper accept error: {err}");
                             sleep(HELPER_ACCEPT_RETRY_DELAY).await;
                         }
                     }
@@ -51,7 +51,7 @@ pub(super) async fn start_helper_listener(
                         });
                     }
                     Err(err) => {
-                        warn!("libp2p helper accept error: {err}");
+                        debug!("libp2p helper accept error: {err}");
                         sleep(HELPER_ACCEPT_RETRY_DELAY).await;
                     }
                 }
@@ -73,7 +73,7 @@ pub(super) async fn handle_helper_connection(mut stream: tokio::net::TcpStream, 
             }
         }
         Ok(Err(err)) => {
-            warn!("libp2p helper read error: {err}");
+            debug!("libp2p helper read error: {err}");
             if err.kind() == io::ErrorKind::InvalidData {
                 let resp = HelperApi::error_response(&HelperError::Invalid("invalid utf-8".into()));
                 let _ = writer.write_all(resp.as_bytes()).await;
@@ -82,7 +82,7 @@ pub(super) async fn handle_helper_connection(mut stream: tokio::net::TcpStream, 
             return;
         }
         Err(_) => {
-            warn!("libp2p helper read timeout after {:?}", HELPER_READ_TIMEOUT);
+            debug!("libp2p helper read timeout after {:?}", HELPER_READ_TIMEOUT);
             let _ = writer.write_all(br#"{"ok":false,"error":"timeout waiting for request"}"#).await;
             let _ = writer.write_all(b"\n").await;
             return;
@@ -90,7 +90,7 @@ pub(super) async fn handle_helper_connection(mut stream: tokio::net::TcpStream, 
     }
 
     if line.len() > HELPER_MAX_LINE {
-        warn!("libp2p helper request exceeded max length ({} bytes)", HELPER_MAX_LINE);
+        debug!("libp2p helper request exceeded max length ({} bytes)", HELPER_MAX_LINE);
         let _ = writer.write_all(br#"{"ok":false,"error":"request too long"}"#).await;
         let _ = writer.write_all(b"\n").await;
         return;
@@ -100,7 +100,7 @@ pub(super) async fn handle_helper_connection(mut stream: tokio::net::TcpStream, 
     let resp_str = match api.handle_json(trimmed).await {
         Ok(r) => r,
         Err(e) => {
-            warn!("libp2p helper request error: {e}");
+            debug!("libp2p helper request error: {e}");
             HelperApi::error_response(&e)
         }
     };

@@ -53,7 +53,7 @@ pub fn build_base_swarm(identity: &Libp2pIdentity) -> Result<Swarm<BaseBehaviour
     let peer_id = identity.peer_id;
     let (transport, cfg) = build_tcp_transport(identity)?;
 
-    info!("libp2p base swarm peer id: {}", peer_id);
+    debug!("libp2p base swarm peer id: {}", peer_id);
 
     Ok(Swarm::new(transport, BaseBehaviour { ping: ping::Behaviour::default() }, peer_id, cfg))
 }
@@ -152,29 +152,30 @@ pub(crate) fn build_streaming_swarm(
     let (relay_transport, relay_client_behaviour) = relay_client::new(peer_id);
     let (transport, cfg) = build_transport(identity, relay_transport)?;
 
-    info!("libp2p streaming swarm peer id: {} (dcutr enabled, identify will advertise {})", peer_id, dcutr::PROTOCOL_NAME);
+    info!("libp2p peer id: {peer_id}");
+    debug!("libp2p DCUtR enabled; identify will advertise {}", dcutr::PROTOCOL_NAME);
 
     // Configure AutoNAT
     let mut autonat_cfg = autonat::Config::default();
     if config.autonat.enable_client {
         autonat_cfg.confidence_max = config.autonat.confidence_threshold;
-        info!("AutoNAT client mode ENABLED for peer={}", peer_id);
+        debug!("AutoNAT client mode enabled for peer={}", peer_id);
     }
     if config.autonat.enable_server {
         autonat_cfg.only_global_ips = config.autonat.server_only_if_public;
         autonat_cfg.throttle_server_period = Duration::from_secs(60);
         autonat_cfg.throttle_clients_peer_max = config.autonat.max_server_requests_per_peer;
-        info!("AutoNAT server mode ENABLED for peer={}", peer_id);
+        debug!("AutoNAT server mode enabled for peer={}", peer_id);
     }
     if !config.autonat.enable_client && !config.autonat.enable_server {
-        info!("AutoNAT DISABLED for peer={}", peer_id);
+        debug!("AutoNAT disabled for peer={}", peer_id);
     }
     let autonat = autonat::Behaviour::new(peer_id, autonat_cfg);
 
     let identify = {
         let identify_cfg = identify::Config::new(format!("/kaspad/libp2p/{}", env!("CARGO_PKG_VERSION")), identity.keypair.public())
             .with_push_listen_addr_updates(false); // Disabled to prevent relay flooding
-        info!("Identify: push listen addr updates = false");
+        debug!("Identify: push listen addr updates = false");
         let behaviour = identify::Behaviour::new(identify_cfg);
         // Developer sanity: ensure DCUtR is in the supported protocol set we hand to Identify.
         debug_assert!(!dcutr::PROTOCOL_NAME.as_ref().is_empty(), "dcutr protocol name must be non-empty");
@@ -204,7 +205,7 @@ pub(crate) fn build_streaming_swarm(
             external_addrs.push(ma);
         }
     }
-    info!("DcutrBootstrapBehaviour seeding {} external address candidates for DCUtR", external_addrs.len());
+    debug!("DcutrBootstrapBehaviour seeding {} external address candidates for DCUtR", external_addrs.len());
 
     // Pre-seed DCUtR's internal address cache BEFORE the swarm starts.
     // This is critical because handler creation happens synchronously when connections
@@ -215,7 +216,7 @@ pub(crate) fn build_streaming_swarm(
         debug!("Pre-seeding DCUtR cache with: {}", addr);
         dcutr.on_swarm_event(FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate { addr }));
     }
-    info!("Pre-seeded DCUtR with {} external address candidates", external_addrs.len());
+    debug!("Pre-seeded DCUtR with {} external address candidates", external_addrs.len());
 
     let behaviour = Libp2pBehaviour {
         ping: ping::Behaviour::default(),
@@ -395,7 +396,7 @@ impl NetworkBehaviour for StreamBehaviour {
         let event = match event {
             Ok(ev) => ev,
             Err(e) => {
-                log::warn!("libp2p stream upgrade failed: {e}");
+                log::debug!("libp2p stream upgrade failed: {e}");
                 return;
             }
         };

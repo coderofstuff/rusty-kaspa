@@ -3,7 +3,7 @@ use crate::relay_pool::{RelayCandidateSource, RelayPool, RelayPoolConfig};
 use crate::reservations::ReservationManager;
 use crate::transport::{Libp2pStreamProvider, ReservationHandle};
 use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
-use log::{debug, info, warn};
+use log::debug;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -84,7 +84,7 @@ pub async fn run_relay_auto_worker(
         }
         for key in disconnected {
             if let Some(reservation) = active.remove(&key) {
-                info!("libp2p relay auto: releasing reservation on {key} (relay disconnected)");
+                debug!("libp2p relay auto: releasing reservation on {key} (relay disconnected)");
                 reservation.handle.release().await;
                 backoff.record_failure(&key, now);
                 pool.record_failure(&key, now);
@@ -123,15 +123,15 @@ pub async fn run_relay_auto_worker(
             candidate_log_states.insert(candidate.key.clone(), state);
 
             match state {
-                CandidateLogState::Selected => info!(
+                CandidateLogState::Selected => debug!(
                     "libp2p relay auto: candidate {} state=selected has_peer_id={} score={:.2}",
                     candidate.key, candidate.has_peer_id, candidate.score
                 ),
-                CandidateLogState::Backoff => info!(
+                CandidateLogState::Backoff => debug!(
                     "libp2p relay auto: candidate {} state=backoff has_peer_id={} score={:.2}",
                     candidate.key, candidate.has_peer_id, candidate.score
                 ),
-                CandidateLogState::EligibleNotSelected => info!(
+                CandidateLogState::EligibleNotSelected => debug!(
                     "libp2p relay auto: candidate {} state=eligible_not_selected has_peer_id={} score={:.2}",
                     candidate.key, candidate.has_peer_id, candidate.score
                 ),
@@ -150,7 +150,7 @@ pub async fn run_relay_auto_worker(
 
         for (key, reserved_at) in released {
             if let Some(reservation) = active.remove(&key) {
-                info!("libp2p relay auto: releasing reservation on {key} (age {:?})", now.saturating_duration_since(reserved_at));
+                debug!("libp2p relay auto: releasing reservation on {key} (age {:?})", now.saturating_duration_since(reserved_at));
                 reservation.handle.release().await;
                 if let Some(metrics) = metrics.as_ref() {
                     metrics.relay_auto().record_rotation();
@@ -190,7 +190,7 @@ pub async fn run_relay_auto_worker(
                         reservation_addr = pool.reservation_multiaddr(&selection.key);
                     }
                     Err(err) => {
-                        warn!("libp2p relay auto: probe failed for {}: {err}", selection.key);
+                        debug!("libp2p relay auto: probe failed for {}: {err}", selection.key);
                         backoff.record_failure(&selection.key, now);
                         pool.record_failure(&selection.key, now);
                         if let Some(metrics) = metrics.as_ref() {
@@ -220,7 +220,7 @@ pub async fn run_relay_auto_worker(
             match provider.reserve(target).await {
                 Ok(handle) => {
                     let latency = started.elapsed();
-                    info!("libp2p relay auto: reservation accepted for {}", selection.key);
+                    debug!("libp2p relay auto: reservation accepted for {}", selection.key);
                     backoff.record_success(&selection.key);
                     pool.record_success(&selection.key, Some(latency), now);
                     pool.mark_selected(&selection.key, now);
@@ -231,7 +231,7 @@ pub async fn run_relay_auto_worker(
                     }
                 }
                 Err(err) => {
-                    warn!("libp2p relay auto: reservation failed for {}: {err}", selection.key);
+                    debug!("libp2p relay auto: reservation failed for {}: {err}", selection.key);
                     backoff.record_failure(&selection.key, now);
                     pool.record_failure(&selection.key, now);
                     if let Some(metrics) = metrics.as_ref() {
