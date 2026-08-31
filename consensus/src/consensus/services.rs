@@ -140,7 +140,6 @@ impl ConsensusServices {
             storage.topology_ghostdag_store.clone(),
         );
 
-        // TODO[DK]: Use a config or ForkActivation to gate this
         let dagknight_counters = Arc::<crate::processes::dagknight::DagknightCounters>::default();
         let dagknight_executor = storage.dagknight_store.as_ref().map(|dagknight_store| DagknightExecutor {
             genesis_hash: params.genesis.hash,
@@ -160,12 +159,8 @@ impl ConsensusServices {
             params.bps_history(),
         );
 
-        let mass_calculator = MassCalculator::new(
-            params.mass_per_tx_byte,
-            params.mass_per_script_pub_key_byte,
-            params.mass_per_sig_op,
-            params.storage_mass_parameter,
-        );
+        let mass_calculator =
+            MassCalculator::new(params.mass_per_tx_byte, params.mass_per_script_pub_key_byte, params.storage_mass_parameter);
 
         let transaction_validator = TransactionValidator::new(
             params.max_tx_inputs,
@@ -177,6 +172,7 @@ impl ConsensusServices {
             params.ghostdag_k(),
             tx_script_cache_counters,
             mass_calculator.clone(),
+            params.mass_per_sig_op,
         );
 
         let pruning_point_manager = PruningPointManager::new(
@@ -212,6 +208,7 @@ impl ConsensusServices {
             params.genesis.hash,
             params.pruning_proof_m,
             params.anticone_finalization_depth(),
+            params.finality_depth(),
             params.ghostdag_k(),
             params.skip_proof_of_work,
             is_consensus_exiting,

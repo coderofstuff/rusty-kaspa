@@ -163,10 +163,7 @@ impl DbAddressesStore {
         read_opts.set_iterate_range(rocksdb::PrefixRange(prefix_key.as_ref()));
         self.db.iterator_opt(IteratorMode::From(prefix_key.as_ref(), Direction::Forward), read_opts).map(
             move |iter_result| -> Result<LoadedEntry, Box<dyn Error>> {
-                let (key, data_bytes) = match iter_result {
-                    Ok(data) => data,
-                    Err(err) => return Err(err.into()),
-                };
+                let (key, data_bytes) = iter_result?;
                 let key_slice = &key[prefix_key.prefix_len()..];
                 let address_key_slice: [u8; ADDRESS_KEY_SIZE] =
                     key_slice.try_into().map_err(|err| -> Box<dyn Error> { Box::new(err) })?;

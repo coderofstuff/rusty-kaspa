@@ -13,7 +13,7 @@ use kaspa_core::{debug, info};
 use kaspa_utils::networking::{IpAddress, NetAddress};
 use kaspa_utils_tower::{
     counters::TowerConnectionCounters,
-    middleware::{BodyExt, CountBytesBody, MapRequestBodyLayer, MapResponseBodyLayer, ServiceBuilder},
+    middleware::{CountBytesBody, MapRequestBodyLayer, MapResponseBodyLayer, ServiceBuilder},
 };
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
@@ -25,10 +25,11 @@ use tokio::sync::mpsc::{Sender as MpscSender, channel as mpsc_channel};
 use tokio::sync::oneshot::{Sender as OneshotSender, channel as oneshot_channel};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::body::Body as TonicBody;
 use tonic::transport::Uri;
+use tonic::transport::server::Connected;
 use tonic::transport::{Error as TonicError, Server as TonicServer};
 use tonic::{Request, Response, Status as TonicStatus, Streaming};
-use tonic::{body::BoxBody, transport::server::Connected};
 use tower::Service;
 
 #[derive(Error, Debug)]
@@ -139,8 +140,8 @@ impl ConnectionHandler {
 
             // TODO: check whether we should set tcp_keepalive
             let serve_result = TonicServer::builder()
-                .layer(MapRequestBodyLayer::new(move |body| CountBytesBody::new(body, bytes_rx.clone()).boxed_unsync()))
-                .layer(MapResponseBodyLayer::new(move |body| CountBytesBody::new(body, bytes_tx.clone())))
+                .layer(MapRequestBodyLayer::new(move |body| tonic::body::Body::new(CountBytesBody::new(body, bytes_rx.clone()))))
+                .layer(MapResponseBodyLayer::new(move |body| tonic::body::Body::new(CountBytesBody::new(body, bytes_tx.clone()))))
                 .add_service(proto_server)
                 .serve_with_shutdown(serve_address.into(), termination_receiver.map(drop))
                 .await;
@@ -219,8 +220,8 @@ impl ConnectionHandler {
             .await?;
 
         let channel = ServiceBuilder::new()
-            .layer(MapResponseBodyLayer::new(move |body| CountBytesBody::new(body, self.counters.bytes_rx.clone())))
-            .layer(MapRequestBodyLayer::new(move |body| CountBytesBody::new(body, self.counters.bytes_tx.clone()).boxed_unsync()))
+            .layer(MapResponseBodyLayer::new(move |body| TonicBody::new(CountBytesBody::new(body, self.counters.bytes_rx.clone()))))
+            .layer(MapRequestBodyLayer::new(move |body| TonicBody::new(CountBytesBody::new(body, self.counters.bytes_tx.clone()))))
             .service(channel);
 
         let mut client = ProtoP2pClient::new(channel)
@@ -271,8 +272,8 @@ impl ConnectionHandler {
             build_libp2p_channel(stream, Duration::from_millis(Self::connect_timeout())).await.map_err(ConnectionError::IoError)?;
 
         let channel = ServiceBuilder::new()
-            .layer(MapResponseBodyLayer::new(move |body| CountBytesBody::new(body, self.counters.bytes_rx.clone())))
-            .layer(MapRequestBodyLayer::new(move |body| CountBytesBody::new(body, self.counters.bytes_tx.clone()).boxed_unsync()))
+            .layer(MapResponseBodyLayer::new(move |body| TonicBody::new(CountBytesBody::new(body, self.counters.bytes_rx.clone()))))
+            .layer(MapRequestBodyLayer::new(move |body| TonicBody::new(CountBytesBody::new(body, self.counters.bytes_tx.clone()))))
             .service(channel);
 
         let mut client = ProtoP2pClient::with_origin(channel, Uri::from_static("http://kaspa.libp2p"))
@@ -336,8 +337,8 @@ impl ConnectionHandler {
                 .max_decoding_message_size(P2P_MAX_MESSAGE_SIZE);
 
             let serve_result = configure_libp2p_server(TonicServer::builder())
-                .layer(MapRequestBodyLayer::new(move |body| CountBytesBody::new(body, bytes_rx.clone()).boxed_unsync()))
-                .layer(MapResponseBodyLayer::new(move |body| CountBytesBody::new(body, bytes_tx.clone())))
+                .layer(MapRequestBodyLayer::new(move |body| TonicBody::new(CountBytesBody::new(body, bytes_rx.clone()))))
+                .layer(MapResponseBodyLayer::new(move |body| TonicBody::new(CountBytesBody::new(body, bytes_tx.clone()))))
                 .add_service(proto_server)
                 .serve_with_incoming(incoming)
                 .await;
@@ -404,17 +405,17 @@ fn configure_libp2p_server(builder: TonicServer) -> TonicServer {
 type Libp2pGrpcService = Libp2pSendRequest;
 
 struct Libp2pSendRequest {
-    inner: HyperSendRequest<BoxBody>,
+    inner: HyperSendRequest<TonicBody>,
 }
 
-impl From<HyperSendRequest<BoxBody>> for Libp2pSendRequest {
-    fn from(inner: HyperSendRequest<BoxBody>) -> Self {
+impl From<HyperSendRequest<TonicBody>> for Libp2pSendRequest {
+    fn from(inner: HyperSendRequest<TonicBody>) -> Self {
         Self { inner }
     }
 }
 
-impl Service<http::Request<BoxBody>> for Libp2pSendRequest {
-    type Response = http::Response<BoxBody>;
+impl Service<http::Request<TonicBody>> for Libp2pSendRequest {
+    type Response = http::Response<TonicBody>;
     type Error = hyper::Error;
     type Future = Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -422,12 +423,12 @@ impl Service<http::Request<BoxBody>> for Libp2pSendRequest {
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: http::Request<BoxBody>) -> Self::Future {
+    fn call(&mut self, req: http::Request<TonicBody>) -> Self::Future {
         debug!("libp2p gRPC send request: {}", req.uri());
         let fut = self.inner.send_request(req);
         Box::pin(async move {
             match fut.await {
-                Ok(res) => Ok(res.map(tonic::body::boxed)),
+                Ok(res) => Ok(res.map(TonicBody::new)),
                 Err(err) => {
                     debug!("libp2p gRPC request failed: {err:?}");
                     Err(err)

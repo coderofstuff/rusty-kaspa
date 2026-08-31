@@ -54,6 +54,9 @@ pub struct Config {
 
     pub user_agent_comments: Vec<String>,
 
+    /// User agent admission rules.
+    pub user_agent_rules: Vec<String>,
+
     /// If undefined, sets it to 0.0.0.0
     pub p2p_listen_address: ContextualNetAddress,
 
@@ -71,6 +74,11 @@ pub struct Config {
 
     /// The number of days to keep data for
     pub retention_period_days: Option<f64>,
+
+    /// Enable DAGKNIGHT selected-parent / coloring. Off for GHOSTDAG-recorded
+    /// replay tests (goref JSON fixtures). Production on this branch keeps it on.
+    /// TODO[DK]: replace with ForkActivation when the activation height is defined.
+    pub enable_dagknight: bool,
 }
 
 impl Config {
@@ -90,6 +98,7 @@ impl Config {
             enable_unsynced_mining: false,
             enable_mainnet_mining: false,
             user_agent_comments: Default::default(),
+            user_agent_rules: Default::default(),
             externalip: None,
             p2p_listen_address: ContextualNetAddress::unspecified(),
             block_template_cache_lifetime: None,
@@ -99,6 +108,7 @@ impl Config {
             disable_upnp: false,
             ram_scale: 1.0,
             retention_period_days: None,
+            enable_dagknight: true,
         }
     }
 
@@ -173,6 +183,11 @@ impl ConfigBuilder {
 
     pub fn skip_adding_genesis(mut self) -> Self {
         self.config.process_genesis = false;
+        self
+    }
+
+    pub fn disable_dagknight(mut self) -> Self {
+        self.config.enable_dagknight = false;
         self
     }
 

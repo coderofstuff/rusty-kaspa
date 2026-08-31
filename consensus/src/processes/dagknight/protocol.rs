@@ -1,10 +1,9 @@
 use std::{cell::Cell, collections::HashMap, sync::Arc};
 
 use itertools::Itertools;
-use kaspa_consensus_core::{BlockHashMap, BlockHashSet, HashMapCustomHasher, KType};
+use kaspa_consensus_core::{BlockHashMap, BlockHashSet, KType};
 use kaspa_core::debug;
 use kaspa_hashes::Hash;
-use kaspa_math::Uint192;
 use parking_lot::RwLock;
 
 #[cfg(feature = "baseline-debugging")]
@@ -174,32 +173,15 @@ impl<
                 continue;
             }
 
-            // Check shortcut to identify weak groups at k=0
-            // This doesn't change conflict hierarchy - it just marks groups as weak
-            // for later processes to decide what to do with such weak groups
-            let (strong_groups, weak_groups) = self.check_weak_block_shortcut(&agreement_grouping, conflict_genesis);
-
             // Pick a "winner" among these subgroups
             let (winning_conflict_genesis, winning_subgroup) = {
-                if strong_groups.len() == 1 {
-                    // If there is a singular strong group, win with it immediately
-                    let key = strong_groups[0];
-                    let value = agreement_grouping[&key].clone();
+                let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup);
 
-                    (key, value)
+                if best_groups.len() > 1 {
+                    self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups)
                 } else {
-                    let best_groups = self.rank(conflict_genesis, &agreement_grouping, &curr_subgroup, &weak_groups);
-
-                    #[allow(clippy::style)]
-                    let final_winner = if best_groups.len() > 1 {
-                        self.tie_breaking(conflict_genesis, &curr_subgroup, &best_groups)
-                    } else {
-                        let single_winner = best_groups.into_iter().next().expect("best_groups should be non-empty after filtering");
-                        (single_winner.conflict_genesis, single_winner.subgroup)
-                    };
-
-                    // This will always be Some since curr_subgroup.len() > 1 and thus there is at least one subgroup
-                    final_winner
+                    let single_winner = best_groups.into_iter().next().expect("best_groups should be non-empty after filtering");
+                    (single_winner.conflict_genesis, single_winner.subgroup)
                 }
             };
 
@@ -284,26 +266,21 @@ impl<
 
     /// Tie-breaking rule in case of multiple winning subgroups with the same rank value.
     fn tie_breaking(&self, conflict_genesis: Hash, all_tips: &[Hash], subgroups: &[GroupMetadata]) -> (Hash, Arc<Vec<Hash>>) {
-        let tie_breaking_winner = {
-            // Always run this to compare stats:
-            debug!("Winning groups had rank k = {}", subgroups[0].k);
-            let mutual_k = subgroups[0].k;
+        debug!("Winning groups had rank k = {}", subgroups[0].k);
+        let mutual_k = subgroups[0].k;
 
-            let winning_index = DagknightTieBreaker::new(
-                self.dagknight_store.clone(),
-                self.headers_store.clone(),
-                self.relations_store.clone(),
-                self.reachability_service.clone(),
-            )
-            .tie_break(&TieBreakContext { conflict_genesis, all_tips, subgroups, k: mutual_k });
+        let winning_index = DagknightTieBreaker::new(
+            self.dagknight_store.clone(),
+            self.headers_store.clone(),
+            self.relations_store.clone(),
+            self.reachability_service.clone(),
+        )
+        .tie_break(&TieBreakContext { conflict_genesis, all_tips, subgroups, k: mutual_k });
 
-            let winning_conflict_genesis = subgroups[winning_index].conflict_genesis;
-            let winning_subgroup = subgroups[winning_index].subgroup.clone();
+        let winning_conflict_genesis = subgroups[winning_index].conflict_genesis;
+        let winning_subgroup = subgroups[winning_index].subgroup.clone();
 
-            (winning_conflict_genesis, winning_subgroup)
-        };
-
-        tie_breaking_winner
+        (winning_conflict_genesis, winning_subgroup)
     }
 
     /// Follows the Calculate-Rank algorithm in the DK paper
@@ -312,17 +289,12 @@ impl<
     /// in the caller is simply using blue_work + hash to break ties between subgroups.
     ///
     /// Returns an array of winning subgroups with their metadata
-    ///
-    /// `weak_groups` contains the conflict_genesis hashes of subgroups identified as weak by the shortcut.
-    /// These groups are skipped (return None) for all k values as a fast-path rejection.
     fn rank(
         &self,
         conflict_genesis: Hash,
         agreeing_subgroups: &HashMap<Hash, Arc<Vec<Hash>>>,
         all_tips: &[Hash],
-        weak_groups: &BlockHashSet,
     ) -> Vec<GroupMetadata> {
-        let weak_groups = weak_groups.clone();
         let mut group_map = Cell::new(agreeing_subgroups.clone());
         let best_groups_cell = Cell::new(vec![]);
         let evaluate = |k: KType| -> Option<()> {
@@ -331,13 +303,7 @@ impl<
                 .iter()
                 .filter_map(|(curr_conflict_genesis, subgroup)| {
                     // `subgroup` is an `&Arc<Vec<Hash>>` here; pass a `&[Hash]` to the colouring function
-                    // curr_conflict_genesis is the subgroup's own conflict_genesis (key in agreement_grouping)
-                    let selected_parent = if weak_groups.contains(curr_conflict_genesis) {
-                        None
-                    } else {
-                        self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), all_tips, k)
-                    };
-                    selected_parent.map(|selected_parent| {
+                    self.select_parent_from_k_colouring(conflict_genesis, subgroup.as_ref(), all_tips, k).map(|selected_parent| {
                         (
                             (*curr_conflict_genesis, subgroup.clone()),
                             GroupMetadata { conflict_genesis: *curr_conflict_genesis, subgroup: subgroup.clone(), k, selected_parent },
@@ -358,66 +324,6 @@ impl<
         let _search_result = RankSearcher::search(evaluate);
         // let (best_k) = search_result.map(|r| (r.k, r.result)).unwrap();
         best_groups_cell.take()
-    }
-
-    fn check_weak_block_shortcut(
-        &self,
-        agreement_grouping: &HashMap<Hash, Arc<Vec<Hash>>>,
-        conflict_genesis: Hash,
-    ) -> (Vec<Hash>, BlockHashSet) {
-        // First pass: compute k=0 blue_work for each subgroup
-        let subgroup_work: Vec<(Hash, Uint192)> = agreement_grouping
-            .iter()
-            .map(|(cg, subgroup)| {
-                let reachability_service = self.reachability_service.clone();
-                let relations_store = self.relations_store.read();
-                let relations_service =
-                    FutureIntersectRelations::new(relations_store.clone(), reachability_service.clone(), conflict_genesis);
-                let czm = ConflictZoneManager::new(
-                    0,
-                    conflict_genesis,
-                    self.dagknight_store.clone(),
-                    self.headers_store.clone(),
-                    relations_service,
-                    reachability_service.clone(),
-                );
-
-                // let nca = self.reachability_service.get_next_chain_ancestor(subgroup[0], *cg);
-                czm.fill_zone_data(subgroup, Some(*cg));
-
-                let subgroup_limited_virtual = czm.k_colouring(subgroup, 0, None);
-                debug!("cg: {} | subgroup: {} | blue_work: {}", conflict_genesis, cg, subgroup_limited_virtual.blue_work.as_u64());
-
-                (*cg, subgroup_limited_virtual.blue_work)
-            })
-            .collect_vec();
-
-        // Find max blue_work among all subgroups
-        let max_blue_work = subgroup_work.iter().map(|(_, bw)| bw).max().expect("subgroup_work should not be empty");
-        let threshold = *max_blue_work / 10;
-
-        // Collect weak subgroups (subgroups whose blue_work < threshold)
-        let mut weak_groups = BlockHashSet::new();
-        let mut strong_groups = Vec::new();
-
-        for (cg, blue_work) in &subgroup_work {
-            if *blue_work < threshold {
-                debug!(
-                    "SHORTCUT cg: {} | subgroup cg: {} | WEAK | blue_work: {} | threshold: {}",
-                    conflict_genesis,
-                    cg,
-                    blue_work.as_u64(),
-                    threshold.as_u64()
-                );
-                weak_groups.insert(*cg);
-            } else {
-                strong_groups.push(*cg);
-            }
-        }
-
-        debug!("SHORTCUT cg: {} | {} weak groups out of {} total", conflict_genesis, weak_groups.len(), subgroup_work.len());
-
-        (strong_groups, weak_groups)
     }
 
     /// Applies a coloring to the conflict zone, and determines if the
@@ -750,10 +656,6 @@ mod tests {
         test_helpers::generate_dot_with_chain,
     };
 
-    struct DagKnightTestResult {
-        virtual_gd_data: Arc<GhostdagData>,
-    }
-
     /// Block data parsed from a JSON fixture for conflict zone tie-breaking tests.
     struct TestBlock {
         hash: Hash,
@@ -803,7 +705,7 @@ mod tests {
     /// 4. Generates a DOT file over that GD store showing the SPC and blocks colored
     ///    according to the global GD store
     #[allow(clippy::arc_with_non_send_sync)]
-    fn run_dagknight_test(k_max: KType, plan: DagPlan, base_name: &str) -> DagKnightTestResult {
+    fn run_dagknight_test(k_max: KType, plan: DagPlan, base_name: &str) {
         let genesis_hash = plan.genesis.into();
 
         let dk_map = RefCell::new(HashMap::new());
@@ -906,8 +808,7 @@ mod tests {
         let gd_data = coloring_gd_manager.incremental_coloring(&tip_hashes, selected_parent);
         println!("virtual_block: {} | sp: {}", virtual_block.hash, selected_parent);
         builder.add_block_with_selected_parent(virtual_block, selected_parent);
-        let virtual_gd_data = Arc::new(gd_data);
-        coloring_ghostdag_store.insert(virtual_hash, virtual_gd_data.clone()).unwrap();
+        coloring_ghostdag_store.insert(virtual_hash, Arc::new(gd_data)).unwrap();
 
         // let blues = BlockHashSet::new();
         let mut reds = BlockHashSet::new();
@@ -934,8 +835,6 @@ mod tests {
         all_blocks.extend(plan.blocks.clone());
         all_blocks.push((virtual_hash.to_le_u64()[3], tips.iter().map(|h| h.to_le_u64()[3]).collect_vec()));
         generate_dot_with_chain(&all_blocks, &chain_nodes, reds, base_name).expect("Failed to generate DOT file");
-
-        DagKnightTestResult { virtual_gd_data }
     }
 
     #[test]
@@ -1217,39 +1116,6 @@ mod tests {
         let mut hex = [b'0'; 64];
         hex[..s.len()].copy_from_slice(s.as_bytes());
         Hash::from_str(std::str::from_utf8(&hex).unwrap()).expect("Invalid hash string")
-    }
-
-    /// This test verifies that the shortcut works in scenarios where there are 3+ subgroups, only
-    /// a single one is considered "weak". Mainly it ensures that the semantic behavior of trying to
-    /// determine which of the remaining "strong" subgroups win in a full DK run is intact.
-    #[test]
-    fn test_multi_strong_single_weak_scenario() {
-        let json_filename = "test_multi_strong_single_weak_scenario.json";
-        let file = File::open(&json_filename).expect("Unable to open captured failure JSON");
-        let json_data: serde_json::Value = serde_json::from_reader(file).expect("Unable to parse JSON");
-
-        let genesis = json_data["genesis"].as_u64().expect("Genesis is not a number");
-        let blocks = json_data["blocks"].as_array().expect("Blocks is not an array");
-
-        let dag_plan = DagPlan {
-            genesis,
-            blocks: blocks
-                .iter()
-                .map(|block| {
-                    let id = block["id"].as_u64().unwrap();
-                    let parents = block["parents"].as_array().unwrap().iter().map(|p| p.as_u64().unwrap()).collect();
-                    (id, parents)
-                })
-                .collect(),
-        };
-
-        println!("Loaded captured DAG: genesis={}, blocks={}", genesis, dag_plan.blocks.len());
-
-        // This should trigger the assertion failure between shortcut and pure (before fix)
-        // or pass (after fix)
-        let test_result = run_dagknight_test(5, dag_plan, "shortcut_failure_repro");
-
-        assert_eq!(test_result.virtual_gd_data.selected_parent, 1001.into(), "Virtual selected parent should be 1001 for this test");
     }
 
     /// Duplicate parents [T1, T1] must NOT panic the DagKnight algorithm.

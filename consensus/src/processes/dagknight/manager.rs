@@ -355,31 +355,12 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
     }
 
     pub fn find_selected_parent(&self, parents: impl IntoIterator<Item = Hash>) -> Hash {
-        // TODO[DK]: Debugging instrumentation. Should be removed after
-        let mut curr_parents = vec![];
-        let mut kept = vec![];
-        let selected_parent_opt = parents
+        let selected_parent = parents
             .into_iter()
-            .filter_map(|parent| {
-                curr_parents.push(parent);
-                self.get_blue_work(parent)
-                    .map(|blue_work| {
-                        let sb = SortableBlock { hash: parent, blue_work };
-                        kept.push(parent);
-                        sb
-                    })
-                    .ok()
-            })
-            .max();
-
-        if selected_parent_opt.is_none() {
-            panic!(
-                "cg: {} | k: {} | fs: {} | no selected parent | kept: {:?} | all: {:?}",
-                self.root, self.k, self.free_search, kept, curr_parents
-            );
-        }
-
-        let selected_parent = selected_parent_opt.unwrap().hash;
+            .filter_map(|parent| self.get_blue_work(parent).map(|blue_work| SortableBlock { hash: parent, blue_work }).ok())
+            .max()
+            .unwrap()
+            .hash;
 
         if !self.free_search {
             assert!(
@@ -426,9 +407,11 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
                 continue;
             }
 
+            // Committed search stays on the NCA chain when one is provided, otherwise
+            // on the conflict-genesis chain. Free search walks DAG ancestry (no skip).
             if !self.free_search
                 && self.root != curr
-                && !next_chain_ancestor.is_none_or(|nca| self.reachability_service.is_chain_ancestor_of(nca, curr))
+                && !self.reachability_service.is_chain_ancestor_of(next_chain_ancestor.unwrap_or(self.root), curr)
             {
                 continue;
             }
@@ -509,24 +492,6 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
 
                 // For free_search, select from all parents; for committed search, only from agreeing parents
                 let selected_parent = if self.free_search {
-                    // all parents must already exist assuming topological sorting is honored, so finding one that doesn't
-                    // means an error in processing and must be diagnosed
-                    parents.iter().for_each(|&parent| {
-                        if !self.has(parent) {
-                            last_known_tips.iter().for_each(|&lk_tip| {
-                                if self.reachability_service.is_dag_ancestor_of(parent, lk_tip) {
-                                    println!(
-                                        "cg: {} | k: {} | fs: {} | nca: {:?} | parent {} is in the past of a last known tip {}",
-                                        self.root, self.k, self.free_search, next_chain_ancestor, parent, lk_tip
-                                    );
-                                }
-                            });
-                            panic!(
-                                "cg: {} | k: {} | fs: {} | nca: {:?} | last_known_tips: {:?} | Expected agreeing parent to have coloring data | current: {:#?} | missing_parent: {:?} | curr_parents: {:#?}",
-                                self.root, self.k, self.free_search, next_chain_ancestor, last_known_tips, current_hash, parent, parents
-                            );
-                        }
-                    });
                     self.find_selected_parent(parents.iter().copied())
                 } else {
                     let next_chain_ancestor_of_current = next_chain_ancestor.unwrap();
@@ -552,8 +517,7 @@ impl<C: DagknightStore + DagknightStoreReader, O: HeaderStoreReader, D: Relation
                     if let Some(&parent) = agreeing_parents
                         .iter()
                         .filter(|&&parent| !self.has(parent))
-                        .filter(|&&parent| tips.iter().any(|&tip| self.reachability_service.is_chain_ancestor_of(parent, tip)))
-                        .next()
+                        .find(|&&parent| tips.iter().any(|&tip| self.reachability_service.is_chain_ancestor_of(parent, tip)))
                     {
                         last_known_tips
                             .iter()
@@ -649,6 +613,10 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::fs::File;
     use std::str::FromStr;
+
+    // JSON fixture rows: (id, parents, blue_work, bits, blue_score, daa_score, selected_parent)
+    type ConflictLktTestBlock = (Hash, Vec<Hash>, Uint192, u32, u64, u64, Hash);
+    type CapturedZoneTestBlock = (Hash, Vec<Hash>, Uint192, u32, u64, u64, Option<Hash>);
 
     #[test]
     fn test_k_colouring_lock_key_constructors() {
@@ -1034,7 +1002,7 @@ mod tests {
 
         let blocks = json_data["blocks"].as_array().expect("Blocks is not an array");
 
-        let test_blocks: Vec<(Hash, Vec<Hash>, Uint192, u32, u64, u64, Hash)> = blocks
+        let test_blocks: Vec<ConflictLktTestBlock> = blocks
             .iter()
             .map(|block| {
                 let id = Hash::from_str(block["id"].as_str().unwrap()).unwrap();
@@ -1078,7 +1046,7 @@ mod tests {
         // let tips = vec![];
         println!("lkt base: {:?}", czm.find_last_known_tips(&tips, Some(nca_2)).0);
         czm.fill_zone_data(
-            &vec![Hash::from_str("b2c22e6c802483e51e37d22a782a5a98379f39328618780e96d195eefbfa9f3e").unwrap()],
+            &[Hash::from_str("b2c22e6c802483e51e37d22a782a5a98379f39328618780e96d195eefbfa9f3e").unwrap()],
             Some(nca_2),
         );
         println!("lkt before nca_1: {:?}", czm.find_last_known_tips(&tips, Some(nca_1)).0);
@@ -1107,7 +1075,7 @@ mod tests {
         let conflict_genesis = Hash::from_str(json_data["conflict_genesis"].as_str().unwrap()).unwrap();
 
         // (id, parents, blue_work, bits, blue_score, daa_score, selected_parent)
-        let mut test_blocks: Vec<(Hash, Vec<Hash>, Uint192, u32, u64, u64, Option<Hash>)> = json_data["blocks"]
+        let mut test_blocks: Vec<CapturedZoneTestBlock> = json_data["blocks"]
             .as_array()
             .unwrap()
             .iter()
